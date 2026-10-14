@@ -2,10 +2,36 @@
 
 /**
  * Forge CLI npm wrapper.
- * Enables running Forge globally via `npx github:KIRTAN0902/forge` or `npx @kirtan0902/forge`.
+ * Enables running Forge globally via `npx @kirtan0902/forge` or `npx github:KIRTAN0902/forge`.
  */
 
 const { spawn, spawnSync } = require("child_process");
+const path = require("path");
+
+function resolveRealForgeExecutable() {
+  try {
+    const isWin = process.platform === "win32";
+    const checkCmd = isWin ? "where.exe" : "which";
+    const res = spawnSync(checkCmd, ["forge"], { encoding: "utf8" });
+    if (res.status === 0 && res.stdout) {
+      const lines = res.stdout.trim().split(/\r?\n/);
+      for (const line of lines) {
+        const trimmed = line.trim();
+        // Ignore npm shims and this wrapper itself
+        if (
+          !trimmed.includes("node_modules") &&
+          !trimmed.includes("_npx") &&
+          !trimmed.endsWith("forge.js")
+        ) {
+          return trimmed;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
 function resolveExecutable(cmd) {
   try {
@@ -14,7 +40,7 @@ function resolveExecutable(cmd) {
     const res = spawnSync(checkCmd, [cmd], { encoding: "utf8" });
     if (res.status === 0 && res.stdout) {
       const lines = res.stdout.trim().split(/\r?\n/);
-      return lines[0] || null;
+      return lines[0] ? lines[0].trim() : null;
     }
   } catch {
     return null;
@@ -23,9 +49,11 @@ function resolveExecutable(cmd) {
 }
 
 function runCommand(command, args) {
-  const exe = resolveExecutable(command) || command;
-  const child = spawn(exe, args, {
+  const isWin = process.platform === "win32";
+  // On Windows, if command ends in .cmd or .bat, or no extension, spawn with shell: false if .exe, else properly
+  const child = spawn(command, args, {
     stdio: "inherit",
+    shell: isWin && !command.endsWith(".exe"),
   });
 
   child.on("exit", (code, signal) => {
@@ -43,30 +71,34 @@ function runCommand(command, args) {
 function main() {
   const args = process.argv.slice(2);
 
-  // 1. If forge binary is already installed on PATH, run it directly
-  if (resolveExecutable("forge")) {
-    runCommand("forge", args);
+  // 1. If real forge binary is installed on system (via uv tool install or pipx), run it
+  const realForge = resolveRealForgeExecutable();
+  if (realForge) {
+    runCommand(realForge, args);
     return;
   }
 
-  // 2. If uvx / uv is available, run directly from GitHub repository
-  if (resolveExecutable("uvx")) {
-    runCommand("uvx", ["--from", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
+  // 2. If uvx / uv is available, execute through uv
+  const uvxExe = resolveExecutable("uvx");
+  if (uvxExe) {
+    runCommand(uvxExe, ["--from", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
     return;
   }
 
-  if (resolveExecutable("uv")) {
-    runCommand("uv", ["tool", "run", "--from", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
+  const uvExe = resolveExecutable("uv");
+  if (uvExe) {
+    runCommand(uvExe, ["tool", "run", "--from", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
     return;
   }
 
   // 3. Fallback to pipx if available
-  if (resolveExecutable("pipx")) {
-    runCommand("pipx", ["run", "--spec", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
+  const pipxExe = resolveExecutable("pipx");
+  if (pipxExe) {
+    runCommand(pipxExe, ["run", "--spec", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
     return;
   }
 
-  // 4. Fallback: prompt user to install uv or python
+  // 4. Prompt user to install uv
   console.error("\x1b[31m[forge]\x1b[0m Forge requires Python 3.11+ and uv to run.");
   console.error("Install uv quickly:\n");
   if (process.platform === "win32") {
