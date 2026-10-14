@@ -19,6 +19,7 @@ from forge.cli.credentials import (
     PROVIDER_METADATA,
     get_provider_api_key,
     init_credentials_env,
+    load_stored_credentials,
     save_stored_credentials,
 )
 from forge.config.loader import load_config
@@ -235,75 +236,254 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
     print_roles_table(config, console)
 
 
-def configure_single_role(project_dir: Path, role: str, console: Console) -> None:
-    """Prompt and update model and provider for a single agent role."""
+def configure_single_role(project_dir: Path, role: str, console: Console) -> str | None:
+    """Prompt and update model and provider for a single agent role via dropdown."""
+    from forge.cli.model_catalog import prompt_model_dropdown
     from forge.config.roles import set_role_model
 
+    config = load_config(project_dir)
     role_title = role.title()
-    console.print(f"\n[bold cyan]Configure {role_title} Agent Model:[/bold cyan]")
-    provider, _, default_model = _prompt_provider_and_key(console, f"{role_title} Agent")
-    model = Prompt.ask(f"{role_title} Model ID", default=default_model, console=console).strip()
+    current_profile = config.roles.get(role)
+    current_model = "default"
+    current_provider = "nvidia"
+    if current_profile and current_profile.model in config.models:
+        prof = config.models[current_profile.model]
+        current_model = prof.model
+        current_provider = prof.provider
 
-    set_role_model(project_dir, role, model=model, provider=provider)
-    console.print(f"[bold green]✔ Updated {role_title} model to {provider}/{model}[/bold green]\n")
+    console.print(f"\n[bold cyan]1. Select Provider for {role_title} Agent:[/bold cyan]")
+    provider, api_key, default_model = _prompt_provider_and_key(console, f"{role_title} Agent")
+
+    # Get base_url if any
+    base_url = None
+    if provider in config.providers:
+        base_url = config.providers[provider].base_url
+
+    console.print(f"\n[bold cyan]2. Choose Model from {provider.upper()} Dropdown:[/bold cyan]")
+    chosen_model = prompt_model_dropdown(
+        role_label=role_title,
+        provider=provider,
+        current_model=current_model if provider == current_provider else default_model,
+        console=console,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    set_role_model(project_dir, role, model=chosen_model, provider=provider)
+    console.print(f"\n[bold green]✔ Updated {role_title} model to {provider}/{chosen_model}[/bold green]\n")
+    Prompt.ask("Press Enter to continue...", console=console)
+    return f"{role_title} ➔ [cyan]{chosen_model}[/cyan] ({provider})"
 
 
-def run_model_menu(project_dir: Path, console: Console) -> None:
-    """Interactive Model Configuration Menu (/model).
+def _quick_setup_all(project_dir: Path, console: Console) -> str | None:
+    """Prompt provider and model dropdown to assign across all agents."""
+    from forge.cli.model_catalog import prompt_model_dropdown
 
-    Allows developers to inspect and selectively reconfigure models for:
-    - Orchestrator (Brainstorming & Technical Lead)
-    - Planner (Architecture & Requirements)
-    - Executor (Code Writing & Tools)
-    - QA (Testing & Verification)
+    console.print("\n[bold]Quick Setup: Single Model for All Agents[/bold]")
+    provider, api_key, default_model = _prompt_provider_and_key(console, "All Agents")
+    config = load_config(project_dir)
+    base_url = config.providers[provider].base_url if provider in config.providers else None
+
+    chosen_model = prompt_model_dropdown(
+        role_label="All Agents",
+        provider=provider,
+        current_model=default_model,
+        console=console,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    save_single_model_preset(project_dir, provider=provider, model=chosen_model)
+    console.print(f"\n[bold green]✔ Configured all agents with {provider}/{chosen_model}[/bold green]\n")
+    Prompt.ask("Press Enter to continue...", console=console)
+    return f"All Agents ➔ [cyan]{chosen_model}[/cyan] ({provider})"
+
+
+def run_model_menu(project_dir: Path, console: Console) -> list[str]:
+    """Interactive Model Configuration Menu (/model) running in an overlay screen.
+
+    Returns the list of changes made during the session so chat can display them.
     """
-    while True:
-        init_credentials_env()
-        config = load_config(project_dir)
-        console.print()
-        print_roles_table(config, console)
+    changes: list[str] = []
 
-        menu_text = (
-            "[bold cyan]Select an option to configure:[/bold cyan]\n\n"
-            "  [bold cyan]1[/bold cyan] 🎯 [bold]Orchestrator[/bold]  (Brainstorming, tech lead, routing)\n"
-            "  [bold cyan]2[/bold cyan] 📐 [bold]Planner[/bold]       (Requirements, architecture, decomposition)\n"
-            "  [bold cyan]3[/bold cyan] ⚡ [bold]Executor[/bold]      (Code writing, tool use, terminal)\n"
-            "  [bold cyan]4[/bold cyan] 🛡️  [bold]QA[/bold]            (Test suites, code review, auditing)\n"
-            "  [bold cyan]5[/bold cyan] ⚡ [bold]Quick Setup[/bold]   (Assign 1 model to ALL agents)\n"
-            "  [bold cyan]6[/bold cyan] 🧙 [bold]Full Setup Wizard[/bold] (Step-by-step multi-role setup)\n"
-            "  [bold cyan]0[/bold cyan] ↩️  [bold]Done / Return to Chat[/bold]"
-        )
-        console.print(
-            Panel(menu_text, border_style="cyan", title="Forge Model Configuration Menu (/model)")
-        )
+    def _menu_loop() -> None:
+        while True:
+            init_credentials_env()
+            config = load_config(project_dir)
+            console.clear()
+            print_roles_table(config, console)
 
-        choice = Prompt.ask(
-            "Select option",
-            choices=["0", "1", "2", "3", "4", "5", "6", "exit", "quit", "q"],
-            default="0",
-            console=console,
-        )
-
-        if choice in {"0", "exit", "quit", "q"}:
-            console.print("[dim]Returned from model configuration menu.[/dim]\n")
-            break
-
-        if choice == "1":
-            configure_single_role(project_dir, "orchestrator", console)
-        elif choice == "2":
-            configure_single_role(project_dir, "planner", console)
-        elif choice == "3":
-            configure_single_role(project_dir, "executor", console)
-        elif choice == "4":
-            configure_single_role(project_dir, "qa", console)
-        elif choice == "5":
-            console.print("\n[bold]Quick Setup: Single Model for All Agents:[/bold]")
-            provider, _, default_model = _prompt_provider_and_key(console)
-            model = Prompt.ask("Model ID", default=default_model, console=console).strip()
-            save_single_model_preset(project_dir, provider=provider, model=model)
-            console.print(
-                f"\n[bold green]✔ Configured all agents with {provider}/{model}[/bold green]\n"
+            menu_text = (
+                "[bold cyan]Select an agent role to configure model:[/bold cyan]\n\n"
+                "  [bold cyan]1[/bold cyan] 🎯 [bold]Orchestrator[/bold]  (Brainstorming, tech lead, routing)\n"
+                "  [bold cyan]2[/bold cyan] 📐 [bold]Planner[/bold]       (Requirements, architecture, decomposition)\n"
+                "  [bold cyan]3[/bold cyan] ⚡ [bold]Executor[/bold]      (Code writing, tool use, terminal)\n"
+                "  [bold cyan]4[/bold cyan] 🛡️  [bold]QA[/bold]            (Test suites, code review, auditing)\n"
+                "  [bold cyan]5[/bold cyan] ⚡ [bold]Quick Setup[/bold]   (Assign 1 model to ALL agents)\n"
+                "  [bold cyan]6[/bold cyan] 🧙 [bold]Full Setup Wizard[/bold] (Step-by-step multi-role setup)\n"
+                "  [bold cyan]0[/bold cyan] ↩️  [bold]Done / Return to Chat[/bold]"
             )
-        elif choice == "6":
-            run_roles_wizard(project_dir, console)
+            console.print(
+                Panel(menu_text, border_style="cyan", title="Forge Model Configuration Menu (/model)")
+            )
+
+            choice = Prompt.ask(
+                "Select option",
+                choices=["0", "1", "2", "3", "4", "5", "6", "exit", "quit", "q"],
+                default="0",
+                console=console,
+            )
+
+            if choice in {"0", "exit", "quit", "q"}:
+                break
+
+            if choice in {"1", "2", "3", "4"}:
+                role_names = {"1": "orchestrator", "2": "planner", "3": "executor", "4": "qa"}
+                role = role_names[choice]
+                ch = configure_single_role(project_dir, role, console)
+                if ch:
+                    changes.append(ch)
+            elif choice == "5":
+                ch = _quick_setup_all(project_dir, console)
+                if ch:
+                    changes.append(ch)
+            elif choice == "6":
+                run_roles_wizard(project_dir, console)
+                changes.append("Multi-role wizard completed")
+
+    try:
+        with console.screen():
+            _menu_loop()
+    except Exception:
+        # Fallback if terminal does not support alternate screen buffer
+        _menu_loop()
+
+    return changes
+
+
+def run_provider_menu(project_dir: Path, console: Console) -> list[str]:
+    """Interactive Provider & URI/URL Configuration Menu (/provider).
+
+    Allows changing providers, configuring API keys, and setting custom Base URIs/URLs.
+    """
+    changes: list[str] = []
+
+    def _menu_loop() -> None:
+        while True:
+            init_credentials_env()
+            config = load_config(project_dir)
+            console.clear()
+
+            table = Table(title="Configured Model Providers & Base URIs", border_style="cyan")
+            table.add_column("No.", style="bold cyan", width=4, justify="right")
+            table.add_column("Provider", style="bold white")
+            table.add_column("Base URI / URL", style="cyan")
+            table.add_column("API Key Status", justify="center")
+
+            prov_items = [
+                ("1", "nvidia", "NVIDIA NIM"),
+                ("2", "openrouter", "OpenRouter"),
+                ("3", "openai", "OpenAI"),
+                ("4", "ollama", "Ollama (Local)"),
+                ("5", "custom", "Custom OpenAI-Compatible Endpoint"),
+            ]
+
+            stored = load_stored_credentials() or {}
+            stored_provs = stored.get("providers", {})
+
+            for num, p_key, p_label in prov_items:
+                api_key = get_provider_api_key(p_key)
+                custom_url = None
+                if p_key in config.providers:
+                    custom_url = config.providers[p_key].base_url
+                elif isinstance(stored_provs, dict) and p_key in stored_provs:
+                    custom_url = stored_provs[p_key].get("base_url")
+
+                base_url = custom_url or PROVIDER_METADATA.get(p_key, {}).get("base_url", "none")
+
+                if p_key == "ollama":
+                    key_stat = "[green]✔ Local (No key needed)[/green]"
+                elif api_key:
+                    masked = f"{api_key[:5]}...{api_key[-4:]}" if len(api_key) > 9 else "****"
+                    key_stat = f"[green]✔ Configured ({masked})[/green]"
+                else:
+                    key_stat = "[red]✖ Not configured[/red]"
+
+                table.add_row(num, p_label, base_url, key_stat)
+
+            console.print(table)
+
+            menu_panel = (
+                "[bold cyan]Select a provider to configure API Key or custom URI/URL:[/bold cyan]\n\n"
+                "  [cyan]1[/cyan] NVIDIA NIM (Nemotron 3 Super, Llama 3.3, DeepSeek)\n"
+                "  [cyan]2[/cyan] OpenRouter (Claude 3.7, GPT-4o, Gemini, DeepSeek)\n"
+                "  [cyan]3[/cyan] OpenAI (GPT-4o, o1, o3-mini)\n"
+                "  [cyan]4[/cyan] Ollama (Local server on http://localhost:11434)\n"
+                "  [cyan]5[/cyan] Custom Endpoint (vLLM, LMStudio, LiteLLM, Groq)\n"
+                "  [cyan]0[/cyan] ↩️  Done / Return to Chat"
+            )
+            console.print(Panel(menu_panel, border_style="cyan", title="Forge Provider Menu (/provider)"))
+
+            choice = Prompt.ask(
+                "Choose provider to configure",
+                choices=["0", "1", "2", "3", "4", "5", "exit", "quit", "q"],
+                default="0",
+                console=console,
+            )
+
+            if choice in {"0", "exit", "quit", "q"}:
+                break
+
+            p_map = {"1": "nvidia", "2": "openrouter", "3": "openai", "4": "ollama", "5": "custom"}
+            provider = p_map[choice]
+            meta = PROVIDER_METADATA.get(provider, {})
+            name = meta.get("name", provider.title())
+
+            console.print(f"\n[bold cyan]Configuring {name}:[/bold cyan]")
+
+            # 1. Base URL / URI prompt
+            default_url = meta.get("base_url", "http://localhost:8000/v1")
+            existing_url = default_url
+            if provider in config.providers:
+                existing_url = config.providers[provider].base_url
+            elif isinstance(stored_provs, dict) and provider in stored_provs:
+                existing_url = stored_provs[provider].get("base_url", default_url)
+
+            new_url = Prompt.ask(
+                f"Base URI / URL for {name}",
+                default=existing_url,
+                console=console,
+            ).strip()
+
+            # 2. API Key prompt (except ollama)
+            existing_key = get_provider_api_key(provider) or ""
+            api_key = existing_key
+            if provider != "ollama":
+                if existing_key:
+                    masked = f"{existing_key[:6]}...{existing_key[-4:]}" if len(existing_key) > 10 else "****"
+                    console.print(f"[dim]Existing key detected: {masked}[/dim]")
+                    keep = Confirm.ask("Keep existing API key?", default=True, console=console)
+                    if not keep:
+                        api_key = Prompt.ask("New API Key", password=True, console=console).strip()
+                else:
+                    api_key = Prompt.ask("Paste API Key", password=True, console=console).strip()
+
+            from forge.config.roles import set_provider_config
+
+            save_stored_credentials(provider, api_key=api_key, base_url=new_url)
+            set_provider_config(project_dir, provider, base_url=new_url, api_key_env=meta.get("env"))
+            init_credentials_env()
+
+            change_str = f"Provider: [bold]{name}[/bold] (URL: {new_url})"
+            changes.append(change_str)
+            console.print(f"\n[bold green]✔ Successfully updated {change_str}[/bold green]\n")
+            Prompt.ask("Press Enter to continue...", console=console)
+
+    try:
+        with console.screen():
+            _menu_loop()
+    except Exception:
+        _menu_loop()
+
+    return changes
 

@@ -305,7 +305,11 @@ def models_config_cmd(
     """Interactively configure models for orchestrator, planner, executor, and qa."""
     from forge.cli.roles_wizard import run_model_menu
 
-    run_model_menu(path.resolve(), console)
+    changes = run_model_menu(path.resolve(), console)
+    if changes:
+        console.print("[bold green]✔ Model updated:[/bold green]")
+        for ch in changes:
+            console.print(f"  • {ch}")
 
 
 roles_app = typer.Typer(help="Inspect and configure agent role assignments.", no_args_is_help=False)
@@ -344,7 +348,33 @@ def roles_config_cmd(
     """Interactively configure agent models (Orchestrator, Planner, Executor, QA)."""
     from forge.cli.roles_wizard import run_model_menu
 
-    run_model_menu(path.resolve(), console)
+    changes = run_model_menu(path.resolve(), console)
+    if changes:
+        console.print("[bold green]✔ Model updated:[/bold green]")
+        for ch in changes:
+            console.print(f"  • {ch}")
+
+
+@app.command("provider")
+def provider_cmd(
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Interactively configure providers, API keys, and custom Base URIs/URLs."""
+    from forge.cli.roles_wizard import run_provider_menu
+
+    changes = run_provider_menu(path.resolve(), console)
+    if changes:
+        console.print("[bold green]✔ Provider updated:[/bold green]")
+        for ch in changes:
+            console.print(f"  • {ch}")
+
+
+@app.command("providers", hidden=True)
+def providers_cmd(
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Alias for 'forge provider'."""
+    provider_cmd(path=path)
 
 
 @roles_app.command("set")

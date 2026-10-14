@@ -148,7 +148,7 @@ class TestRolesConfiguration:
             run_model_menu(tmp_path, console)
 
     def test_configure_single_role(self, tmp_path: Path) -> None:
-        """Test configure_single_role updates orchestrator and planner models."""
+        """Test configure_single_role updates orchestrator and planner models via dropdown."""
         from rich.console import Console
         from forge.cli.roles_wizard import configure_single_role
 
@@ -156,7 +156,7 @@ class TestRolesConfiguration:
         console = Console(record=True)
 
         with (
-            patch("rich.prompt.Prompt.ask", side_effect=["1", "nemotron-custom"]),
+            patch("rich.prompt.Prompt.ask", side_effect=["1", "c", "nemotron-custom", ""]),
             patch("rich.prompt.Confirm.ask", return_value=True),
         ):
             configure_single_role(tmp_path, "orchestrator", console)
@@ -164,4 +164,25 @@ class TestRolesConfiguration:
         config = load_config(tmp_path)
         assert config.roles["orchestrator"].model == "orchestrator_model"
         assert config.models["orchestrator_model"].model == "nemotron-custom"
+
+    def test_set_provider_config_and_menu(self, tmp_path: Path) -> None:
+        """Test set_provider_config helper and run_provider_menu."""
+        from rich.console import Console
+        from forge.cli.roles_wizard import run_provider_menu
+        from forge.config.roles import set_provider_config
+
+        set_provider_config(
+            tmp_path,
+            provider="custom",
+            base_url="http://custom-host:8080/v1",
+            api_key_env="CUSTOM_API_KEY",
+        )
+        config = load_config(tmp_path)
+        assert "custom" in config.providers
+        assert config.providers["custom"].base_url == "http://custom-host:8080/v1"
+
+        console = Console(record=True)
+        with patch("rich.prompt.Prompt.ask", return_value="0"):
+            changes = run_provider_menu(tmp_path, console)
+            assert changes == []
 

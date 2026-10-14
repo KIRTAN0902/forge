@@ -57,6 +57,8 @@ HELP_COMMANDS = [
     ("/model", "Open model menu to configure Orchestrator, Planner, Executor, and QA"),
     ("/models", "Alias for /model"),
     ("/roles", "Alias for /model"),
+    ("/provider", "Configure model providers, API keys, and custom Base URIs/URLs"),
+    ("/providers", "Alias for /provider"),
     ("/run", "Directly trigger multi-agent planning & execution on a request"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
@@ -462,10 +464,30 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print("[green]Credentials updated.[/green]")
             continue
 
+        if lower_input in {"/provider", "/providers"}:
+            from forge.cli.roles_wizard import run_provider_menu
+
+            changes = run_provider_menu(path, console)
+            if changes:
+                console.print("\n[bold green]✔ Provider updated:[/bold green]")
+                for ch in changes:
+                    console.print(f"  • {ch}")
+            else:
+                console.print("\n[dim]No provider changes made.[/dim]")
+            console.print()
+            continue
+
         if lower_input in {"/model", "/models", "/roles", "/role"}:
             from forge.cli.roles_wizard import run_model_menu
 
-            run_model_menu(path, console)
+            changes = run_model_menu(path, console)
+            if changes:
+                console.print("\n[bold green]✔ Model updated:[/bold green]")
+                for ch in changes:
+                    console.print(f"  • {ch}")
+            else:
+                console.print("\n[dim]No model changes made.[/dim]")
+            console.print()
             continue
 
         if lower_input == "/status":

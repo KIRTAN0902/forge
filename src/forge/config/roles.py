@@ -251,3 +251,33 @@ def set_role_model(
     data["roles"] = roles
 
     return _save_yaml_dict(project_dir, data)
+
+
+def set_provider_config(
+    project_dir: Path,
+    provider: str,
+    base_url: str | None = None,
+    api_key_env: str | None = None,
+    api_key: str | None = None,
+) -> Path:
+    """Assign or update a provider configuration (base_url, api_key_env, api_key) in forge.yaml."""
+    data = _load_yaml_dict(project_dir)
+    data["version"] = 1
+    providers = data.get("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+
+    prov_dict = providers.get(provider, {})
+    if not isinstance(prov_dict, dict):
+        prov_dict = {}
+
+    if base_url:
+        prov_dict["base_url"] = base_url
+    if api_key_env:
+        prov_dict["api_key_env"] = api_key_env
+    if api_key:
+        prov_dict["api_key"] = api_key
+
+    providers[provider] = prov_dict
+    data["providers"] = providers
+    return _save_yaml_dict(project_dir, data)
