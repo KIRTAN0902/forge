@@ -54,11 +54,8 @@ ASCII_LOGO = r"""
 
 HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
-    ("/model", "Open model menu to configure Orchestrator, Planner, Executor, and QA"),
-    ("/models", "Alias for /model"),
-    ("/roles", "Alias for /model"),
-    ("/provider", "Configure model providers, API keys, and custom Base URIs/URLs"),
-    ("/providers", "Alias for /provider"),
+    ("/models", "Interactive popup to select and configure agent models"),
+    ("/provider", "Connect and configure model providers, API keys, and custom Base URIs/URLs"),
     ("/run", "Directly trigger multi-agent planning & execution on a request"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
@@ -464,7 +461,7 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print("[green]Credentials updated.[/green]")
             continue
 
-        if lower_input in {"/provider", "/providers"}:
+        if lower_input == "/provider":
             from forge.cli.roles_wizard import run_provider_menu
 
             changes = run_provider_menu(path, console)
@@ -477,7 +474,7 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print()
             continue
 
-        if lower_input in {"/model", "/models", "/roles", "/role"}:
+        if lower_input == "/models":
             from forge.cli.roles_wizard import run_model_menu
 
             changes = run_model_menu(path, console)

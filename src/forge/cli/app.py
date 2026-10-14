@@ -369,14 +369,6 @@ def provider_cmd(
             console.print(f"  • {ch}")
 
 
-@app.command("providers", hidden=True)
-def providers_cmd(
-    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
-) -> None:
-    """Alias for 'forge provider'."""
-    provider_cmd(path=path)
-
-
 @roles_app.command("set")
 def roles_set_cmd(
     role: Annotated[

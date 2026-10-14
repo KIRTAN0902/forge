@@ -8,6 +8,7 @@ Allows users to configure:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from rich.console import Console
@@ -299,191 +300,302 @@ def _quick_setup_all(project_dir: Path, console: Console) -> str | None:
     return f"All Agents ➔ [cyan]{chosen_model}[/cyan] ({provider})"
 
 
-def run_model_menu(project_dir: Path, console: Console) -> list[str]:
-    """Interactive Model Configuration Menu (/model) running in an overlay screen.
+def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
+    """Connect a provider modal (/provider) matching modern CLI agent popup design."""
+    from forge.cli.tui_modal import TuiItem, run_tui_modal
 
-    Returns the list of changes made during the session so chat can display them.
-    """
+    init_credentials_env()
+    config = load_config(project_dir)
+    stored = load_stored_credentials() or {}
+    stored_provs = stored.get("providers", {})
+
+    items: list[TuiItem] = []
+
+    # Popular providers
+    prov_popular = [
+        (
+            "openrouter",
+            "OpenRouter",
+            "(Recommended - Claude 3.7, Sonnet 3.5, GPT-4o, DeepSeek)",
+            "Popular",
+        ),
+        (
+            "nvidia",
+            "NVIDIA NIM",
+            "(Nemotron 3 Super, Llama 3.3, DeepSeek R1)",
+            "Popular",
+        ),
+        (
+            "openai",
+            "OpenAI",
+            "(ChatGPT Plus/Pro or API key)",
+            "Popular",
+        ),
+        (
+            "ollama",
+            "Ollama",
+            "(Local, free, private on port 11434)",
+            "Popular",
+        ),
+    ]
+
+    for p_id, p_title, p_sub, sec in prov_popular:
+        has_key = bool(get_provider_api_key(p_id)) or p_id == "ollama"
+        items.append(
+            TuiItem(
+                id=p_id,
+                title=p_title,
+                subtitle=p_sub,
+                section=sec,
+                is_checked=has_key,
+            )
+        )
+
+    # Custom / Providers section
+    has_custom = "custom" in config.providers or (
+        isinstance(stored_provs, dict) and "custom" in stored_provs
+    )
+    items.append(
+        TuiItem(
+            id="custom",
+            title="Custom Endpoint",
+            subtitle="(vLLM, LM Studio, LiteLLM, Groq, Mistral)",
+            section="Providers",
+            is_checked=has_custom,
+        )
+    )
+
+    chosen = run_tui_modal(
+        title="Connect a provider",
+        items=items,
+        search_placeholder="Search",
+        footer_left="esc",
+        footer_left_key="close",
+        footer_right="enter",
+        footer_right_key="select",
+        allow_ctrl_a=False,
+    )
+
+    if not isinstance(chosen, TuiItem):
+        return []
+
+    provider = chosen.id
+    meta = PROVIDER_METADATA.get(provider, {})
+    name = chosen.title
+
+    console.print(f"\n[bold cyan]Configuring {name}:[/bold cyan]")
+
+    default_url = meta.get("base_url", "http://localhost:8000/v1")
+    existing_url = default_url
+    if provider in config.providers:
+        existing_url = config.providers[provider].base_url
+    elif isinstance(stored_provs, dict) and provider in stored_provs:
+        existing_url = stored_provs[provider].get("base_url", default_url)
+
+    new_url = Prompt.ask(
+        f"Base URI / URL for {name}",
+        default=existing_url,
+        console=console,
+    ).strip()
+
+    existing_key = get_provider_api_key(provider) or ""
+    api_key = existing_key
+    if provider != "ollama":
+        if existing_key:
+            masked = (
+                f"{existing_key[:6]}...{existing_key[-4:]}"
+                if len(existing_key) > 10
+                else "****"
+            )
+            console.print(f"[dim]Existing key detected: {masked}[/dim]")
+            keep = Confirm.ask("Keep existing API key?", default=True, console=console)
+            if not keep:
+                api_key = Prompt.ask("New API Key", password=True, console=console).strip()
+        else:
+            api_key = Prompt.ask("Paste API Key", password=True, console=console).strip()
+
+    from forge.config.roles import set_provider_config
+
+    save_stored_credentials(provider, api_key=api_key, base_url=new_url)
+    set_provider_config(project_dir, provider, base_url=new_url, api_key_env=meta.get("env"))
+    init_credentials_env()
+
+    change_str = f"Provider: [bold]{name}[/bold] (URL: {new_url})"
+    return [change_str]
+
+
+def run_models_modal(project_dir: Path, console: Console) -> list[str]:
+    """Select model modal (/models) matching modern CLI agent popup design."""
+    from forge.cli.model_catalog import CURATED_MODELS, fetch_provider_models
+    from forge.cli.tui_modal import CTRL_A_TOKEN, TuiItem, run_tui_modal
+    from forge.config.roles import set_role_model
+
     changes: list[str] = []
 
-    def _menu_loop() -> None:
-        while True:
-            init_credentials_env()
-            config = load_config(project_dir)
-            console.clear()
-            print_roles_table(config, console)
+    init_credentials_env()
+    config = load_config(project_dir)
 
-            menu_text = (
-                "[bold cyan]Select an agent role to configure model:[/bold cyan]\n\n"
-                "  [bold cyan]1[/bold cyan] 🎯 [bold]Orchestrator[/bold]  (Brainstorming, tech lead, routing)\n"
-                "  [bold cyan]2[/bold cyan] 📐 [bold]Planner[/bold]       (Requirements, architecture, decomposition)\n"
-                "  [bold cyan]3[/bold cyan] ⚡ [bold]Executor[/bold]      (Code writing, tool use, terminal)\n"
-                "  [bold cyan]4[/bold cyan] 🛡️  [bold]QA[/bold]            (Test suites, code review, auditing)\n"
-                "  [bold cyan]5[/bold cyan] ⚡ [bold]Quick Setup[/bold]   (Assign 1 model to ALL agents)\n"
-                "  [bold cyan]6[/bold cyan] 🧙 [bold]Full Setup Wizard[/bold] (Step-by-step multi-role setup)\n"
-                "  [bold cyan]0[/bold cyan] ↩️  [bold]Done / Return to Chat[/bold]"
+    # 1. First step: Select agent role (or All Agents)
+    role_items: list[TuiItem] = [
+        TuiItem(
+            id="all",
+            title="All Agents",
+            subtitle="(Assign 1 model to Orchestrator, Planner, Executor & QA)",
+            section="Agent Roles",
+        ),
+    ]
+
+    for r_name in ("orchestrator", "planner", "executor", "qa"):
+        curr_binding = config.roles.get(r_name)
+        curr_prof_name = curr_binding.model if curr_binding else None
+        curr_m = "default"
+        if curr_prof_name and curr_prof_name in config.models:
+            curr_m = config.models[curr_prof_name].model.split("/")[-1]
+
+        role_desc = {
+            "orchestrator": "(Brainstorming, requirements, tech lead)",
+            "planner": "(Task architecture & decomposition)",
+            "executor": "(Code writing & tool runtime)",
+            "qa": "(Verification, test suites & auditing)",
+        }.get(r_name, "")
+
+        role_items.append(
+            TuiItem(
+                id=r_name,
+                title=r_name.title(),
+                subtitle=role_desc,
+                section="Agent Roles",
+                badge=curr_m,
             )
-            console.print(
-                Panel(menu_text, border_style="cyan", title="Forge Model Configuration Menu (/model)")
+        )
+
+    role_pick = run_tui_modal(
+        title="Select agent role",
+        items=role_items,
+        search_placeholder="Search roles",
+        footer_left="Connect provider",
+        footer_left_key="ctrl+a",
+        allow_ctrl_a=True,
+    )
+
+    if role_pick == CTRL_A_TOKEN:
+        prov_changes = run_provider_modal(project_dir, console)
+        changes.extend(prov_changes)
+        changes.extend(run_models_modal(project_dir, console))
+        return changes
+
+    if not isinstance(role_pick, TuiItem):
+        return changes
+
+    chosen_role = role_pick.id
+    role_label = role_pick.title
+
+    # 2. Second step: Select model for the chosen role
+    while True:
+        init_credentials_env()
+        config = load_config(project_dir)
+
+        # Detect active provider
+        target_role = "orchestrator" if chosen_role == "all" else chosen_role
+        target_binding = config.roles.get(target_role)
+        curr_prof_name = target_binding.model if target_binding else None
+        current_model = "default"
+        current_prov = "nvidia"
+        if curr_prof_name and curr_prof_name in config.models:
+            prof = config.models[curr_prof_name]
+            current_model = prof.model
+            current_prov = prof.provider
+        else:
+            stored = load_stored_credentials()
+            if stored and "provider" in stored:
+                current_prov = stored["provider"]
+            elif os.environ.get("OPENROUTER_API_KEY"):
+                current_prov = "openrouter"
+            elif os.environ.get("NVIDIA_API_KEY"):
+                current_prov = "nvidia"
+
+        api_key = get_provider_api_key(current_prov)
+        base_url = config.providers[current_prov].base_url if current_prov in config.providers else None
+
+        all_models = fetch_provider_models(current_prov, api_key=api_key, base_url=base_url)
+        curated_tuples = CURATED_MODELS.get(current_prov, [])
+
+        model_items: list[TuiItem] = []
+        seen_ids = set()
+
+        # Recent / Recommended section
+        for m_id, desc in curated_tuples:
+            seen_ids.add(m_id)
+            is_active = (m_id == current_model)
+            badge = "Free" if "free" in desc.lower() or "flash" in m_id.lower() or "mini" in m_id.lower() else ""
+            m_short = m_id.split("/")[-1]
+            prov_tag = current_prov.title() if "/" not in m_id else m_id.split("/")[0].title()
+            model_items.append(
+                TuiItem(
+                    id=m_id,
+                    title=m_short,
+                    subtitle=prov_tag,
+                    section="Recent",
+                    badge=badge,
+                    is_dot=is_active,
+                )
             )
 
-            choice = Prompt.ask(
-                "Select option",
-                choices=["0", "1", "2", "3", "4", "5", "6", "exit", "quit", "q"],
-                default="0",
-                console=console,
-            )
+        # All models section
+        prov_section = f"All Models ({current_prov.title()})"
+        for m_id in all_models:
+            if m_id not in seen_ids:
+                is_active = (m_id == current_model)
+                m_short = m_id.split("/")[-1]
+                prov_tag = current_prov.title() if "/" not in m_id else m_id.split("/")[0].title()
+                model_items.append(
+                    TuiItem(
+                        id=m_id,
+                        title=m_short,
+                        subtitle=prov_tag,
+                        section=prov_section,
+                        is_dot=is_active,
+                    )
+                )
 
-            if choice in {"0", "exit", "quit", "q"}:
-                break
+        model_pick = run_tui_modal(
+            title=f"Select model ({role_label})",
+            items=model_items,
+            search_placeholder="Search",
+            footer_left="Connect provider",
+            footer_left_key="ctrl+a",
+            footer_right="Favorite",
+            footer_right_key="ctrl+f",
+            allow_ctrl_a=True,
+            allow_custom=True,
+        )
 
-            if choice in {"1", "2", "3", "4"}:
-                role_names = {"1": "orchestrator", "2": "planner", "3": "executor", "4": "qa"}
-                role = role_names[choice]
-                ch = configure_single_role(project_dir, role, console)
-                if ch:
-                    changes.append(ch)
-            elif choice == "5":
-                ch = _quick_setup_all(project_dir, console)
-                if ch:
-                    changes.append(ch)
-            elif choice == "6":
-                run_roles_wizard(project_dir, console)
-                changes.append("Multi-role wizard completed")
+        if model_pick == CTRL_A_TOKEN:
+            prov_changes = run_provider_modal(project_dir, console)
+            changes.extend(prov_changes)
+            continue  # loop to refresh models with newly configured provider
 
-    try:
-        with console.screen():
-            _menu_loop()
-    except Exception:
-        # Fallback if terminal does not support alternate screen buffer
-        _menu_loop()
+        if not isinstance(model_pick, TuiItem):
+            break
+
+        selected_model_id = model_pick.id
+        if chosen_role == "all":
+            save_single_model_preset(project_dir, provider=current_prov, model=selected_model_id)
+            changes.append(f"All Agents ➔ [cyan]{selected_model_id}[/cyan] ({current_prov})")
+        else:
+            set_role_model(project_dir, chosen_role, model=selected_model_id, provider=current_prov)
+            changes.append(f"{role_label} ➔ [cyan]{selected_model_id}[/cyan] ({current_prov})")
+        break
 
     return changes
+
+
+def run_model_menu(project_dir: Path, console: Console) -> list[str]:
+    """Interactive Model Configuration Menu (/models)."""
+    return run_models_modal(project_dir, console)
 
 
 def run_provider_menu(project_dir: Path, console: Console) -> list[str]:
-    """Interactive Provider & URI/URL Configuration Menu (/provider).
-
-    Allows changing providers, configuring API keys, and setting custom Base URIs/URLs.
-    """
-    changes: list[str] = []
-
-    def _menu_loop() -> None:
-        while True:
-            init_credentials_env()
-            config = load_config(project_dir)
-            console.clear()
-
-            table = Table(title="Configured Model Providers & Base URIs", border_style="cyan")
-            table.add_column("No.", style="bold cyan", width=4, justify="right")
-            table.add_column("Provider", style="bold white")
-            table.add_column("Base URI / URL", style="cyan")
-            table.add_column("API Key Status", justify="center")
-
-            prov_items = [
-                ("1", "nvidia", "NVIDIA NIM"),
-                ("2", "openrouter", "OpenRouter"),
-                ("3", "openai", "OpenAI"),
-                ("4", "ollama", "Ollama (Local)"),
-                ("5", "custom", "Custom OpenAI-Compatible Endpoint"),
-            ]
-
-            stored = load_stored_credentials() or {}
-            stored_provs = stored.get("providers", {})
-
-            for num, p_key, p_label in prov_items:
-                api_key = get_provider_api_key(p_key)
-                custom_url = None
-                if p_key in config.providers:
-                    custom_url = config.providers[p_key].base_url
-                elif isinstance(stored_provs, dict) and p_key in stored_provs:
-                    custom_url = stored_provs[p_key].get("base_url")
-
-                base_url = custom_url or PROVIDER_METADATA.get(p_key, {}).get("base_url", "none")
-
-                if p_key == "ollama":
-                    key_stat = "[green]✔ Local (No key needed)[/green]"
-                elif api_key:
-                    masked = f"{api_key[:5]}...{api_key[-4:]}" if len(api_key) > 9 else "****"
-                    key_stat = f"[green]✔ Configured ({masked})[/green]"
-                else:
-                    key_stat = "[red]✖ Not configured[/red]"
-
-                table.add_row(num, p_label, base_url, key_stat)
-
-            console.print(table)
-
-            menu_panel = (
-                "[bold cyan]Select a provider to configure API Key or custom URI/URL:[/bold cyan]\n\n"
-                "  [cyan]1[/cyan] NVIDIA NIM (Nemotron 3 Super, Llama 3.3, DeepSeek)\n"
-                "  [cyan]2[/cyan] OpenRouter (Claude 3.7, GPT-4o, Gemini, DeepSeek)\n"
-                "  [cyan]3[/cyan] OpenAI (GPT-4o, o1, o3-mini)\n"
-                "  [cyan]4[/cyan] Ollama (Local server on http://localhost:11434)\n"
-                "  [cyan]5[/cyan] Custom Endpoint (vLLM, LMStudio, LiteLLM, Groq)\n"
-                "  [cyan]0[/cyan] ↩️  Done / Return to Chat"
-            )
-            console.print(Panel(menu_panel, border_style="cyan", title="Forge Provider Menu (/provider)"))
-
-            choice = Prompt.ask(
-                "Choose provider to configure",
-                choices=["0", "1", "2", "3", "4", "5", "exit", "quit", "q"],
-                default="0",
-                console=console,
-            )
-
-            if choice in {"0", "exit", "quit", "q"}:
-                break
-
-            p_map = {"1": "nvidia", "2": "openrouter", "3": "openai", "4": "ollama", "5": "custom"}
-            provider = p_map[choice]
-            meta = PROVIDER_METADATA.get(provider, {})
-            name = meta.get("name", provider.title())
-
-            console.print(f"\n[bold cyan]Configuring {name}:[/bold cyan]")
-
-            # 1. Base URL / URI prompt
-            default_url = meta.get("base_url", "http://localhost:8000/v1")
-            existing_url = default_url
-            if provider in config.providers:
-                existing_url = config.providers[provider].base_url
-            elif isinstance(stored_provs, dict) and provider in stored_provs:
-                existing_url = stored_provs[provider].get("base_url", default_url)
-
-            new_url = Prompt.ask(
-                f"Base URI / URL for {name}",
-                default=existing_url,
-                console=console,
-            ).strip()
-
-            # 2. API Key prompt (except ollama)
-            existing_key = get_provider_api_key(provider) or ""
-            api_key = existing_key
-            if provider != "ollama":
-                if existing_key:
-                    masked = f"{existing_key[:6]}...{existing_key[-4:]}" if len(existing_key) > 10 else "****"
-                    console.print(f"[dim]Existing key detected: {masked}[/dim]")
-                    keep = Confirm.ask("Keep existing API key?", default=True, console=console)
-                    if not keep:
-                        api_key = Prompt.ask("New API Key", password=True, console=console).strip()
-                else:
-                    api_key = Prompt.ask("Paste API Key", password=True, console=console).strip()
-
-            from forge.config.roles import set_provider_config
-
-            save_stored_credentials(provider, api_key=api_key, base_url=new_url)
-            set_provider_config(project_dir, provider, base_url=new_url, api_key_env=meta.get("env"))
-            init_credentials_env()
-
-            change_str = f"Provider: [bold]{name}[/bold] (URL: {new_url})"
-            changes.append(change_str)
-            console.print(f"\n[bold green]✔ Successfully updated {change_str}[/bold green]\n")
-            Prompt.ask("Press Enter to continue...", console=console)
-
-    try:
-        with console.screen():
-            _menu_loop()
-    except Exception:
-        _menu_loop()
-
-    return changes
+    """Interactive Provider & URI/URL Configuration Menu (/provider)."""
+    return run_provider_modal(project_dir, console)
 
