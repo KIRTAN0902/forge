@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from forge import __version__
+from forge.agents.orchestrator import OrchestratorAgent
 from forge.cli.credentials import (
     PROVIDER_METADATA,
     ensure_credentials_configured,
@@ -37,6 +38,7 @@ from forge.core.contracts.state import WorkflowState
 from forge.core.errors import ForgeError
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
+from forge.models.types import Message
 from forge.storage.sqlite import SQLiteStore
 from forge.tools import create_environment
 from forge.workflow.recovery import CheckpointManager
@@ -52,12 +54,14 @@ ASCII_LOGO = r"""
 
 HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
-    ("/roles", "Inspect or reconfigure agent role assignments (Planner, Executor, QA)"),
+    ("/model", "Open model menu to configure Orchestrator, Planner, Executor, and QA"),
+    ("/models", "Alias for /model"),
+    ("/roles", "Alias for /model"),
+    ("/run", "Directly trigger multi-agent planning & execution on a request"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
     ("/rollback", "Revert working tree to the latest checkpoint"),
     ("/history", "List past workflows and event timeline"),
-    ("/models", "Show active model configuration and provider"),
     ("/key", "Reconfigure or switch your API key / provider"),
     ("/clear", "Clear terminal screen and redraw status banner"),
     ("/exit", "Exit the interactive session (or /quit)"),
@@ -133,7 +137,7 @@ def print_banner(console: Console, root: Path) -> None:
         cfg = load_config(root)
         if cfg.roles:
             role_strs = []
-            for r_name in ("planner", "executor", "qa"):
+            for r_name in ("orchestrator", "planner", "executor", "qa"):
                 if r_name in cfg.roles:
                     prof_name = cfg.roles[r_name].model
                     prof = cfg.models.get(prof_name)
@@ -337,6 +341,74 @@ async def _run_workflow_turn(
         await harness.aclose()
 
 
+async def _run_orchestrator_chat_turn(
+    user_input: str,
+    path: Path,
+    console: Console,
+    history: list[Message],
+    current_workflow_id: str | None = None,
+) -> tuple[list[Message], str | None]:
+    """Chat interactively with the Orchestrator for brainstorming, Q&A, and planning handoff."""
+    config = load_config(path)
+    event_bus = EventBus()
+    approver = CliApprover(console)
+    harness = await build_workflow_harness(config, approver=approver, event_bus=event_bus)
+
+    try:
+        orch_adapter = await harness.registry.adapter("orchestrator", events=event_bus)
+        orch_agent = OrchestratorAgent(orch_adapter, runtime=harness.runtime, events=event_bus)
+
+        git_info = _get_git_info(path)
+        project_context = f"Project: {path.name}\nBranch: {git_info}\nPath: {path.resolve()}"
+
+        with console.status("[bold cyan]Orchestrator thinking...[/bold cyan]", spinner="dots"):
+            turn = await orch_agent.chat(
+                user_input,
+                history=history,
+                project_context=project_context,
+            )
+
+        console.print()
+        console.print("[bold cyan]🎯 Orchestrator:[/bold cyan]")
+        from rich.markdown import Markdown
+
+        console.print(Markdown(turn.response_text))
+        console.print()
+
+        updated_history = list(turn.messages)
+
+        # Handoff to Planning Agent if requirements were synthesized
+        if turn.handoff_requirements:
+            console.print(
+                Panel(
+                    f"[bold green]Synthesized Requirements Handoff to Planning Agent:[/bold green]\n\n"
+                    f"{turn.handoff_requirements}\n\n"
+                    f"[dim]Initiating autonomous multi-agent workflow (Planner ➔ Executor ➔ QA)...[/dim]",
+                    title="🎯 Orchestrator ➔ 📐 Planner Handoff",
+                    border_style="green",
+                )
+            )
+
+            # Connect event printer so the user sees live execution feedback
+            event_bus.subscribe(CliEventPrinter(console))
+
+            state = WorkflowState(user_request=turn.handoff_requirements)
+            final_state = await harness.orchestrator.run(state)
+            console.print()
+            print_workflow_status(final_state, console)
+
+            summary_msg = Message.assistant(
+                f"[Workflow {final_state.workflow_id} ended with status: {final_state.status.value}. "
+                f"Tasks executed: {len(final_state.tasks)}]"
+            )
+            updated_history.append(summary_msg)
+            return updated_history, final_state.workflow_id
+
+        return updated_history, current_workflow_id
+    finally:
+        await harness.aclose()
+
+
 def run_chat_session(path: Path = Path(".")) -> None:
     """Main interactive chat loop."""
     console = Console(legacy_windows=False)
@@ -352,9 +424,10 @@ def run_chat_session(path: Path = Path(".")) -> None:
     # 3. Print welcome screen
     print_banner(console, path)
 
-    # 4. Prepare input session
+    # 4. Prepare input session and conversational history
     session = _create_prompt_session()
     current_workflow_id: str | None = None
+    conversation_history: list[Message] = []
 
     from forge.cli.app import _run_async
 
@@ -389,31 +462,10 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print("[green]Credentials updated.[/green]")
             continue
 
-        if lower_input in {"/roles", "/role"}:
-            from rich.prompt import Confirm
+        if lower_input in {"/model", "/models", "/roles", "/role"}:
+            from forge.cli.roles_wizard import run_model_menu
 
-            from forge.cli.roles_wizard import print_roles_table, run_roles_wizard
-
-            config = load_config(path)
-            print_roles_table(config, console)
-            console.print()
-            reconf = Confirm.ask(
-                "Would you like to reconfigure agent models or roles?",
-                default=False,
-                console=console,
-            )
-            if reconf:
-                run_roles_wizard(path, console)
-            continue
-
-        if lower_input == "/models":
-            config = load_config(path)
-            console.print(f"[bold]Configured Models for {config.project.name}:[/bold]")
-            if config.models:
-                for name, prof in config.models.items():
-                    console.print(f"  • [cyan]{name}[/cyan]: {prof.provider}/{prof.model}")
-            else:
-                console.print(f"  • Default: {_get_active_model_info()}")
+            run_model_menu(path, console)
             continue
 
         if lower_input == "/status":
@@ -432,19 +484,46 @@ def run_chat_session(path: Path = Path(".")) -> None:
             _run_async(_execute_history(path, console))
             continue
 
-        # Regular engineering request or conversational prompt
-        console.print()
+        if lower_input.startswith("/run ") or lower_input.startswith("/build "):
+            req = user_input.split(" ", 1)[1].strip()
+            console.print()
+            try:
+                state = _run_async(
+                    _run_workflow_turn(
+                        req,
+                        path=path,
+                        console=console,
+                        current_workflow_id=current_workflow_id,
+                    )
+                )
+                if state is not None:
+                    current_workflow_id = state.workflow_id
+                    conversation_history.append(Message.user(f"/run {req}"))
+                    conversation_history.append(
+                        Message.assistant(
+                            f"[Workflow {state.workflow_id} executed with status {state.status.value}]"
+                        )
+                    )
+            except ForgeError as exc:
+                console.print(f"[red]error:[/red] {exc}")
+            except Exception as exc:
+                console.print(f"[red]unexpected error:[/red] {exc}")
+            console.print()
+            continue
+
+        # Conversational pairing with the Orchestrator
         try:
-            state = _run_async(
-                _run_workflow_turn(
+            conversation_history, wid = _run_async(
+                _run_orchestrator_chat_turn(
                     user_input,
                     path=path,
                     console=console,
+                    history=conversation_history,
                     current_workflow_id=current_workflow_id,
                 )
             )
-            if state is not None:
-                current_workflow_id = state.workflow_id
+            if wid is not None:
+                current_workflow_id = wid
         except ForgeError as exc:
             console.print(f"[red]error:[/red] {exc}")
         except Exception as exc:

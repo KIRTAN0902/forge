@@ -135,3 +135,33 @@ class TestRolesConfiguration:
                 assert planner_adapter.provider.name == "nvidia"
             finally:
                 await registry.aclose()
+
+    def test_run_model_menu_exit(self, tmp_path: Path) -> None:
+        """Test model menu prompt cleanly returns on 0."""
+        from rich.console import Console
+        from forge.cli.roles_wizard import run_model_menu
+
+        save_single_model_preset(tmp_path, provider="nvidia", model="test-model")
+        console = Console(record=True)
+
+        with patch("rich.prompt.Prompt.ask", return_value="0"):
+            run_model_menu(tmp_path, console)
+
+    def test_configure_single_role(self, tmp_path: Path) -> None:
+        """Test configure_single_role updates orchestrator and planner models."""
+        from rich.console import Console
+        from forge.cli.roles_wizard import configure_single_role
+
+        save_single_model_preset(tmp_path, provider="nvidia", model="base-model")
+        console = Console(record=True)
+
+        with (
+            patch("rich.prompt.Prompt.ask", side_effect=["1", "nemotron-custom"]),
+            patch("rich.prompt.Confirm.ask", return_value=True),
+        ):
+            configure_single_role(tmp_path, "orchestrator", console)
+
+        config = load_config(tmp_path)
+        assert config.roles["orchestrator"].model == "orchestrator_model"
+        assert config.models["orchestrator_model"].model == "nemotron-custom"
+

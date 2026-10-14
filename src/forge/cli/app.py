@@ -298,6 +298,16 @@ def models_ping(
         raise typer.Exit(1) from exc
 
 
+@models_app.command("config")
+def models_config_cmd(
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Interactively configure models for orchestrator, planner, executor, and qa."""
+    from forge.cli.roles_wizard import run_model_menu
+
+    run_model_menu(path.resolve(), console)
+
+
 roles_app = typer.Typer(help="Inspect and configure agent role assignments.", no_args_is_help=False)
 app.add_typer(roles_app, name="roles")
 
@@ -331,10 +341,10 @@ def roles_list_cmd(
 def roles_config_cmd(
     path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
 ) -> None:
-    """Interactively configure agent roles (single model, same key, or multi-provider)."""
-    from forge.cli.roles_wizard import run_roles_wizard
+    """Interactively configure agent models (Orchestrator, Planner, Executor, QA)."""
+    from forge.cli.roles_wizard import run_model_menu
 
-    run_roles_wizard(path.resolve(), console)
+    run_model_menu(path.resolve(), console)
 
 
 @roles_app.command("set")

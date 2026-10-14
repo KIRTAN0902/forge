@@ -96,6 +96,8 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
 )
 
 ROLE_TOOLSETS: dict[str, tuple[str, ...]] = {
+    # The orchestrator investigates to answer brainstorming questions.
+    "orchestrator": READ_ONLY_TOOLS,
     # The planner investigates but never changes anything.
     "planner": READ_ONLY_TOOLS,
     # The executor implements, so it gets everything.

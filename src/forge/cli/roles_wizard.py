@@ -172,6 +172,9 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
             q_def = "openai/gpt-4o"
 
         console.print()
+        orch_model = Prompt.ask(
+            "Orchestrator Agent Model (Brainstorming & Tech Lead)", default=p_def, console=console
+        ).strip()
         planner_model = Prompt.ask(
             "Planner Agent Model (Architect & Decomposition)", default=p_def, console=console
         ).strip()
@@ -183,11 +186,11 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
         ).strip()
 
         role_configs = {
+            "orchestrator": (provider, orch_model),
             "planner": (provider, planner_model),
             "executor": (provider, executor_model),
             "qa": (provider, qa_model),
-            "orchestrator": (provider, planner_model),
-            "default": (provider, planner_model),
+            "default": (provider, orch_model),
         }
         save_multi_role_preset(project_dir, role_configs)
         console.print(f"\n[bold green]✔ Configured specialized models on {provider}[/bold green]")
@@ -196,26 +199,32 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
         # Mode 3: Different models and different API keys
         console.print("\n[bold]Configuring Multi-Provider / Multi-Key Agents:[/bold]")
 
-        console.print("\n[bold cyan]1. Configure Planner Agent (Architect & Strategy):[/bold cyan]")
+        console.print(
+            "\n[bold cyan]1. Configure Orchestrator Agent (Brainstorming & Tech Lead):[/bold cyan]"
+        )
+        o_prov, _, o_def = _prompt_provider_and_key(console, "Orchestrator Agent")
+        o_model = Prompt.ask("Orchestrator Model ID", default=o_def, console=console).strip()
+
+        console.print("\n[bold cyan]2. Configure Planner Agent (Architect & Strategy):[/bold cyan]")
         p_prov, _, p_def = _prompt_provider_and_key(console, "Planner Agent")
         p_model = Prompt.ask("Planner Model ID", default=p_def, console=console).strip()
 
         console.print(
-            "\n[bold cyan]2. Configure Executor Agent (Code Generation & Tools):[/bold cyan]"
+            "\n[bold cyan]3. Configure Executor Agent (Code Generation & Tools):[/bold cyan]"
         )
         e_prov, _, e_def = _prompt_provider_and_key(console, "Executor Agent")
         e_model = Prompt.ask("Executor Model ID", default=e_def, console=console).strip()
 
-        console.print("\n[bold cyan]3. Configure QA Agent (Testing & Auditing):[/bold cyan]")
+        console.print("\n[bold cyan]4. Configure QA Agent (Testing & Auditing):[/bold cyan]")
         q_prov, _, q_def = _prompt_provider_and_key(console, "QA Agent")
         q_model = Prompt.ask("QA Model ID", default=q_def, console=console).strip()
 
         role_configs = {
+            "orchestrator": (o_prov, o_model),
             "planner": (p_prov, p_model),
             "executor": (e_prov, e_model),
             "qa": (q_prov, q_model),
-            "orchestrator": (p_prov, p_model),
-            "default": (p_prov, p_model),
+            "default": (o_prov, o_model),
         }
         save_multi_role_preset(project_dir, role_configs)
         console.print("\n[bold green]✔ Successfully configured multi-provider agents[/bold green]")
@@ -224,3 +233,77 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
     config = load_config(project_dir)
     console.print()
     print_roles_table(config, console)
+
+
+def configure_single_role(project_dir: Path, role: str, console: Console) -> None:
+    """Prompt and update model and provider for a single agent role."""
+    from forge.config.roles import set_role_model
+
+    role_title = role.title()
+    console.print(f"\n[bold cyan]Configure {role_title} Agent Model:[/bold cyan]")
+    provider, _, default_model = _prompt_provider_and_key(console, f"{role_title} Agent")
+    model = Prompt.ask(f"{role_title} Model ID", default=default_model, console=console).strip()
+
+    set_role_model(project_dir, role, model=model, provider=provider)
+    console.print(f"[bold green]✔ Updated {role_title} model to {provider}/{model}[/bold green]\n")
+
+
+def run_model_menu(project_dir: Path, console: Console) -> None:
+    """Interactive Model Configuration Menu (/model).
+
+    Allows developers to inspect and selectively reconfigure models for:
+    - Orchestrator (Brainstorming & Technical Lead)
+    - Planner (Architecture & Requirements)
+    - Executor (Code Writing & Tools)
+    - QA (Testing & Verification)
+    """
+    while True:
+        init_credentials_env()
+        config = load_config(project_dir)
+        console.print()
+        print_roles_table(config, console)
+
+        menu_text = (
+            "[bold cyan]Select an option to configure:[/bold cyan]\n\n"
+            "  [bold cyan]1[/bold cyan] 🎯 [bold]Orchestrator[/bold]  (Brainstorming, tech lead, routing)\n"
+            "  [bold cyan]2[/bold cyan] 📐 [bold]Planner[/bold]       (Requirements, architecture, decomposition)\n"
+            "  [bold cyan]3[/bold cyan] ⚡ [bold]Executor[/bold]      (Code writing, tool use, terminal)\n"
+            "  [bold cyan]4[/bold cyan] 🛡️  [bold]QA[/bold]            (Test suites, code review, auditing)\n"
+            "  [bold cyan]5[/bold cyan] ⚡ [bold]Quick Setup[/bold]   (Assign 1 model to ALL agents)\n"
+            "  [bold cyan]6[/bold cyan] 🧙 [bold]Full Setup Wizard[/bold] (Step-by-step multi-role setup)\n"
+            "  [bold cyan]0[/bold cyan] ↩️  [bold]Done / Return to Chat[/bold]"
+        )
+        console.print(
+            Panel(menu_text, border_style="cyan", title="Forge Model Configuration Menu (/model)")
+        )
+
+        choice = Prompt.ask(
+            "Select option",
+            choices=["0", "1", "2", "3", "4", "5", "6", "exit", "quit", "q"],
+            default="0",
+            console=console,
+        )
+
+        if choice in {"0", "exit", "quit", "q"}:
+            console.print("[dim]Returned from model configuration menu.[/dim]\n")
+            break
+
+        if choice == "1":
+            configure_single_role(project_dir, "orchestrator", console)
+        elif choice == "2":
+            configure_single_role(project_dir, "planner", console)
+        elif choice == "3":
+            configure_single_role(project_dir, "executor", console)
+        elif choice == "4":
+            configure_single_role(project_dir, "qa", console)
+        elif choice == "5":
+            console.print("\n[bold]Quick Setup: Single Model for All Agents:[/bold]")
+            provider, _, default_model = _prompt_provider_and_key(console)
+            model = Prompt.ask("Model ID", default=default_model, console=console).strip()
+            save_single_model_preset(project_dir, provider=provider, model=model)
+            console.print(
+                f"\n[bold green]✔ Configured all agents with {provider}/{model}[/bold green]\n"
+            )
+        elif choice == "6":
+            run_roles_wizard(project_dir, console)
+

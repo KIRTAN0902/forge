@@ -166,11 +166,13 @@ class TestChatInterface:
 
         with (
             patch("forge.cli.chat.ensure_credentials_configured"),
+            patch("forge.cli.roles_wizard.run_model_menu") as mock_menu,
             patch("forge.cli.chat.read_user_input", side_effect=lambda *args: next(inputs)),
         ):
             # Should run the 3 commands and exit gracefully
             run_chat_session(path=tmp_path)
             assert (tmp_path / ".forge").is_dir()
+            mock_menu.assert_called_once()
 
     def test_cli_default_launches_chat(self, tmp_path: Path) -> None:
         runner = CliRunner()
