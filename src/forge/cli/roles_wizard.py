@@ -301,7 +301,7 @@ def _quick_setup_all(project_dir: Path, console: Console) -> str | None:
 
 
 def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
-    """Connect a provider modal (/provider) matching modern CLI agent popup design."""
+    """Connect a provider modal (/provider) showing only connected and available providers."""
     from forge.cli.tui_modal import TuiItem, run_tui_modal
 
     init_credentials_env()
@@ -309,66 +309,61 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
     stored = load_stored_credentials() or {}
     stored_provs = stored.get("providers", {})
 
-    items: list[TuiItem] = []
-
-    # Popular providers
-    prov_popular = [
-        (
-            "openrouter",
-            "OpenRouter",
-            "(Recommended - Claude 3.7, Sonnet 3.5, GPT-4o, DeepSeek)",
-            "Popular",
-        ),
-        (
-            "nvidia",
-            "NVIDIA NIM",
-            "(Nemotron 3 Super, Llama 3.3, DeepSeek R1)",
-            "Popular",
-        ),
-        (
-            "openai",
-            "OpenAI",
-            "(ChatGPT Plus/Pro or API key)",
-            "Popular",
-        ),
-        (
-            "ollama",
-            "Ollama",
-            "(Local, free, private on port 11434)",
-            "Popular",
-        ),
+    all_providers = [
+        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1"),
+        ("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
+        ("openai", "OpenAI", "https://api.openai.com/v1"),
+        ("ollama", "Ollama (Local)", "http://localhost:11434/v1"),
+        ("custom", "Custom Endpoint", "http://localhost:8000/v1"),
     ]
 
-    for p_id, p_title, p_sub, sec in prov_popular:
-        has_key = bool(get_provider_api_key(p_id)) or p_id == "ollama"
-        items.append(
-            TuiItem(
-                id=p_id,
-                title=p_title,
-                subtitle=p_sub,
-                section=sec,
-                is_checked=has_key,
-            )
+    connected_items: list[TuiItem] = []
+    available_items: list[TuiItem] = []
+
+    for p_id, p_title, default_url in all_providers:
+        api_key = get_provider_api_key(p_id)
+        custom_url = None
+        if p_id in config.providers:
+            custom_url = config.providers[p_id].base_url
+        elif isinstance(stored_provs, dict) and p_id in stored_provs:
+            custom_url = stored_provs[p_id].get("base_url")
+
+        active_url = custom_url or default_url
+        is_connected = (
+            bool(api_key)
+            or custom_url is not None
+            or (p_id == "ollama" and p_id in config.providers)
         )
 
-    # Custom / Providers section
-    has_custom = "custom" in config.providers or (
-        isinstance(stored_provs, dict) and "custom" in stored_provs
-    )
-    items.append(
-        TuiItem(
-            id="custom",
-            title="Custom Endpoint",
-            subtitle="(vLLM, LM Studio, LiteLLM, Groq, Mistral)",
-            section="Providers",
-            is_checked=has_custom,
-        )
-    )
+        if is_connected:
+            connected_items.append(
+                TuiItem(
+                    id=p_id,
+                    title=p_title,
+                    subtitle=f"({active_url})",
+                    section="Connected Providers",
+                    badge="Connected",
+                    is_checked=True,
+                )
+            )
+        else:
+            available_items.append(
+                TuiItem(
+                    id=p_id,
+                    title=p_title,
+                    subtitle=f"({active_url})",
+                    section="Available Providers",
+                    badge="",
+                    is_checked=False,
+                )
+            )
+
+    items = connected_items + available_items
 
     chosen = run_tui_modal(
         title="Connect a provider",
         items=items,
-        search_placeholder="Search",
+        search_placeholder="Search providers",
         footer_left="esc",
         footer_left_key="close",
         footer_right="enter",
@@ -425,8 +420,9 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
 
 
 def run_models_modal(project_dir: Path, console: Console) -> list[str]:
-    """Select model modal (/models) matching modern CLI agent popup design."""
-    from forge.cli.model_catalog import CURATED_MODELS, fetch_provider_models
+    """Select model modal (/models) with dynamic user recent models and provider catalog."""
+    from forge.cli.credentials import get_recent_models, record_recent_model
+    from forge.cli.model_catalog import fetch_provider_models
     from forge.cli.tui_modal import CTRL_A_TOKEN, TuiItem, run_tui_modal
     from forge.config.roles import set_role_model
 
@@ -500,7 +496,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
         target_binding = config.roles.get(target_role)
         curr_prof_name = target_binding.model if target_binding else None
         current_model = "default"
-        current_prov = "nvidia"
+        current_prov = "openrouter"
         if curr_prof_name and curr_prof_name in config.models:
             prof = config.models[curr_prof_name]
             current_model = prof.model
@@ -515,39 +511,48 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
                 current_prov = "nvidia"
 
         api_key = get_provider_api_key(current_prov)
-        base_url = config.providers[current_prov].base_url if current_prov in config.providers else None
+        base_url = (
+            config.providers[current_prov].base_url if current_prov in config.providers else None
+        )
 
         all_models = fetch_provider_models(current_prov, api_key=api_key, base_url=base_url)
-        curated_tuples = CURATED_MODELS.get(current_prov, [])
 
         model_items: list[TuiItem] = []
         seen_ids = set()
 
-        # Recent / Recommended section
-        for m_id, desc in curated_tuples:
+        # Dynamic Recent Models: only actual recent models used by the user
+        user_recents = get_recent_models()
+        # If user has no recorded recents yet, populate from currently configured role models in forge.yaml
+        if not user_recents and config.roles:
+            for b in config.roles.values():
+                if b.model in config.models:
+                    m_val = config.models[b.model].model
+                    if m_val not in user_recents:
+                        user_recents.append(m_val)
+
+        for m_id in user_recents:
             seen_ids.add(m_id)
             is_active = (m_id == current_model)
-            badge = "Free" if "free" in desc.lower() or "flash" in m_id.lower() or "mini" in m_id.lower() else ""
             m_short = m_id.split("/")[-1]
-            prov_tag = current_prov.title() if "/" not in m_id else m_id.split("/")[0].title()
+            prov_tag = m_id.split("/")[0].title() if "/" in m_id else current_prov.title()
             model_items.append(
                 TuiItem(
                     id=m_id,
                     title=m_short,
                     subtitle=prov_tag,
-                    section="Recent",
-                    badge=badge,
+                    section="Recent Models",
+                    badge="Recent",
                     is_dot=is_active,
                 )
             )
 
-        # All models section
-        prov_section = f"All Models ({current_prov.title()})"
+        # All models section from live provider API
+        prov_section = f"Available Models ({current_prov.title()})"
         for m_id in all_models:
             if m_id not in seen_ids:
                 is_active = (m_id == current_model)
                 m_short = m_id.split("/")[-1]
-                prov_tag = current_prov.title() if "/" not in m_id else m_id.split("/")[0].title()
+                prov_tag = m_id.split("/")[0].title() if "/" in m_id else current_prov.title()
                 model_items.append(
                     TuiItem(
                         id=m_id,
@@ -561,7 +566,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
         model_pick = run_tui_modal(
             title=f"Select model ({role_label})",
             items=model_items,
-            search_placeholder="Search",
+            search_placeholder="Search models",
             footer_left="Connect provider",
             footer_left_key="ctrl+a",
             footer_right="Favorite",
@@ -579,6 +584,8 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
             break
 
         selected_model_id = model_pick.id
+        record_recent_model(selected_model_id)
+
         if chosen_role == "all":
             save_single_model_preset(project_dir, provider=current_prov, model=selected_model_id)
             changes.append(f"All Agents ➔ [cyan]{selected_model_id}[/cyan] ({current_prov})")

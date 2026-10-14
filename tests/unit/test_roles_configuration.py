@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from forge.config.loader import load_config
@@ -185,4 +186,44 @@ class TestRolesConfiguration:
         with patch("rich.prompt.Prompt.ask", return_value="0"):
             changes = run_provider_menu(tmp_path, console)
             assert changes == []
+
+    def test_dynamic_recent_models_tracking(self, tmp_path: Path) -> None:
+        """Test that recently used models are tracked dynamically and in MRU order."""
+        from forge.cli.credentials import get_recent_models, record_recent_model
+
+        record_recent_model("model-alpha")
+        record_recent_model("model-beta")
+        record_recent_model("model-alpha")  # Should move to front
+
+        recents = get_recent_models()
+        assert recents[0] == "model-alpha"
+        assert "model-beta" in recents
+
+    def test_provider_modal_connected_available(self, tmp_path: Path) -> None:
+        """Test that run_provider_modal shows only connected and available providers."""
+        from rich.console import Console
+        from forge.cli.roles_wizard import run_provider_modal
+        from forge.cli.tui_modal import TuiItem
+
+        console = Console(record=True)
+        captured_items: list[TuiItem] = []
+
+        def mock_modal(title: str, items: list[TuiItem], **kwargs: Any) -> Any:
+            captured_items.extend(items)
+            return None  # cancel
+
+        with patch("forge.cli.tui_modal.run_tui_modal", side_effect=mock_modal):
+            changes = run_provider_modal(tmp_path, console)
+            assert changes == []
+
+        sections = {it.section for it in captured_items}
+        # Sections should only be Connected Providers and/or Available Providers
+        assert sections.issubset({"Connected Providers", "Available Providers"})
+        prov_ids = {it.id for it in captured_items}
+        assert "openrouter" in prov_ids
+        assert "nvidia" in prov_ids
+        assert "openai" in prov_ids
+        assert "ollama" in prov_ids
+        assert "custom" in prov_ids
+
 

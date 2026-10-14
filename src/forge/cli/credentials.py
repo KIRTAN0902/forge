@@ -21,6 +21,7 @@ from forge.models.profile import ModelProfile
 
 CREDENTIALS_DIR = Path.home() / ".forge"
 CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
+RECENT_MODELS_FILE = CREDENTIALS_DIR / "recent_models.json"
 
 PROVIDER_METADATA: dict[str, dict[str, Any]] = {
     "nvidia": {
@@ -130,6 +131,43 @@ def save_stored_credentials(
     CREDENTIALS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     with contextlib.suppress(OSError):
         CREDENTIALS_FILE.chmod(0o600)
+
+
+def get_recent_models() -> list[str]:
+    """Return the list of recently used/selected models in MRU order."""
+    if not RECENT_MODELS_FILE.is_file():
+        stored = load_stored_credentials()
+        if stored and isinstance(stored.get("recent_models"), list):
+            return [str(m) for m in stored["recent_models"] if isinstance(m, str)]
+        return []
+    try:
+        data = json.loads(RECENT_MODELS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(m) for m in data if m and isinstance(m, str)]
+    except Exception:
+        return []
+    return []
+
+
+def record_recent_model(model: str) -> None:
+    """Record a model in the user's recent models history (MRU, max 10)."""
+    if not model or not model.strip():
+        return
+    clean_model = model.strip()
+    recents = get_recent_models()
+    if clean_model in recents:
+        recents.remove(clean_model)
+    recents.insert(0, clean_model)
+    recents = recents[:10]
+    CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        RECENT_MODELS_FILE.write_text(json.dumps(recents, indent=2), encoding="utf-8")
+        stored = load_stored_credentials() or {}
+        stored["recent_models"] = recents
+        if CREDENTIALS_FILE.is_file():
+            CREDENTIALS_FILE.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def init_credentials_env() -> bool:
