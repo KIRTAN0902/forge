@@ -20,6 +20,7 @@ from rich.table import Table
 
 from forge import __version__
 from forge.cli.credentials import (
+    PROVIDER_METADATA,
     ensure_credentials_configured,
     load_stored_credentials,
     prompt_for_credentials,
@@ -90,18 +91,23 @@ def _get_git_info(root: Path) -> str:
 
 def _get_active_model_info() -> str:
     """Return a human-friendly description of the active model and provider."""
+    stored = load_stored_credentials()
+    if stored:
+        prov = stored.get("provider", "unknown")
+        model = stored.get("model", "default")
+        prov_label = PROVIDER_METADATA.get(prov, {}).get("name", prov.title())
+        color = "green" if prov in {"nvidia", "openai"} else "cyan"
+        return f"[bold {color}]{prov_label}[/bold {color}] ({model})"
+
+    if os.environ.get("NVIDIA_API_KEY"):
+        model = os.environ.get("FORGE_DEFAULT_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        return f"[bold green]NVIDIA NIM[/bold green] ({model})"
     if os.environ.get("OPENROUTER_API_KEY"):
         model = os.environ.get("FORGE_DEFAULT_MODEL", "anthropic/claude-3.7-sonnet")
         return f"[bold cyan]OpenRouter[/bold cyan] ({model})"
     if os.environ.get("OPENAI_API_KEY"):
         model = os.environ.get("FORGE_DEFAULT_MODEL", "gpt-4o")
         return f"[bold green]OpenAI[/bold green] ({model})"
-
-    stored = load_stored_credentials()
-    if stored:
-        prov = stored.get("provider", "unknown")
-        model = stored.get("model", "default")
-        return f"[bold cyan]{prov}[/bold cyan] ({model})"
 
     return "[dim]None configured[/dim]"
 

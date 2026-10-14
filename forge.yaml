@@ -1,0 +1,34 @@
+version: 1
+
+project:
+  name: forge
+  data_dir: .forge
+
+models:
+  nemotron:
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+    detect_capabilities: false
+
+roles:
+  default: nemotron
+  orchestrator: nemotron
+  planner: nemotron
+  executor: nemotron
+  qa: nemotron
+
+policy:
+  approval_threshold: high
+  permissions:
+    - read
+    - write
+    - execute
+    - vcs
+
+tools:
+  shell: auto
+  command_timeout_s: 300.0

@@ -65,17 +65,45 @@ class TestCredentialsManager:
             assert os.environ["FORGE_DEFAULT_MODEL"] == "test-model"
 
     def test_resolve_default_model_profile(self) -> None:
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test"}, clear=True):
+        with (
+            patch("forge.cli.credentials.load_stored_credentials", return_value=None),
+            patch.dict(os.environ, {"NVIDIA_API_KEY": "nvapi-test"}, clear=True),
+        ):
+            name, profile = resolve_default_model_profile()
+            assert name == "nvidia_default"
+            assert profile is not None
+            assert profile.provider == "nvidia"
+
+        with (
+            patch("forge.cli.credentials.load_stored_credentials", return_value=None),
+            patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test"}, clear=True),
+        ):
             name, profile = resolve_default_model_profile()
             assert name == "openrouter_default"
             assert profile is not None
             assert profile.provider == "openrouter"
 
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+        with (
+            patch("forge.cli.credentials.load_stored_credentials", return_value=None),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True),
+        ):
             name, profile = resolve_default_model_profile()
             assert name == "openai_default"
             assert profile is not None
             assert profile.provider == "openai"
+
+        # Stored credentials take priority
+        with (
+            patch(
+                "forge.cli.credentials.load_stored_credentials",
+                return_value={"provider": "nvidia", "api_key": "nvapi-key", "model": "test-m"},
+            ),
+            patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True),
+        ):
+            name, profile = resolve_default_model_profile()
+            assert name == "nvidia_default"
+            assert profile is not None
+            assert profile.model == "test-m"
 
     def test_prompt_for_credentials(self, tmp_path: Path) -> None:
         creds_file = tmp_path / "credentials.json"
@@ -87,12 +115,17 @@ class TestCredentialsManager:
             patch("forge.cli.credentials.Prompt.ask") as mock_ask,
             patch.dict(os.environ, {}, clear=True),
         ):
-            # 1. choice="1", 2. api_key="sk-test", 3. model="anthropic/claude-3.7-sonnet"
-            mock_ask.side_effect = ["1", "sk-test-prompt", "anthropic/claude-3.7-sonnet"]
+            # 1. choice="1" (nvidia), 2. api_key="nvapi-test"
+            # 3. model="nvidia/nemotron-3-super-120b-a12b"
+            mock_ask.side_effect = [
+                "1",
+                "nvapi-test-prompt",
+                "nvidia/nemotron-3-super-120b-a12b",
+            ]
             result = prompt_for_credentials(console)
 
-            assert result["provider"] == "openrouter"
-            assert result["api_key"] == "sk-test-prompt"
+            assert result["provider"] == "nvidia"
+            assert result["api_key"] == "nvapi-test-prompt"
             assert load_stored_credentials() is not None
 
     def test_ensure_credentials_configured_skips_when_present(self) -> None:

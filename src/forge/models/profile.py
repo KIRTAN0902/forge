@@ -40,6 +40,11 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
         reasoning_style="openrouter",
         headers={"X-Title": "Forge"},
     ),
+    "nvidia": ProviderConfig(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key_env="NVIDIA_API_KEY",
+        reasoning_style="openai",
+    ),
     "ollama": ProviderConfig(base_url="http://localhost:11434/v1", reasoning_style="none"),
 }
 

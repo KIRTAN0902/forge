@@ -23,6 +23,13 @@ CREDENTIALS_DIR = Path.home() / ".forge"
 CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
 
 PROVIDER_METADATA: dict[str, dict[str, Any]] = {
+    "nvidia": {
+        "name": "NVIDIA NIM",
+        "env": "NVIDIA_API_KEY",
+        "default_model": "nvidia/nemotron-3-super-120b-a12b",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "label": "NVIDIA NIM (Nemotron 3 Super 120B, Nemotron 3.5 Lightning, Mistral)",
+    },
     "openrouter": {
         "name": "OpenRouter",
         "env": "OPENROUTER_API_KEY",
@@ -87,46 +94,100 @@ def save_stored_credentials(
 
 
 def init_credentials_env() -> bool:
-    """Populate os.environ from ~/.forge/credentials.json if not already set.
+    """Populate os.environ from ~/.forge/credentials.json if configured.
 
-    Returns True if an active API key or provider is available in the environment.
+    Returns True if an active API key or provider is available.
     """
-    # 1. Check if any known environment variable is already set
+    # 1. Stored credentials take priority
+    stored = load_stored_credentials()
+    if stored:
+        provider = stored.get("provider", "nvidia")
+        api_key = stored.get("api_key", "")
+        model = stored.get("model", "")
+        base_url = stored.get("base_url", "")
+
+        meta = PROVIDER_METADATA.get(provider, {})
+        env_var = meta.get("env")
+        if env_var and api_key and not os.environ.get(env_var):
+            os.environ[env_var] = api_key
+
+        if model and not os.environ.get("FORGE_DEFAULT_MODEL"):
+            os.environ["FORGE_DEFAULT_MODEL"] = model
+
+        if base_url and not os.environ.get("FORGE_DEFAULT_BASE_URL"):
+            os.environ["FORGE_DEFAULT_BASE_URL"] = base_url
+
+        if provider == "ollama":
+            return True
+
+        if bool(api_key or (env_var and os.environ.get(env_var))):
+            return True
+
+    # 2. Check if any known environment variable is already set
     for meta in PROVIDER_METADATA.values():
         env_var = meta.get("env")
         if env_var and os.environ.get(env_var):
             return True
 
-    # 2. Check stored credentials
-    stored = load_stored_credentials()
-    if not stored:
-        return False
-
-    provider = stored.get("provider", "openrouter")
-    api_key = stored.get("api_key", "")
-    model = stored.get("model", "")
-    base_url = stored.get("base_url", "")
-
-    meta = PROVIDER_METADATA.get(provider, {})
-    env_var = meta.get("env")
-    if env_var and api_key and not os.environ.get(env_var):
-        os.environ[env_var] = api_key
-
-    if model and not os.environ.get("FORGE_DEFAULT_MODEL"):
-        os.environ["FORGE_DEFAULT_MODEL"] = model
-
-    if base_url and not os.environ.get("FORGE_DEFAULT_BASE_URL"):
-        os.environ["FORGE_DEFAULT_BASE_URL"] = base_url
-
-    if provider == "ollama":
-        return True
-
-    return bool(api_key or (env_var and os.environ.get(env_var)))
+    return False
 
 
 def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
     """Resolve a default ModelProfile based on the active environment/credentials."""
-    # Check openrouter
+    stored = load_stored_credentials()
+    if stored:
+        provider = stored.get("provider")
+        model_name = stored.get("model") or PROVIDER_METADATA.get(str(provider), {}).get(
+            "default_model", ""
+        )
+        if provider == "nvidia" and (os.environ.get("NVIDIA_API_KEY") or stored.get("api_key")):
+            return "nvidia_default", ModelProfile(
+                provider="nvidia",
+                model=model_name or "nvidia/nemotron-3-super-120b-a12b",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
+        if provider == "openrouter" and (
+            os.environ.get("OPENROUTER_API_KEY") or stored.get("api_key")
+        ):
+            return "openrouter_default", ModelProfile(
+                provider="openrouter",
+                model=model_name or "anthropic/claude-3.7-sonnet",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
+        if provider == "openai" and (os.environ.get("OPENAI_API_KEY") or stored.get("api_key")):
+            return "openai_default", ModelProfile(
+                provider="openai",
+                model=model_name or "gpt-4o",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
+        if provider == "ollama":
+            return "ollama_default", ModelProfile(
+                provider="ollama",
+                model=model_name or "qwen2.5-coder:7b",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
+        if provider == "custom":
+            return "custom_default", ModelProfile(
+                provider="custom",
+                model=model_name or "default",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
+
+    # Fallback to direct environment variables
+    if os.environ.get("NVIDIA_API_KEY"):
+        model_name = os.environ.get("FORGE_DEFAULT_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        return "nvidia_default", ModelProfile(
+            provider="nvidia",
+            model=model_name,
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+            detect_capabilities=False,
+        )
+
     if os.environ.get("OPENROUTER_API_KEY"):
         model_name = os.environ.get("FORGE_DEFAULT_MODEL", "anthropic/claude-3.7-sonnet")
         return "openrouter_default", ModelProfile(
@@ -136,22 +197,10 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             detect_capabilities=False,
         )
 
-    # Check openai
     if os.environ.get("OPENAI_API_KEY"):
         model_name = os.environ.get("FORGE_DEFAULT_MODEL", "gpt-4o")
         return "openai_default", ModelProfile(
             provider="openai",
-            model=model_name,
-            capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
-            detect_capabilities=False,
-        )
-
-    # Check stored credentials for ollama or custom
-    stored = load_stored_credentials()
-    if stored and stored.get("provider") == "ollama":
-        model_name = stored.get("model") or "qwen2.5-coder:7b"
-        return "ollama_default", ModelProfile(
-            provider="ollama",
             model=model_name,
             capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
             detect_capabilities=False,
@@ -166,25 +215,27 @@ def prompt_for_credentials(console: Console) -> dict[str, Any]:
         "[bold cyan]⚡ Welcome to Forge Setup[/bold cyan]\n"
         "[dim]No API key detected. Let's configure your model provider (one-time setup).[/dim]\n\n"
         "[bold]Select a provider:[/bold]\n"
-        "  [bold cyan]1[/bold cyan] OpenRouter (Recommended - Claude 3.7, GPT-4o, DeepSeek)\n"
-        "  [bold cyan]2[/bold cyan] OpenAI (GPT-4o, GPT-4o-mini)\n"
-        "  [bold cyan]3[/bold cyan] Ollama (Local, free, private - runs locally on port 11434)\n"
-        "  [bold cyan]4[/bold cyan] Custom OpenAI-compatible endpoint"
+        "  [bold cyan]1[/bold cyan] NVIDIA NIM (Llama 3.1 Nemotron 70B, Mistral Large, DeepSeek)\n"
+        "  [bold cyan]2[/bold cyan] OpenRouter (Claude 3.7, Sonnet 3.5, GPT-4o, DeepSeek)\n"
+        "  [bold cyan]3[/bold cyan] OpenAI (GPT-4o, GPT-4o-mini)\n"
+        "  [bold cyan]4[/bold cyan] Ollama (Local, free, private - runs locally on port 11434)\n"
+        "  [bold cyan]5[/bold cyan] Custom OpenAI-compatible endpoint"
     )
     console.print(Panel(banner, border_style="cyan", title="Forge Initial Setup"))
 
     choice = Prompt.ask(
         "[bold cyan]Enter choice[/bold cyan]",
-        choices=["1", "2", "3", "4"],
+        choices=["1", "2", "3", "4", "5"],
         default="1",
         console=console,
     )
 
     mapping = {
-        "1": "openrouter",
-        "2": "openai",
-        "3": "ollama",
-        "4": "custom",
+        "1": "nvidia",
+        "2": "openrouter",
+        "3": "openai",
+        "4": "ollama",
+        "5": "custom",
     }
     provider = mapping[choice]
     meta = PROVIDER_METADATA[provider]
@@ -193,7 +244,7 @@ def prompt_for_credentials(console: Console) -> dict[str, Any]:
     base_url = meta.get("base_url", "")
     default_model = meta.get("default_model", "")
 
-    if provider in {"openrouter", "openai", "custom"}:
+    if provider in {"nvidia", "openrouter", "openai", "custom"}:
         console.print()
         console.print(
             f"[bold yellow]Paste your {meta['name']} API key[/bold yellow] "
