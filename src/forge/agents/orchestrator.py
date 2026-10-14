@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from forge.agents.base import BaseAgent
+from forge.agents.base import AgentChatTurn, BaseAgent
 from forge.agents.prompts import ORCHESTRATOR_CHAT_SYSTEM_PROMPT
 from forge.events.bus import EventBus
 from forge.events.types import EventType
@@ -42,7 +42,7 @@ EXECUTION_CONFIRM_TRIGGERS = (
 
 
 @dataclass
-class OrchestratorChatTurn:
+class OrchestratorChatTurn(AgentChatTurn):
     """The result of an interactive conversational turn with the Orchestrator."""
 
     response_text: str

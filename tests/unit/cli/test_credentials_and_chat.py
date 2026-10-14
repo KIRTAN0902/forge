@@ -203,3 +203,48 @@ class TestChatInterface:
             result = runner.invoke(app, ["provider", "--path", str(tmp_path)])
             assert result.exit_code == 0
             mock_prov.assert_called_once()
+
+    def test_chat_session_state_cycling_and_aliases(self) -> None:
+        """Test default agent is orchestrator and cycling goes orchestrator -> planner -> executor -> qa."""
+        from forge.cli.chat import ChatSessionState, _get_prompt_tokens
+
+        state = ChatSessionState()
+        assert state.active_agent == "orchestrator"
+
+        # Tab cycle forward
+        assert state.cycle_agent() == "planner"
+        assert state.cycle_agent() == "executor"
+        assert state.cycle_agent() == "qa"
+        assert state.cycle_agent() == "orchestrator"
+
+        # Shift+Tab cycle reverse
+        assert state.cycle_agent_reverse() == "qa"
+        assert state.cycle_agent_reverse() == "executor"
+
+        # Aliases
+        assert state.set_agent("plan") is True
+        assert state.active_agent == "planner"
+        assert state.set_agent("exec") is True
+        assert state.active_agent == "executor"
+        assert state.set_agent("orch") is True
+        assert state.active_agent == "orchestrator"
+        assert state.set_agent("qa") is True
+        assert state.active_agent == "qa"
+
+        tokens = _get_prompt_tokens(state)
+        token_text = "".join(t[1] for t in tokens)
+        assert "qa" in token_text
+
+    def test_run_chat_session_switch_agents(self, tmp_path: Path) -> None:
+        """Test switching agents via slash commands /planner, /executor, /qa, /orch, /agent."""
+        from forge.cli.chat import run_chat_session
+
+        inputs = iter(["/planner", "/executor", "/qa", "/orch", "/agent", "/exit"])
+
+        with (
+            patch("forge.cli.chat.ensure_credentials_configured"),
+            patch("forge.cli.chat.read_user_input", side_effect=lambda *args: next(inputs)),
+        ):
+            run_chat_session(path=tmp_path)
+            assert (tmp_path / ".forge").is_dir()
+

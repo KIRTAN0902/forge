@@ -25,6 +25,16 @@ class AgentLoopOutcome:
     messages: list[Message] = field(default_factory=list)
 
 
+@dataclass
+class AgentChatTurn:
+    """The result of an interactive conversational turn with an agent."""
+
+    response_text: str
+    handoff_requirements: str | None = None
+    messages: list[Message] = field(default_factory=list)
+
+
+
 class BaseAgent:
     """Base class for specialist agents."""
 
@@ -96,3 +106,59 @@ class BaseAgent:
             outcome.final_text = conversation[-1].text or "Reached maximum step limit."
 
         return outcome
+
+    async def chat(
+        self,
+        user_message: str,
+        history: Sequence[Message] | None = None,
+        *,
+        project_context: str = "",
+        max_tool_steps: int = 5,
+    ) -> AgentChatTurn:
+        """Chat with the developer in this agent's specialization."""
+        from forge.agents.prompts import (
+            EXECUTOR_CHAT_SYSTEM_PROMPT,
+            ORCHESTRATOR_CHAT_SYSTEM_PROMPT,
+            PLANNER_CHAT_SYSTEM_PROMPT,
+            QA_CHAT_SYSTEM_PROMPT,
+        )
+        from forge.tools.defaults import ROLE_TOOLSETS
+
+        prompt_map = {
+            "orchestrator": ORCHESTRATOR_CHAT_SYSTEM_PROMPT,
+            "planner": PLANNER_CHAT_SYSTEM_PROMPT,
+            "executor": EXECUTOR_CHAT_SYSTEM_PROMPT,
+            "qa": QA_CHAT_SYSTEM_PROMPT,
+        }
+
+        system_content = prompt_map.get(self.role, ORCHESTRATOR_CHAT_SYSTEM_PROMPT)
+        if project_context:
+            system_content += f"\n\n[Active Workspace Context]:\n{project_context}"
+
+        conversation: list[Message] = [Message.system(system_content)]
+        if history:
+            for m in history:
+                if m.role != "system":
+                    conversation.append(m)
+        conversation.append(Message.user(user_message))
+
+        allowed = ROLE_TOOLSETS.get(self.role, ())
+        if self.runtime is not None and allowed:
+            active_allowed = [t for t in allowed if t in self.runtime.tools]
+            outcome = await self._run_tool_loop(
+                conversation,
+                allowed_tools=active_allowed,
+                max_steps=max_tool_steps,
+            )
+            raw_text = outcome.final_text
+            updated_messages = outcome.messages
+        else:
+            resp = await self.adapter.generate(conversation)
+            raw_text = resp.text
+            updated_messages = list(conversation) + [resp.message]
+
+        return AgentChatTurn(
+            response_text=raw_text,
+            messages=updated_messages,
+        )
+

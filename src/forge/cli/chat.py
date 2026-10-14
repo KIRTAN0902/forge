@@ -19,7 +19,11 @@ from rich.panel import Panel
 from rich.table import Table
 
 from forge import __version__
+from forge.agents.base import BaseAgent
+from forge.agents.executor import ExecutorAgent
 from forge.agents.orchestrator import OrchestratorAgent
+from forge.agents.planner import PlannerAgent
+from forge.agents.qa import QAAgent
 from forge.cli.cancellation import run_with_esc_cancellation
 from forge.cli.credentials import (
     PROVIDER_METADATA,
@@ -53,10 +57,82 @@ ASCII_LOGO = r"""
 [bold cyan]  ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝[/bold cyan]
 """
 
+AVAILABLE_AGENTS = ("orchestrator", "planner", "executor", "qa")
+
+AGENT_METADATA: dict[str, dict[str, str]] = {
+    "orchestrator": {
+        "title": "Orchestrator",
+        "icon": "🎯",
+        "color": "cyan",
+        "status_color": "bold cyan",
+        "description": "Brainstorming, requirements synthesis & technical lead (Default)",
+    },
+    "planner": {
+        "title": "Planner",
+        "icon": "📐",
+        "color": "magenta",
+        "status_color": "bold magenta",
+        "description": "Task decomposition, architecture DAG & implementation planning",
+    },
+    "executor": {
+        "title": "Executor",
+        "icon": "⚡",
+        "color": "yellow",
+        "status_color": "bold yellow",
+        "description": "Code writing, filesystem modification & terminal tool execution",
+    },
+    "qa": {
+        "title": "QA",
+        "icon": "🔍",
+        "color": "green",
+        "status_color": "bold green",
+        "description": "Adversarial testing, security audit & regression verification",
+    },
+}
+
+
+class ChatSessionState:
+    """Tracks the active chat agent and handles cycling and switching."""
+
+    def __init__(self, default_agent: str = "orchestrator") -> None:
+        self.active_agent: str = default_agent
+
+    def cycle_agent(self) -> str:
+        idx = AVAILABLE_AGENTS.index(self.active_agent) if self.active_agent in AVAILABLE_AGENTS else 0
+        self.active_agent = AVAILABLE_AGENTS[(idx + 1) % len(AVAILABLE_AGENTS)]
+        return self.active_agent
+
+    def cycle_agent_reverse(self) -> str:
+        idx = AVAILABLE_AGENTS.index(self.active_agent) if self.active_agent in AVAILABLE_AGENTS else 0
+        self.active_agent = AVAILABLE_AGENTS[(idx - 1) % len(AVAILABLE_AGENTS)]
+        return self.active_agent
+
+    def set_agent(self, agent: str) -> bool:
+        low = agent.lower().strip()
+        alias_map = {
+            "orch": "orchestrator",
+            "orchestrator": "orchestrator",
+            "planner": "planner",
+            "plan": "planner",
+            "exec": "executor",
+            "executor": "executor",
+            "qa": "qa",
+        }
+        if low in alias_map:
+            self.active_agent = alias_map[low]
+            return True
+        return False
+
+
 HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
     ("/models", "Interactive popup to select and configure agent models"),
     ("/provider", "Connect and configure model providers, API keys, and custom Base URIs/URLs"),
+    ("/orchestrator", "Switch active agent to Orchestrator (Default, brainstorming & tech lead)"),
+    ("/planner", "Switch active agent to Planner (Architecture & task graph)"),
+    ("/executor", "Switch active agent to Executor (Direct coding, tools & terminal execution)"),
+    ("/qa", "Switch active agent to QA (Adversarial testing & security audit)"),
+    ("/agent", "Show or switch the active chat agent (or press Tab at the prompt)"),
     ("/run", "Directly trigger multi-agent planning & execution on a request"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
@@ -150,8 +226,8 @@ def print_banner(console: Console, root: Path) -> None:
         pass
 
     info_text = (
-        "\n[dim]Type your coding prompt to begin, or [cyan]/help[/cyan] for commands. "
-        "Use [cyan]/exit[/cyan] to quit.[/dim]"
+        "\n[dim]Active Agent: [bold cyan]🎯 Orchestrator[/bold cyan] (Press [bold cyan]Tab[/bold cyan] to cycle: Orchestrator ➔ Planner ➔ Executor ➔ QA)\n"
+        "Type your prompt to begin, or [cyan]/help[/cyan] for commands. Use [cyan]/exit[/cyan] to quit.[/dim]"
     )
     console.print(
         Panel(
@@ -162,43 +238,108 @@ def print_banner(console: Console, root: Path) -> None:
     )
 
 
-def _create_prompt_session() -> Any:
-    """Create a prompt_toolkit PromptSession with history and completions, or None."""
+def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
+    """Generate dynamic prompt_toolkit formatted text tokens reflecting the active agent."""
+    agent = state.active_agent
+    meta = AGENT_METADATA.get(agent, AGENT_METADATA["orchestrator"])
+    return [
+        ("class:prompt_brand", "forge"),
+        ("class:prompt_bracket", " ["),
+        (f"class:prompt_agent_{agent}", f"{meta['icon']} {agent}"),
+        ("class:prompt_bracket", "] > "),
+    ]
+
+
+def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
+    """Create a prompt_toolkit PromptSession with history, completions, and Tab agent cycling."""
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import WordCompleter
         from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+        from prompt_toolkit.styles import Style
 
+        current_state = state or ChatSessionState()
         history_file = Path.home() / ".forge" / "chat_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
 
-        commands = [cmd for cmd, _ in HELP_COMMANDS] + ["/quit"]
+        commands = [cmd for cmd, _ in HELP_COMMANDS] + [
+            "/quit",
+            "/orch",
+            "/exec",
+        ]
         completer = WordCompleter(commands, ignore_case=True, match_middle=False)
+
+        kb = KeyBindings()
+
+        @kb.add("tab")
+        def _handle_tab(event: KeyPressEvent) -> None:
+            buf = event.app.current_buffer
+            # If autocompletion menu is already active, navigate completion
+            if buf.complete_state:
+                buf.complete_next()
+                return
+
+            # If user typed a slash command prefix, trigger completion
+            if buf.text.startswith("/") and not buf.complete_state:
+                buf.start_completion(select_first=False)
+                if buf.complete_state:
+                    return
+
+            # Otherwise, cycle active agent!
+            current_state.cycle_agent()
+            event.app.invalidate()
+
+        @kb.add("s-tab")
+        def _handle_shift_tab(event: KeyPressEvent) -> None:
+            current_state.cycle_agent_reverse()
+            event.app.invalidate()
+
+        prompt_style = Style.from_dict({
+            "prompt_brand": "#00e5ff bold",
+            "prompt_bracket": "#64748b",
+            "prompt_agent_orchestrator": "#00e5ff bold",
+            "prompt_agent_planner": "#d946ef bold",
+            "prompt_agent_executor": "#eab308 bold",
+            "prompt_agent_qa": "#10b981 bold",
+        })
 
         return PromptSession(
             history=FileHistory(str(history_file)),
             completer=completer,
+            key_bindings=kb,
+            style=prompt_style,
         )
     except Exception:
         return None
 
 
-def read_user_input(session: Any, console: Console) -> str:
-    """Read a line of input from the user with fallback."""
-    prompt_str = "forge > "
+def read_user_input(
+    session: Any, console: Console, state: ChatSessionState | None = None
+) -> str:
+    """Read a line of input from the user with dynamic agent prompt badge."""
+    current_state = state or ChatSessionState()
+    meta = AGENT_METADATA.get(current_state.active_agent, AGENT_METADATA["orchestrator"])
+
     if session is not None:
         try:
-            return str(session.prompt(prompt_str)).strip()
+            return str(session.prompt(lambda: _get_prompt_tokens(current_state))).strip()
         except (KeyboardInterrupt, EOFError):
             raise
         except Exception:
             pass
 
     # Fallback to standard input
+    color = meta.get("color", "cyan")
+    prompt_str = f"forge [{meta['icon']} {current_state.active_agent}] >"
     try:
         from rich.prompt import Prompt
 
-        return Prompt.ask(f"[bold cyan]{prompt_str}[/bold cyan]", console=console).strip()
+        return Prompt.ask(
+            f"[bold cyan]forge[/bold cyan] [[bold {color}]{meta['icon']} {current_state.active_agent}[/bold {color}]] >",
+            console=console,
+        ).strip()
     except (KeyboardInterrupt, EOFError):
         raise
 
@@ -351,38 +492,51 @@ async def _run_workflow_turn(
         await harness.aclose()
 
 
-async def _run_orchestrator_chat_turn(
+async def _run_agent_chat_turn(
+    agent_role: str,
     user_input: str,
     path: Path,
     console: Console,
     history: list[Message],
     current_workflow_id: str | None = None,
 ) -> tuple[list[Message], str | None]:
-    """Chat interactively with the Orchestrator for brainstorming, Q&A, and planning handoff."""
+    """Chat interactively with the selected specialist agent."""
     config = load_config(path)
     event_bus = EventBus()
     approver = CliApprover(console)
     harness = await build_workflow_harness(config, approver=approver, event_bus=event_bus)
 
     try:
-        orch_adapter = await harness.registry.adapter("orchestrator", events=event_bus)
-        orch_agent = OrchestratorAgent(orch_adapter, runtime=harness.runtime, events=event_bus)
+        meta = AGENT_METADATA.get(agent_role, AGENT_METADATA["orchestrator"])
+        adapter = await harness.registry.adapter(agent_role, events=event_bus)
+
+        if agent_role == "orchestrator":
+            agent: BaseAgent = OrchestratorAgent(adapter, runtime=harness.runtime, events=event_bus)
+        elif agent_role == "planner":
+            agent = PlannerAgent(adapter, runtime=harness.runtime, events=event_bus)
+        elif agent_role == "executor":
+            agent = ExecutorAgent(adapter, runtime=harness.runtime, events=event_bus)
+        elif agent_role == "qa":
+            agent = QAAgent(adapter, runtime=harness.runtime, events=event_bus)
+        else:
+            agent = OrchestratorAgent(adapter, runtime=harness.runtime, events=event_bus)
 
         git_info = _get_git_info(path)
         project_context = f"Project: {path.name}\nBranch: {git_info}\nPath: {path.resolve()}"
 
+        status_msg = f"[{meta['status_color']}]{meta['icon']} {meta['title']} thinking...[/{meta['status_color']}]"
         turn = await run_with_esc_cancellation(
-            orch_agent.chat(
+            agent.chat(
                 user_input,
                 history=history,
                 project_context=project_context,
             ),
-            status_message="[bold cyan]Orchestrator thinking...[/bold cyan]",
+            status_message=status_msg,
             console=console,
         )
 
         console.print()
-        console.print("[bold cyan]🎯 Orchestrator:[/bold cyan]")
+        console.print(f"[{meta['status_color']}]{meta['icon']} {meta['title']}:[/{meta['status_color']}]")
         from rich.markdown import Markdown
 
         console.print(Markdown(turn.response_text))
@@ -390,7 +544,7 @@ async def _run_orchestrator_chat_turn(
 
         updated_history = list(turn.messages)
 
-        # Handoff to Planning Agent if requirements were synthesized
+        # Handoff to Planning Agent if requirements were synthesized (Orchestrator)
         if turn.handoff_requirements:
             console.print(
                 Panel(
@@ -426,6 +580,24 @@ async def _run_orchestrator_chat_turn(
         await harness.aclose()
 
 
+async def _run_orchestrator_chat_turn(
+    user_input: str,
+    path: Path,
+    console: Console,
+    history: list[Message],
+    current_workflow_id: str | None = None,
+) -> tuple[list[Message], str | None]:
+    """Chat interactively with the Orchestrator (backward compatibility helper)."""
+    return await _run_agent_chat_turn(
+        "orchestrator",
+        user_input,
+        path=path,
+        console=console,
+        history=history,
+        current_workflow_id=current_workflow_id,
+    )
+
+
 def run_chat_session(path: Path = Path(".")) -> None:
     """Main interactive chat loop."""
     console = Console(legacy_windows=False)
@@ -441,8 +613,9 @@ def run_chat_session(path: Path = Path(".")) -> None:
     # 3. Print welcome screen
     print_banner(console, path)
 
-    # 4. Prepare input session and conversational history
-    session = _create_prompt_session()
+    # 4. Prepare input session, active agent state (default: orchestrator), and conversational history
+    session_state = ChatSessionState(default_agent="orchestrator")
+    session = _create_prompt_session(session_state)
     current_workflow_id: str | None = None
     conversation_history: list[Message] = []
 
@@ -450,7 +623,7 @@ def run_chat_session(path: Path = Path(".")) -> None:
 
     while True:
         try:
-            user_input = read_user_input(session, console)
+            user_input = read_user_input(session, console, session_state)
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Session ended. Goodbye![/dim]")
             break
@@ -477,6 +650,46 @@ def run_chat_session(path: Path = Path(".")) -> None:
         if lower_input == "/key":
             prompt_for_credentials(console)
             console.print("[green]Credentials updated.[/green]")
+            continue
+
+        if lower_input in {"/orchestrator", "/orch"}:
+            session_state.set_agent("orchestrator")
+            meta = AGENT_METADATA["orchestrator"]
+            console.print(f"[bold cyan]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold cyan] [dim]({meta['description']})[/dim]\n")
+            continue
+
+        if lower_input == "/planner":
+            session_state.set_agent("planner")
+            meta = AGENT_METADATA["planner"]
+            console.print(f"[bold magenta]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold magenta] [dim]({meta['description']})[/dim]\n")
+            continue
+
+        if lower_input in {"/executor", "/exec"}:
+            session_state.set_agent("executor")
+            meta = AGENT_METADATA["executor"]
+            console.print(f"[bold yellow]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold yellow] [dim]({meta['description']})[/dim]\n")
+            continue
+
+        if lower_input in {"/qa", "/audit"}:
+            session_state.set_agent("qa")
+            meta = AGENT_METADATA["qa"]
+            console.print(f"[bold green]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold green] [dim]({meta['description']})[/dim]\n")
+            continue
+
+        if lower_input.startswith("/agent"):
+            parts = user_input.split()
+            if len(parts) > 1 and session_state.set_agent(parts[1]):
+                meta = AGENT_METADATA[session_state.active_agent]
+                console.print(f"[bold {meta['color']}]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold {meta['color']}] [dim]({meta['description']})[/dim]\n")
+            else:
+                curr_meta = AGENT_METADATA[session_state.active_agent]
+                console.print(f"\n[bold]Current Active Agent:[/bold] [bold {curr_meta['color']}]{curr_meta['icon']} {curr_meta['title']}[/bold {curr_meta['color']}] [dim]({curr_meta['description']})[/dim]")
+                console.print("[dim]Tip: Press [bold cyan]Tab[/bold cyan] at the prompt to cycle agents, or use:[/dim]")
+                for a_name in AVAILABLE_AGENTS:
+                    m = AGENT_METADATA[a_name]
+                    prefix = "●" if a_name == session_state.active_agent else "•"
+                    console.print(f"  {prefix} [bold {m['color']}]/{a_name:<12}[/bold {m['color']}] - {m['description']}")
+                console.print()
             continue
 
         if lower_input == "/provider":
@@ -550,11 +763,12 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print()
             continue
 
-        # Conversational pairing with the Orchestrator
+        # Conversational pairing with the active agent (default: Orchestrator)
         try:
             conversation_history, wid = _run_async(
-                _run_orchestrator_chat_turn(
-                    user_input,
+                _run_agent_chat_turn(
+                    agent_role=session_state.active_agent,
+                    user_input=user_input,
                     path=path,
                     console=console,
                     history=conversation_history,
