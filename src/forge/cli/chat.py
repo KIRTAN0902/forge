@@ -52,6 +52,7 @@ ASCII_LOGO = r"""
 
 HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
+    ("/roles", "Inspect or reconfigure agent role assignments (Planner, Executor, QA)"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
     ("/rollback", "Revert working tree to the latest checkpoint"),
@@ -127,6 +128,22 @@ def print_banner(console: Console, root: Path) -> None:
     grid.add_row("Project:", f"[bold white]{root.name}[/bold white] [dim]({root.resolve()})[/dim]")
     grid.add_row("Branch:", git_info)
     grid.add_row("Model:", model_info)
+
+    try:
+        cfg = load_config(root)
+        if cfg.roles:
+            role_strs = []
+            for r_name in ("planner", "executor", "qa"):
+                if r_name in cfg.roles:
+                    prof_name = cfg.roles[r_name].model
+                    prof = cfg.models.get(prof_name)
+                    if prof:
+                        m_short = prof.model.split("/")[-1]
+                        role_strs.append(f"{r_name.title()}: [cyan]{m_short}[/cyan]")
+            if role_strs:
+                grid.add_row("Roles:", " | ".join(role_strs))
+    except Exception:
+        pass
 
     info_text = (
         "\n[dim]Type your coding prompt to begin, or [cyan]/help[/cyan] for commands. "
@@ -370,6 +387,23 @@ def run_chat_session(path: Path = Path(".")) -> None:
         if lower_input == "/key":
             prompt_for_credentials(console)
             console.print("[green]Credentials updated.[/green]")
+            continue
+
+        if lower_input in {"/roles", "/role"}:
+            from rich.prompt import Confirm
+
+            from forge.cli.roles_wizard import print_roles_table, run_roles_wizard
+
+            config = load_config(path)
+            print_roles_table(config, console)
+            console.print()
+            reconf = Confirm.ask(
+                "Would you like to reconfigure agent models or roles?",
+                default=False,
+                console=console,
+            )
+            if reconf:
+                run_roles_wizard(path, console)
             continue
 
         if lower_input == "/models":

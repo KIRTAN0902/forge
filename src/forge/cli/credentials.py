@@ -74,20 +74,59 @@ def load_stored_credentials() -> dict[str, Any] | None:
     return None
 
 
+def get_provider_api_key(provider: str) -> str | None:
+    """Return the API key for a given provider from environment or stored credentials."""
+    meta = PROVIDER_METADATA.get(provider, {})
+    env_var = meta.get("env")
+    if env_var and os.environ.get(env_var):
+        return os.environ[env_var]
+
+    stored = load_stored_credentials()
+    if stored:
+        providers = stored.get("providers", {})
+        if isinstance(providers, dict) and provider in providers:
+            prov_data = providers[provider]
+            if isinstance(prov_data, dict) and prov_data.get("api_key"):
+                return str(prov_data["api_key"])
+
+        if stored.get("provider") == provider and stored.get("api_key"):
+            return str(stored["api_key"])
+
+    return None
+
+
 def save_stored_credentials(
     provider: str,
     api_key: str,
     model: str | None = None,
     base_url: str | None = None,
 ) -> None:
-    """Save credentials securely to ~/.forge/credentials.json."""
+    """Save credentials securely to ~/.forge/credentials.json, supporting multi-provider storage."""
     CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {
+    existing = load_stored_credentials() or {}
+    providers = existing.get("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+
+    default_model = model or PROVIDER_METADATA.get(provider, {}).get("default_model", "")
+    resolved_base_url = base_url or PROVIDER_METADATA.get(provider, {}).get("base_url", "")
+
+    providers[provider] = {
+        "api_key": api_key,
+        "default_model": default_model,
+        "base_url": resolved_base_url,
+    }
+
+    payload: dict[str, Any] = {
         "provider": provider,
         "api_key": api_key,
-        "model": model or PROVIDER_METADATA.get(provider, {}).get("default_model", ""),
-        "base_url": base_url or PROVIDER_METADATA.get(provider, {}).get("base_url", ""),
+        "model": default_model,
+        "base_url": resolved_base_url,
+        "providers": providers,
     }
+    if "roles" in existing:
+        payload["roles"] = existing["roles"]
+
     CREDENTIALS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     with contextlib.suppress(OSError):
         CREDENTIALS_FILE.chmod(0o600)
@@ -96,11 +135,27 @@ def save_stored_credentials(
 def init_credentials_env() -> bool:
     """Populate os.environ from ~/.forge/credentials.json if configured.
 
+    Exports environment variables for all configured providers.
     Returns True if an active API key or provider is available.
     """
-    # 1. Stored credentials take priority
+    has_credentials = False
     stored = load_stored_credentials()
     if stored:
+        # 1. Populate all stored providers
+        providers = stored.get("providers", {})
+        if isinstance(providers, dict):
+            for prov_name, prov_data in providers.items():
+                if isinstance(prov_data, dict):
+                    k = prov_data.get("api_key")
+                    meta = PROVIDER_METADATA.get(prov_name, {})
+                    env_var = meta.get("env")
+                    if env_var and k and not os.environ.get(env_var):
+                        os.environ[env_var] = str(k)
+                        has_credentials = True
+                    elif env_var and os.environ.get(env_var):
+                        has_credentials = True
+
+        # 2. Populate top-level active/default provider
         provider = stored.get("provider", "nvidia")
         api_key = stored.get("api_key", "")
         model = stored.get("model", "")
@@ -110,6 +165,9 @@ def init_credentials_env() -> bool:
         env_var = meta.get("env")
         if env_var and api_key and not os.environ.get(env_var):
             os.environ[env_var] = api_key
+            has_credentials = True
+        elif env_var and os.environ.get(env_var):
+            has_credentials = True
 
         if model and not os.environ.get("FORGE_DEFAULT_MODEL"):
             os.environ["FORGE_DEFAULT_MODEL"] = model
@@ -118,18 +176,15 @@ def init_credentials_env() -> bool:
             os.environ["FORGE_DEFAULT_BASE_URL"] = base_url
 
         if provider == "ollama":
-            return True
+            has_credentials = True
 
-        if bool(api_key or (env_var and os.environ.get(env_var))):
-            return True
-
-    # 2. Check if any known environment variable is already set
+    # 3. Check if any known environment variable is already set
     for meta in PROVIDER_METADATA.values():
         env_var = meta.get("env")
         if env_var and os.environ.get(env_var):
-            return True
+            has_credentials = True
 
-    return False
+    return has_credentials
 
 
 def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:

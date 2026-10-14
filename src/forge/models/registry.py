@@ -103,11 +103,11 @@ class ModelRegistry:
         factory = self._factories.get(config.type)
         if factory is None:
             raise ConfigError(f"no provider implementation for type {config.type!r}")
-        api_key = None
-        if config.api_key_env:
+        api_key = config.api_key
+        if not api_key and config.api_key_env:
             api_key = self._env.get(config.api_key_env)
-            if not api_key:
-                raise ConfigError(f"provider {name!r} needs an API key in ${config.api_key_env}")
+        if not api_key and config.api_key_env:
+            raise ConfigError(f"provider {name!r} needs an API key in ${config.api_key_env}")
         provider = factory(name, config, api_key)
         self._providers[name] = provider
         return provider

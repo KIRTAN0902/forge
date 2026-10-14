@@ -1,9 +1,7 @@
 version: 1
-
 project:
   name: forge
   data_dir: .forge
-
 models:
   nemotron:
     provider: nvidia
@@ -13,22 +11,27 @@ models:
       structured_output: true
       streaming: true
     detect_capabilities: false
-
+  executor_model:
+    provider: nvidia
+    model: nvidia/nemotron-3.5-lightning-30b-a3b
+    capabilities:
+      tool_calling: true
+      structured_output: true
+      streaming: true
+    detect_capabilities: false
 roles:
   default: nemotron
   orchestrator: nemotron
   planner: nemotron
-  executor: nemotron
+  executor: executor_model
   qa: nemotron
-
 policy:
   approval_threshold: high
   permissions:
-    - read
-    - write
-    - execute
-    - vcs
-
+  - read
+  - write
+  - execute
+  - vcs
 tools:
   shell: auto
   command_timeout_s: 300.0

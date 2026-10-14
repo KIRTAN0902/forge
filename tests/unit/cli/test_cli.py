@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -218,7 +219,7 @@ class TestCliCommands:
         with patch("forge.cli.app.build_workflow_harness") as mock_harness:
             from forge.cli.workflow import build_workflow_harness
 
-            async def _create_harness(*args, **kwargs):
+            async def _create_harness(*args: Any, **kwargs: Any) -> Any:
                 kwargs["registry"] = registry
                 return await build_workflow_harness(*args, **kwargs)
 
@@ -308,3 +309,32 @@ class TestCliCommands:
         assert result.exit_code == 0, result.stdout
         assert "Restored checkpoint" in result.stdout
         assert readme.read_text(encoding="utf-8") == "# Stable Baseline\n"
+
+    def test_roles_list_and_set_commands(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        # Initialize a project first
+        init_res = runner.invoke(app, ["init", str(tmp_path)])
+        assert init_res.exit_code == 0
+
+        # List roles
+        list_res = runner.invoke(app, ["roles", "list", "--path", str(tmp_path)])
+        assert list_res.exit_code == 0
+        assert "Agent Role & Model Configuration" in list_res.stdout
+        assert "Planner" in list_res.stdout
+
+        # Set role
+        set_res = runner.invoke(
+            app,
+            [
+                "roles",
+                "set",
+                "executor",
+                "nvidia/nemotron-3.5-lightning-30b-a3b",
+                "--provider",
+                "nvidia",
+                "--path",
+                str(tmp_path),
+            ],
+        )
+        assert set_res.exit_code == 0
+        assert "Assigned role executor" in set_res.stdout

@@ -236,6 +236,72 @@ def models_ping(
         raise typer.Exit(1) from exc
 
 
+roles_app = typer.Typer(help="Inspect and configure agent role assignments.", no_args_is_help=False)
+app.add_typer(roles_app, name="roles")
+
+
+@roles_app.callback(invoke_without_command=True)
+def roles_main(
+    ctx: typer.Context,
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """List agent roles and their assigned models and providers."""
+    if ctx.invoked_subcommand is not None:
+        return
+    from forge.cli.roles_wizard import print_roles_table
+
+    config = _load(path)
+    print_roles_table(config, console)
+
+
+@roles_app.command("list")
+def roles_list_cmd(
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Show the role-to-model mapping table for all agents."""
+    from forge.cli.roles_wizard import print_roles_table
+
+    config = _load(path)
+    print_roles_table(config, console)
+
+
+@roles_app.command("config")
+def roles_config_cmd(
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Interactively configure agent roles (single model, same key, or multi-provider)."""
+    from forge.cli.roles_wizard import run_roles_wizard
+
+    run_roles_wizard(path.resolve(), console)
+
+
+@roles_app.command("set")
+def roles_set_cmd(
+    role: Annotated[
+        str,
+        typer.Argument(help="Role to assign (planner, executor, qa, orchestrator, default)."),
+    ],
+    model: Annotated[str, typer.Argument(help="Model name or profile.")],
+    provider: Annotated[
+        str | None,
+        typer.Option(help="Provider name (nvidia, openrouter, openai, ollama, custom)."),
+    ] = None,
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Assign a model to a specific agent role."""
+    from forge.cli.roles_wizard import print_roles_table
+    from forge.config.roles import set_role_model
+
+    try:
+        set_role_model(path.resolve(), role=role, model=model, provider=provider)
+        console.print(f"[green]✔ Assigned role [bold]{role}[/bold] to [bold]{model}[/bold][/green]")
+        config = _load(path)
+        print_roles_table(config, console)
+    except Exception as exc:
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
 @app.command("context")
 def show_context(
     request: Annotated[str, typer.Argument(help="What you want done, in plain language.")],

@@ -22,6 +22,9 @@ class ProviderConfig(_Config):
     api_key_env: str | None = Field(
         default=None, description="Environment variable holding the API key."
     )
+    api_key: str | None = Field(
+        default=None, description="Direct API key (optional; overrides api_key_env if provided)."
+    )
     headers: dict[str, str] = Field(default_factory=dict)
     timeout_s: float = Field(default=180.0, gt=0)
     max_retries: int = Field(default=3, ge=0, le=10)
