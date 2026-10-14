@@ -47,7 +47,7 @@ class CliEventPrinter:
     """Subscribes to EventBus and renders live workflow events to the console."""
 
     def __init__(self, console: Console | None = None) -> None:
-        self.console = console or Console()
+        self.console = console or Console(legacy_windows=False)
 
     def __call__(self, event: Event) -> None:
         p = event.payload

@@ -7,6 +7,7 @@ No engine logic lives here (spec rule: the engine stays headless).
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -36,6 +37,12 @@ from forge.storage.sqlite import SQLiteStore
 from forge.tools import create_environment
 from forge.workflow.recovery import CheckpointManager
 
+if sys.platform == "win32":
+    if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 app = typer.Typer(
     name="forge",
     help="Forge: a model-agnostic multi-agent coding harness.",
@@ -43,8 +50,8 @@ app = typer.Typer(
     no_args_is_help=False,
     add_completion=False,
 )
-console = Console()
-err_console = Console(stderr=True)
+console = Console(legacy_windows=False)
+err_console = Console(stderr=True, legacy_windows=False)
 
 
 @app.callback(invoke_without_command=True)

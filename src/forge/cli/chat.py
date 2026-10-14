@@ -322,7 +322,7 @@ async def _run_workflow_turn(
 
 def run_chat_session(path: Path = Path(".")) -> None:
     """Main interactive chat loop."""
-    console = Console()
+    console = Console(legacy_windows=False)
     path = path.resolve()
 
     # 1. Ensure credentials are ready (prompts on first run, saves permanently)
