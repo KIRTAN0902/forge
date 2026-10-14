@@ -361,13 +361,13 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
     items = connected_items + available_items
 
     chosen = run_tui_modal(
-        title="Connect a provider",
+        title="Connect Provider",
         items=items,
-        search_placeholder="Search providers",
-        footer_left="esc",
-        footer_left_key="close",
-        footer_right="enter",
-        footer_right_key="select",
+        search_placeholder="Filter providers...",
+        footer_left="Cancel",
+        footer_left_key="esc",
+        footer_right="Select",
+        footer_right_key="enter",
         allow_ctrl_a=False,
     )
 
@@ -466,10 +466,10 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
         )
 
     role_pick = run_tui_modal(
-        title="Select agent role",
+        title="Select Agent Role",
         items=role_items,
-        search_placeholder="Search roles",
-        footer_left="Connect provider",
+        search_placeholder="Filter agent roles...",
+        footer_left="Connect Provider",
         footer_left_key="ctrl+a",
         allow_ctrl_a=True,
     )
@@ -541,7 +541,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
                     title=m_short,
                     subtitle=prov_tag,
                     section="Recent Models",
-                    badge="Recent",
+                    badge="Active" if is_active else "Recent",
                     is_dot=is_active,
                 )
             )
@@ -559,15 +559,16 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
                         title=m_short,
                         subtitle=prov_tag,
                         section=prov_section,
+                        badge="Active" if is_active else "",
                         is_dot=is_active,
                     )
                 )
 
         model_pick = run_tui_modal(
-            title=f"Select model ({role_label})",
+            title=f"Select Model · {role_label}",
             items=model_items,
-            search_placeholder="Search models",
-            footer_left="Connect provider",
+            search_placeholder=f"Filter {current_prov.title()} models...",
+            footer_left="Connect Provider",
             footer_left_key="ctrl+a",
             footer_right="Favorite",
             footer_right_key="ctrl+f",
