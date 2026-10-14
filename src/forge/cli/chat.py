@@ -20,6 +20,7 @@ from rich.table import Table
 
 from forge import __version__
 from forge.agents.orchestrator import OrchestratorAgent
+from forge.cli.cancellation import run_with_esc_cancellation
 from forge.cli.credentials import (
     PROVIDER_METADATA,
     ensure_credentials_configured,
@@ -35,7 +36,7 @@ from forge.cli.render import (
 from forge.cli.workflow import build_workflow_harness
 from forge.config import init_project, load_config
 from forge.core.contracts.state import WorkflowState
-from forge.core.errors import ForgeError
+from forge.core.errors import ForgeError, UserCancelledError
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
 from forge.models.types import Message
@@ -323,16 +324,26 @@ async def _run_workflow_turn(
                 existing = await harness.store.load_workflow(current_workflow_id)
                 if not existing.is_terminal:
                     console.print(f"[dim]Continuing workflow {current_workflow_id}...[/dim]")
-                    final_state = await harness.orchestrator.resume(existing, feedback=request)
+                    final_state = await run_with_esc_cancellation(
+                        harness.orchestrator.resume(existing, feedback=request),
+                        status_message="[bold green]Workflow resuming...[/bold green]",
+                        console=console,
+                    )
                     console.print()
                     print_workflow_status(final_state, console)
                     return final_state
+            except UserCancelledError:
+                raise
             except Exception:
                 pass
 
         # Otherwise, start a fresh workflow for this instruction
         state = WorkflowState(user_request=request)
-        final_state = await harness.orchestrator.run(state)
+        final_state = await run_with_esc_cancellation(
+            harness.orchestrator.run(state),
+            status_message="[bold green]Workflow executing...[/bold green]",
+            console=console,
+        )
         console.print()
         print_workflow_status(final_state, console)
         return final_state
@@ -360,12 +371,15 @@ async def _run_orchestrator_chat_turn(
         git_info = _get_git_info(path)
         project_context = f"Project: {path.name}\nBranch: {git_info}\nPath: {path.resolve()}"
 
-        with console.status("[bold cyan]Orchestrator thinking...[/bold cyan]", spinner="dots"):
-            turn = await orch_agent.chat(
+        turn = await run_with_esc_cancellation(
+            orch_agent.chat(
                 user_input,
                 history=history,
                 project_context=project_context,
-            )
+            ),
+            status_message="[bold cyan]Orchestrator thinking...[/bold cyan]",
+            console=console,
+        )
 
         console.print()
         console.print("[bold cyan]🎯 Orchestrator:[/bold cyan]")
@@ -392,7 +406,11 @@ async def _run_orchestrator_chat_turn(
             event_bus.subscribe(CliEventPrinter(console))
 
             state = WorkflowState(user_request=turn.handoff_requirements)
-            final_state = await harness.orchestrator.run(state)
+            final_state = await run_with_esc_cancellation(
+                harness.orchestrator.run(state),
+                status_message="[bold green]Workflow executing...[/bold green]",
+                console=console,
+            )
             console.print()
             print_workflow_status(final_state, console)
 
@@ -523,6 +541,8 @@ def run_chat_session(path: Path = Path(".")) -> None:
                             f"[Workflow {state.workflow_id} executed with status {state.status.value}]"
                         )
                     )
+            except UserCancelledError:
+                console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
             except ForgeError as exc:
                 console.print(f"[red]error:[/red] {exc}")
             except Exception as exc:
@@ -543,6 +563,8 @@ def run_chat_session(path: Path = Path(".")) -> None:
             )
             if wid is not None:
                 current_workflow_id = wid
+        except UserCancelledError:
+            console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
         except ForgeError as exc:
             console.print(f"[red]error:[/red] {exc}")
         except Exception as exc:

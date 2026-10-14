@@ -49,3 +49,8 @@ class ToolError(ForgeError):
 
 class WorkflowError(ForgeError):
     """The workflow reached an invalid or unrecoverable state."""
+
+
+class UserCancelledError(ForgeError):
+    """An operation or agent thinking turn was cancelled by the user (e.g. Esc or Ctrl+C)."""
+
