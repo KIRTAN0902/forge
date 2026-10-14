@@ -12,7 +12,7 @@ See [`FORGE_SPECIFICATION.md`](FORGE_SPECIFICATION.md) for the product specifica
 
 ## 🚀 Quick Install
 
-No Node.js or NPM required. Install Forge globally in one command:
+Install Forge globally in one command:
 
 ### Windows (PowerShell)
 ```powershell
@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/KIRTAN0902/forge/main/install.sh | 
 uv tool install --force git+https://github.com/KIRTAN0902/forge.git
 ```
 
-### Zero-Install Run (`uvx` - Native Python `npx`)
+### Zero-Install Run (`uvx`)
 Run Forge immediately without installing anything; always executes the latest commit on `main`:
 ```bash
 uvx --from git+https://github.com/KIRTAN0902/forge.git@main --refresh forge chat
