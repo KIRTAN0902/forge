@@ -93,21 +93,48 @@ def version() -> None:
 @app.command("update")
 def update_command() -> None:
     """Update Forge to the latest version directly from GitHub."""
+    import os
     import shutil
     import subprocess
 
     console.print("[cyan]Checking and installing the latest updates from GitHub main...[/cyan]")
-    if shutil.which("uv"):
-        res = subprocess.run(
-            ["uv", "tool", "install", "--force", "git+https://github.com/KIRTAN0902/forge.git"],
-            capture_output=True,
-            text=True,
-        )
-        if res.returncode == 0:
-            console.print(
-                "[bold green]✔ Successfully updated Forge to the latest commit on GitHub main![/bold green]"
+
+    # Find uv binary
+    uv_bin = shutil.which("uv") or shutil.which("uv.exe")
+    if not uv_bin:
+        home = Path.home()
+        candidates = [
+            home / ".local" / "bin" / "uv.exe",
+            home / ".cargo" / "bin" / "uv.exe",
+            Path(os.environ.get("APPDATA", "")) / "uv" / "bin" / "uv.exe",
+        ]
+        for c in candidates:
+            if c.is_file():
+                uv_bin = str(c)
+                break
+
+    if uv_bin:
+        try:
+            res = subprocess.run(
+                [uv_bin, "tool", "install", "--force", "git+https://github.com/KIRTAN0902/forge.git"],
+                capture_output=True,
+                text=True,
             )
-            return
+            if res.returncode == 0:
+                console.print(
+                    "[bold green]✔ Successfully updated Forge to the latest commit on GitHub main![/bold green]"
+                )
+                return
+            else:
+                # If Windows locked the running forge.exe binary, explain clearly
+                if "used by another process" in res.stderr or "PermissionDenied" in res.stderr:
+                    console.print("[yellow]Notice: Windows file lock detected on currently running forge.exe.[/yellow]")
+                    console.print("[cyan]To complete the update, run in your terminal:[/cyan]")
+                    console.print("  [bold white]uv tool install --force git+https://github.com/KIRTAN0902/forge.git[/bold white]")
+                    return
+                console.print(f"[red]uv error:[/red] {res.stderr.strip()}")
+        except Exception as e:
+            console.print(f"[yellow]Update check error: {e}[/yellow]")
 
     if shutil.which("pipx"):
         res = subprocess.run(
