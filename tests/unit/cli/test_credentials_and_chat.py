@@ -1,0 +1,161 @@
+"""Unit tests for credentials management and interactive chat interface."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+from rich.console import Console
+from typer.testing import CliRunner
+
+from forge.cli.app import app
+from forge.cli.chat import print_banner, print_help, read_user_input, run_chat_session
+from forge.cli.credentials import (
+    ensure_credentials_configured,
+    init_credentials_env,
+    load_stored_credentials,
+    prompt_for_credentials,
+    resolve_default_model_profile,
+    save_stored_credentials,
+)
+
+
+class TestCredentialsManager:
+    def test_save_and_load_credentials(self, tmp_path: Path) -> None:
+        creds_file = tmp_path / "credentials.json"
+        with (
+            patch("forge.cli.credentials.CREDENTIALS_DIR", tmp_path),
+            patch("forge.cli.credentials.CREDENTIALS_FILE", creds_file),
+        ):
+            # Initially empty
+            assert load_stored_credentials() is None
+
+            # Save credentials
+            save_stored_credentials(
+                provider="openrouter",
+                api_key="sk-or-test-key-123",
+                model="anthropic/claude-3.7-sonnet",
+            )
+            assert creds_file.is_file()
+
+            # Load credentials
+            loaded = load_stored_credentials()
+            assert loaded is not None
+            assert loaded["provider"] == "openrouter"
+            assert loaded["api_key"] == "sk-or-test-key-123"
+            assert loaded["model"] == "anthropic/claude-3.7-sonnet"
+
+    def test_init_credentials_env(self, tmp_path: Path) -> None:
+        creds_file = tmp_path / "credentials.json"
+        with (
+            patch("forge.cli.credentials.CREDENTIALS_DIR", tmp_path),
+            patch("forge.cli.credentials.CREDENTIALS_FILE", creds_file),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            save_stored_credentials(
+                provider="openrouter",
+                api_key="sk-or-env-test",
+                model="test-model",
+            )
+            assert "OPENROUTER_API_KEY" not in os.environ
+            active = init_credentials_env()
+            assert active is True
+            assert os.environ["OPENROUTER_API_KEY"] == "sk-or-env-test"
+            assert os.environ["FORGE_DEFAULT_MODEL"] == "test-model"
+
+    def test_resolve_default_model_profile(self) -> None:
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test"}, clear=True):
+            name, profile = resolve_default_model_profile()
+            assert name == "openrouter_default"
+            assert profile is not None
+            assert profile.provider == "openrouter"
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+            name, profile = resolve_default_model_profile()
+            assert name == "openai_default"
+            assert profile is not None
+            assert profile.provider == "openai"
+
+    def test_prompt_for_credentials(self, tmp_path: Path) -> None:
+        creds_file = tmp_path / "credentials.json"
+        console = Console(record=True)
+
+        with (
+            patch("forge.cli.credentials.CREDENTIALS_DIR", tmp_path),
+            patch("forge.cli.credentials.CREDENTIALS_FILE", creds_file),
+            patch("forge.cli.credentials.Prompt.ask") as mock_ask,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            # 1. choice="1", 2. api_key="sk-test", 3. model="anthropic/claude-3.7-sonnet"
+            mock_ask.side_effect = ["1", "sk-test-prompt", "anthropic/claude-3.7-sonnet"]
+            result = prompt_for_credentials(console)
+
+            assert result["provider"] == "openrouter"
+            assert result["api_key"] == "sk-test-prompt"
+            assert load_stored_credentials() is not None
+
+    def test_ensure_credentials_configured_skips_when_present(self) -> None:
+        console = Console()
+        with (
+            patch("forge.cli.credentials.init_credentials_env", return_value=True),
+            patch("forge.cli.credentials.prompt_for_credentials") as mock_prompt,
+        ):
+            ensure_credentials_configured(console, force_prompt=False)
+            mock_prompt.assert_not_called()
+
+
+class TestChatInterface:
+    def test_print_banner_and_help(self, tmp_path: Path) -> None:
+        console = Console(record=True)
+        print_banner(console, tmp_path)
+        output = console.export_text()
+        assert "Interactive Agent Session" in output
+        assert tmp_path.name in output
+
+        console_help = Console(record=True)
+        print_help(console_help)
+        help_output = console_help.export_text()
+        assert "/help" in help_output
+        assert "/diff" in help_output
+        assert "/status" in help_output
+        assert "/rollback" in help_output
+
+    def test_read_user_input_fallback(self) -> None:
+        console = Console()
+        with patch("rich.prompt.Prompt.ask", return_value="hello forge"):
+            val = read_user_input(session=None, console=console)
+            assert val == "hello forge"
+
+    def test_run_chat_session_slash_commands(self, tmp_path: Path) -> None:
+        # Mock inputs: /help, /models, /exit
+        inputs = iter(["/help", "/models", "/exit"])
+
+        with (
+            patch("forge.cli.chat.ensure_credentials_configured"),
+            patch("forge.cli.chat.read_user_input", side_effect=lambda *args: next(inputs)),
+        ):
+            # Should run the 3 commands and exit gracefully
+            run_chat_session(path=tmp_path)
+            assert (tmp_path / ".forge").is_dir()
+
+    def test_cli_default_launches_chat(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with patch("forge.cli.chat.run_chat_session") as mock_chat:
+            result = runner.invoke(app, ["--path", str(tmp_path)])
+            assert result.exit_code == 0
+            mock_chat.assert_called_once()
+
+    def test_cli_chat_command(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with patch("forge.cli.chat.run_chat_session") as mock_chat:
+            result = runner.invoke(app, ["chat", "--path", str(tmp_path)])
+            assert result.exit_code == 0
+            mock_chat.assert_called_once()
+
+    def test_cli_login_command(self) -> None:
+        runner = CliRunner()
+        with patch("forge.cli.credentials.prompt_for_credentials") as mock_prompt:
+            result = runner.invoke(app, ["login"])
+            assert result.exit_code == 0
+            mock_prompt.assert_called_once()
