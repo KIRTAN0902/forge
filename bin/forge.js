@@ -17,11 +17,14 @@ function resolveRealForgeExecutable() {
       const lines = res.stdout.trim().split(/\r?\n/);
       for (const line of lines) {
         const trimmed = line.trim();
-        // Ignore npm shims and this wrapper itself
+        // Ignore npm shims, nodejs directory, and this wrapper itself
         if (
           !trimmed.includes("node_modules") &&
           !trimmed.includes("_npx") &&
-          !trimmed.endsWith("forge.js")
+          !trimmed.toLowerCase().includes("nodejs") &&
+          !trimmed.endsWith("forge.js") &&
+          !trimmed.endsWith("forge.cmd") &&
+          !trimmed.endsWith("forge.ps1")
         ) {
           return trimmed;
         }
@@ -78,16 +81,16 @@ function main() {
     return;
   }
 
-  // 2. If uvx / uv is available, execute through uv
+  // 2. If uvx / uv is available, execute through uv with --refresh to always get latest main
   const uvxExe = resolveExecutable("uvx");
   if (uvxExe) {
-    runCommand(uvxExe, ["--from", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
+    runCommand(uvxExe, ["--from", "git+https://github.com/KIRTAN0902/forge.git@main", "--refresh", "forge", ...args]);
     return;
   }
 
   const uvExe = resolveExecutable("uv");
   if (uvExe) {
-    runCommand(uvExe, ["tool", "run", "--from", "git+https://github.com/KIRTAN0902/forge.git", "forge", ...args]);
+    runCommand(uvExe, ["tool", "run", "--from", "git+https://github.com/KIRTAN0902/forge.git@main", "--refresh", "forge", ...args]);
     return;
   }
 

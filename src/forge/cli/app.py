@@ -90,6 +90,41 @@ def version() -> None:
     console.print(f"forge {__version__}")
 
 
+@app.command("update")
+def update_command() -> None:
+    """Update Forge to the latest version directly from GitHub."""
+    import shutil
+    import subprocess
+
+    console.print("[cyan]Checking and installing the latest updates from GitHub main...[/cyan]")
+    if shutil.which("uv"):
+        res = subprocess.run(
+            ["uv", "tool", "install", "--force", "git+https://github.com/KIRTAN0902/forge.git"],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0:
+            console.print(
+                "[bold green]✔ Successfully updated Forge to the latest commit on GitHub main![/bold green]"
+            )
+            return
+
+    if shutil.which("pipx"):
+        res = subprocess.run(
+            ["pipx", "install", "--force", "git+https://github.com/KIRTAN0902/forge.git"],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0:
+            console.print("[bold green]✔ Successfully updated Forge via pipx![/bold green]")
+            return
+
+    console.print("[yellow]To update manually, run:[/yellow]")
+    console.print(
+        "  [bold white]uv tool install --force git+https://github.com/KIRTAN0902/forge.git[/bold white]"
+    )
+
+
 @app.command()
 def init(
     path: Annotated[Path, typer.Argument(help="Project root.")] = Path("."),
