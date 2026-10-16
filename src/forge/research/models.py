@@ -10,8 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field
 class SourceTier(StrEnum):
     """Hierarchy of scientific & empirical evidence authority."""
 
-    TIER_1_PRIMARY_PAPER = "tier_1_primary_paper"  # Peer-reviewed journal/conference or arXiv preprint
-    TIER_2_ENGINEERING_ARTIFACT = "tier_2_engineering_artifact"  # Official docs, GitHub repo, benchmark logs
+    TIER_1_PRIMARY_PAPER = (
+        "tier_1_primary_paper"  # Peer-reviewed journal/conference or arXiv preprint
+    )
+    TIER_2_ENGINEERING_ARTIFACT = (
+        "tier_2_engineering_artifact"  # Official docs, GitHub repo, benchmark logs
+    )
     TIER_3_SECONDARY_WEB = "tier_3_secondary_web"  # Technical blogs, community discussions
 
 
@@ -98,7 +102,9 @@ class EmpiricalExperimentResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     hypothesis: str = Field(description="Empirical or algorithmic hypothesis being tested.")
-    script_path: str = Field(description="Relative path to benchmark script inside .forge/research/experiments/.")
+    script_path: str = Field(
+        description="Relative path to benchmark script inside .forge/research/experiments/."
+    )
     exit_code: int = Field(description="Process exit code (0 indicates clean execution).")
     metrics_table_markdown: str = Field(
         description="Markdown table summarizing measured runtimes, memory, or metric distributions."

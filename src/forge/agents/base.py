@@ -34,7 +34,6 @@ class AgentChatTurn:
     messages: list[Message] = field(default_factory=list)
 
 
-
 class BaseAgent:
     """Base class for specialist agents."""
 
@@ -161,4 +160,3 @@ class BaseAgent:
             response_text=raw_text,
             messages=updated_messages,
         )
-

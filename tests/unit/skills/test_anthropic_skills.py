@@ -57,7 +57,9 @@ def test_skill_evaluator_triggers_anthropic_skills() -> None:
     evaluator = SkillEvaluator()
 
     # 1. Frontend design prompt
-    sig_ui = SkillSignal(user_request="Create a responsive landing page layout with modern typography")
+    sig_ui = SkillSignal(
+        user_request="Create a responsive landing page layout with modern typography"
+    )
     acts_ui = evaluator.evaluate(sig_ui)
     assert any(a.skill.id == "ANT-01" for a in acts_ui)
 
@@ -67,7 +69,9 @@ def test_skill_evaluator_triggers_anthropic_skills() -> None:
     assert any(a.skill.id == "ANT-03" for a in acts_excel)
 
     # 3. Word document touched file
-    sig_doc = SkillSignal(user_request="Update executive summary", touched_files=["reports/memo.docx"])
+    sig_doc = SkillSignal(
+        user_request="Update executive summary", touched_files=["reports/memo.docx"]
+    )
     acts_doc = evaluator.evaluate(sig_doc)
     assert any(a.skill.id == "ANT-02" for a in acts_doc)
 

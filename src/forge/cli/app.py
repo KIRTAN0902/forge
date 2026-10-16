@@ -58,12 +58,48 @@ err_console = Console(stderr=True, legacy_windows=False)
 def main_callback(
     ctx: typer.Context,
     path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+    headless: Annotated[
+        bool, typer.Option("--headless", help="Run without TUI interface.")
+    ] = False,
+    one_shot: Annotated[
+        bool, typer.Option("--one-shot", help="Run in non-interactive single-command mode.")
+    ] = False,
+    classic: Annotated[bool, typer.Option("--classic", help="Run classic chat session.")] = False,
 ) -> None:
     """Forge: an autonomous multi-agent software engineering harness."""
     if ctx.invoked_subcommand is None:
-        from forge.cli.chat import run_chat_session
+        if headless or one_shot:
+            return
+        if classic:
+            from forge.cli.chat import run_chat_session
 
-        run_chat_session(path=path)
+            run_chat_session(path=path)
+            return
+
+        from forge.ui.cycle_controller import ForgeCycleController
+        from forge.ui.split_app import ForgeSplitPaneApp
+        from forge.ui.state import ForgeTUIState
+
+        state = ForgeTUIState()
+        controller = ForgeCycleController(state=state)
+        app_instance = ForgeSplitPaneApp(state=state, controller=controller, path=path)
+        app_instance.run()
+
+
+@app.command("split")
+@app.command("tui")
+def split_command(
+    path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
+) -> None:
+    """Start the persistent full-screen split-pane blacksmithing workspace."""
+    from forge.ui.cycle_controller import ForgeCycleController
+    from forge.ui.split_app import ForgeSplitPaneApp
+    from forge.ui.state import ForgeTUIState
+
+    state = ForgeTUIState()
+    controller = ForgeCycleController(state=state)
+    app_instance = ForgeSplitPaneApp(state=state, controller=controller, path=path)
+    app_instance.run()
 
 
 @app.command("chat")
@@ -116,7 +152,13 @@ def update_command() -> None:
     if uv_bin:
         try:
             res = subprocess.run(
-                [uv_bin, "tool", "install", "--force", "git+https://github.com/KIRTAN0902/forge.git"],
+                [
+                    uv_bin,
+                    "tool",
+                    "install",
+                    "--force",
+                    "git+https://github.com/KIRTAN0902/forge.git",
+                ],
                 capture_output=True,
                 text=True,
             )
@@ -128,9 +170,13 @@ def update_command() -> None:
             else:
                 # If Windows locked the running forge.exe binary, explain clearly
                 if "used by another process" in res.stderr or "PermissionDenied" in res.stderr:
-                    console.print("[yellow]Notice: Windows file lock detected on currently running forge.exe.[/yellow]")
+                    console.print(
+                        "[yellow]Notice: Windows file lock detected on currently running forge.exe.[/yellow]"
+                    )
                     console.print("[cyan]To complete the update, run in your terminal:[/cyan]")
-                    console.print("  [bold white]uv tool install --force git+https://github.com/KIRTAN0902/forge.git[/bold white]")
+                    console.print(
+                        "  [bold white]uv tool install --force git+https://github.com/KIRTAN0902/forge.git[/bold white]"
+                    )
                     return
                 console.print(f"[red]uv error:[/red] {res.stderr.strip()}")
         except Exception as e:
@@ -939,8 +985,12 @@ def research_command(
             f"[bold green]✓[/bold green] Initialized 4 STORM inquiry personas: {', '.join(p.name for p in personas)}"
         )
 
-        with console.status("[bold cyan]Executing multi-hop retrieval waves across arXiv & academic graphs...[/bold cyan]"):
-            evidence_map, wave_gains = await storm.execute_inquiry_waves(topic, personas, max_waves=max_waves)
+        with console.status(
+            "[bold cyan]Executing multi-hop retrieval waves across arXiv & academic graphs...[/bold cyan]"
+        ):
+            evidence_map, wave_gains = await storm.execute_inquiry_waves(
+                topic, personas, max_waves=max_waves
+            )
 
         console.print(
             f"[bold green]✓[/bold green] Harvested [bold white]{len(evidence_map)}[/bold white] verified evidence nodes "
@@ -953,7 +1003,9 @@ def research_command(
             evidence_map=evidence_map,
         )
 
-        with console.status("[bold cyan]Synthesizing contradiction and confounder matrices...[/bold cyan]"):
+        with console.status(
+            "[bold cyan]Synthesizing contradiction and confounder matrices...[/bold cyan]"
+        ):
             contradictions = ContradictionAnalyzer.analyze_contradictions(ledger)
             ledger.contradictions.extend(contradictions)
 
@@ -962,7 +1014,9 @@ def research_command(
         )
 
         # Execute empirical sandbox verification
-        with console.status("[bold cyan]Executing sandbox empirical benchmark in process sandbox...[/bold cyan]"):
+        with console.status(
+            "[bold cyan]Executing sandbox empirical benchmark in process sandbox...[/bold cyan]"
+        ):
             runner = EmpiricalLabRunner(workspace)
             sample_bench = (
                 "import time\n"
@@ -979,9 +1033,13 @@ def research_command(
             )
             ledger.experiments.append(exp_result)
 
-        console.print(f"[bold green]✓[/bold green] Sandbox experiment complete: exit code {exp_result.exit_code}.")
+        console.print(
+            f"[bold green]✓[/bold green] Sandbox experiment complete: exit code {exp_result.exit_code}."
+        )
 
-        with console.status("[bold cyan]Compiling section-by-section LaTeX manuscript and BibTeX database...[/bold cyan]"):
+        with console.status(
+            "[bold cyan]Compiling section-by-section LaTeX manuscript and BibTeX database...[/bold cyan]"
+        ):
             compiler = ManuscriptCompiler(workspace)
             artifacts = compiler.export_artifacts(ledger)
 

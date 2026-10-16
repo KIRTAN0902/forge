@@ -13,7 +13,9 @@ from forge.research.verifier import ZeroTrustCitationAuditor
 class ManuscriptCompiler:
     """Compiles multi-section publication-grade manuscripts with verified citations."""
 
-    def __init__(self, workspace_root: Path, auditor: ZeroTrustCitationAuditor | None = None) -> None:
+    def __init__(
+        self, workspace_root: Path, auditor: ZeroTrustCitationAuditor | None = None
+    ) -> None:
         self.workspace_root = workspace_root
         self.auditor = auditor or ZeroTrustCitationAuditor()
 
@@ -31,12 +33,28 @@ class ManuscriptCompiler:
         ]
         sample_nodes = nodes[:8] if len(nodes) >= 5 else nodes
         for node in sample_nodes:
-            paradigm = "Multi-Turn Reflexion" if "reflex" in node.title.lower() else (
-                "Retrieval-Augmented" if "retriev" in node.title.lower() or "rag" in node.title.lower() else "Iterative Harness"
+            paradigm = (
+                "Multi-Turn Reflexion"
+                if "reflex" in node.title.lower()
+                else (
+                    "Retrieval-Augmented"
+                    if "retriev" in node.title.lower() or "rag" in node.title.lower()
+                    else "Iterative Harness"
+                )
             )
-            rigor = "Adversarial AST Gates" if node.source_tier.value == "tier_1_primary_paper" else "Empirical Heuristics"
-            efficiency = "Bounded Skeletonization" if "context" in node.abstract_or_summary.lower() else "High Token Density"
-            rows.append(f"| **{node.title[:32]}** | {paradigm} | {rigor} | {efficiency} | [@{node.cite_key}] |")
+            rigor = (
+                "Adversarial AST Gates"
+                if node.source_tier.value == "tier_1_primary_paper"
+                else "Empirical Heuristics"
+            )
+            efficiency = (
+                "Bounded Skeletonization"
+                if "context" in node.abstract_or_summary.lower()
+                else "High Token Density"
+            )
+            rows.append(
+                f"| **{node.title[:32]}** | {paradigm} | {rigor} | {efficiency} | [@{node.cite_key}] |"
+            )
 
         # Guarantee at least 5 rows if fewer nodes were harvested
         dummy_idx = len(sample_nodes) + 1

@@ -98,53 +98,55 @@ else:
     CHECK_ICON = "v"
 
 
-MODAL_STYLE = Style.from_dict({
-    # Backdrop behind the floating modal card
-    "backdrop": "bg:#070b12",
-    # Modal card container
-    "card": "bg:#0d1117 fg:#f1f5f9",
-    "card_bg": "bg:#0d1117",
-    # Frame borders
-    "border": "bg:#0d1117 fg:#1e293b",
-    "border_cyan": "bg:#0d1117 fg:#0891b2",
-    # Top brand & title
-    "brand_bolt": "bg:#0d1117 fg:#00e5ff bold",
-    "brand_name": "bg:#0d1117 fg:#38bdf8 bold",
-    "title_sep": "bg:#0d1117 fg:#475569",
-    "title_text": "bg:#0d1117 fg:#ffffff bold",
-    "esc_pill": "bg:#0d1117 fg:#64748b",
-    # Search row
-    "search_icon": "bg:#0d1117 fg:#00e5ff bold",
-    "search_prompt": "bg:#0d1117 fg:#64748b italic",
-    "search_text": "bg:#0d1117 fg:#ffffff bold",
-    "cursor": "bg:#0d1117 fg:#00e5ff bold",
-    "counter_pill": "bg:#0d1117 fg:#64748b",
-    "counter_highlight": "bg:#0d1117 fg:#00e5ff bold",
-    "counter_none": "bg:#0d1117 fg:#f59e0b italic",
-    # Section headers
-    "section_icon": "bg:#0d1117 fg:#00e5ff",
-    "section_title": "bg:#0d1117 fg:#38bdf8 bold",
-    # Scroll hints
-    "scroll_hint": "bg:#0d1117 fg:#64748b",
-    # Normal item row
-    "item_normal": "bg:#0d1117 fg:#f1f5f9",
-    "item_dim": "bg:#0d1117 fg:#64748b",
-    "item_badge": "bg:#0d1117 fg:#06b6d4",
-    "item_badge_green": "bg:#0d1117 fg:#10b981 bold",
-    "item_check": "bg:#0d1117 fg:#10b981 bold",
-    "item_dot": "bg:#0d1117 fg:#10b981 bold",
-    # Selected/Active item row (glowing Forge cyan highlight bar)
-    "pointer_active": "bg:#06b6d4 fg:#031d28 bold",
-    "item_selected": "bg:#06b6d4 fg:#031d28 bold",
-    "item_selected_dim": "bg:#06b6d4 fg:#164e63",
-    "item_selected_badge": "bg:#06b6d4 fg:#031d28 bold",
-    "item_selected_check": "bg:#06b6d4 fg:#031d28 bold",
-    "item_selected_dot": "bg:#06b6d4 fg:#031d28 bold",
-    # Footer toolbar
-    "footer_key": "bg:#0d1117 fg:#00e5ff bold",
-    "footer_label": "bg:#0d1117 fg:#94a3b8",
-    "no_matches": "bg:#0d1117 fg:#94a3b8 italic",
-})
+MODAL_STYLE = Style.from_dict(
+    {
+        # Backdrop behind the floating modal card
+        "backdrop": "bg:#070b12",
+        # Modal card container
+        "card": "bg:#0d1117 fg:#f1f5f9",
+        "card_bg": "bg:#0d1117",
+        # Frame borders
+        "border": "bg:#0d1117 fg:#1e293b",
+        "border_cyan": "bg:#0d1117 fg:#0891b2",
+        # Top brand & title
+        "brand_bolt": "bg:#0d1117 fg:#00e5ff bold",
+        "brand_name": "bg:#0d1117 fg:#38bdf8 bold",
+        "title_sep": "bg:#0d1117 fg:#475569",
+        "title_text": "bg:#0d1117 fg:#ffffff bold",
+        "esc_pill": "bg:#0d1117 fg:#64748b",
+        # Search row
+        "search_icon": "bg:#0d1117 fg:#00e5ff bold",
+        "search_prompt": "bg:#0d1117 fg:#64748b italic",
+        "search_text": "bg:#0d1117 fg:#ffffff bold",
+        "cursor": "bg:#0d1117 fg:#00e5ff bold",
+        "counter_pill": "bg:#0d1117 fg:#64748b",
+        "counter_highlight": "bg:#0d1117 fg:#00e5ff bold",
+        "counter_none": "bg:#0d1117 fg:#f59e0b italic",
+        # Section headers
+        "section_icon": "bg:#0d1117 fg:#00e5ff",
+        "section_title": "bg:#0d1117 fg:#38bdf8 bold",
+        # Scroll hints
+        "scroll_hint": "bg:#0d1117 fg:#64748b",
+        # Normal item row
+        "item_normal": "bg:#0d1117 fg:#f1f5f9",
+        "item_dim": "bg:#0d1117 fg:#64748b",
+        "item_badge": "bg:#0d1117 fg:#06b6d4",
+        "item_badge_green": "bg:#0d1117 fg:#10b981 bold",
+        "item_check": "bg:#0d1117 fg:#10b981 bold",
+        "item_dot": "bg:#0d1117 fg:#10b981 bold",
+        # Selected/Active item row (glowing Forge cyan highlight bar)
+        "pointer_active": "bg:#06b6d4 fg:#031d28 bold",
+        "item_selected": "bg:#06b6d4 fg:#031d28 bold",
+        "item_selected_dim": "bg:#06b6d4 fg:#164e63",
+        "item_selected_badge": "bg:#06b6d4 fg:#031d28 bold",
+        "item_selected_check": "bg:#06b6d4 fg:#031d28 bold",
+        "item_selected_dot": "bg:#06b6d4 fg:#031d28 bold",
+        # Footer toolbar
+        "footer_key": "bg:#0d1117 fg:#00e5ff bold",
+        "footer_label": "bg:#0d1117 fg:#94a3b8",
+        "no_matches": "bg:#0d1117 fg:#94a3b8 italic",
+    }
+)
 
 
 def run_tui_modal(
@@ -325,7 +327,9 @@ def run_tui_modal(
             lines.append(("class:scroll_hint", hint))
             lines.append(("class:border", (BORDER_H * max(0, rem)) + BORDER_RT + "\n"))
         else:
-            lines.append(("class:border", BORDER_LT + (BORDER_H * (card_width - 2)) + BORDER_RT + "\n"))
+            lines.append(
+                ("class:border", BORDER_LT + (BORDER_H * (card_width - 2)) + BORDER_RT + "\n")
+            )
 
         # 6. Items viewport rows
         displayed_rows = 0
@@ -341,7 +345,7 @@ def run_tui_modal(
                 lines.append(("class:border", " " + BORDER_V + "\n"))
             elif entry.item is not None:
                 item = entry.item
-                is_active = (entry.item_index == selected_index)
+                is_active = entry.item_index == selected_index
 
                 pointer_str = f" {POINTER} " if is_active else "   "
 
@@ -429,7 +433,9 @@ def run_tui_modal(
             lines.append(("class:scroll_hint", hint))
             lines.append(("class:border", (BORDER_H * max(0, rem)) + BORDER_RT + "\n"))
         else:
-            lines.append(("class:border", BORDER_LT + (BORDER_H * (card_width - 2)) + BORDER_RT + "\n"))
+            lines.append(
+                ("class:border", BORDER_LT + (BORDER_H * (card_width - 2)) + BORDER_RT + "\n")
+            )
 
         # 8. Footer action toolbar
         k_nav = "[↑↓] "
@@ -530,6 +536,7 @@ def run_tui_modal(
         event.app.exit(result=None)
 
     if allow_ctrl_a:
+
         @kb.add("c-a")
         def _ctrl_a(event: KeyPressEvent) -> None:
             event.app.exit(result=CTRL_A_TOKEN)
@@ -560,15 +567,20 @@ def run_tui_modal(
         style="class:card",
     )
 
-    root_container = HSplit([
-        Window(),  # Top spacer
-        VSplit([
-            Window(),  # Left spacer
-            card_window,
-            Window(),  # Right spacer
-        ]),
-        Window(),  # Bottom spacer
-    ], style="class:backdrop")
+    root_container = HSplit(
+        [
+            Window(),  # Top spacer
+            VSplit(
+                [
+                    Window(),  # Left spacer
+                    card_window,
+                    Window(),  # Right spacer
+                ]
+            ),
+            Window(),  # Bottom spacer
+        ],
+        style="class:backdrop",
+    )
 
     layout = Layout(root_container)
 

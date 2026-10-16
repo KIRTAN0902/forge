@@ -53,14 +53,18 @@ class TestDesignEngineeringSkills:
 
     def test_evaluator_triggers_impeccable(self) -> None:
         evaluator = SkillEvaluator()
-        signal = SkillSignal(user_request="Perform visual audit and eliminate UI anti-patterns in the styles")
+        signal = SkillSignal(
+            user_request="Perform visual audit and eliminate UI anti-patterns in the styles"
+        )
         activations = evaluator.evaluate(signal)
         active_ids = {act.skill.id for act in activations}
         assert "DSN-01" in active_ids
 
     def test_evaluator_triggers_ui_ux_pro_max(self) -> None:
         evaluator = SkillEvaluator()
-        signal = SkillSignal(user_request="Design an empty state with responsive mobile layouts and skeleton loader")
+        signal = SkillSignal(
+            user_request="Design an empty state with responsive mobile layouts and skeleton loader"
+        )
         activations = evaluator.evaluate(signal)
         active_ids = {act.skill.id for act in activations}
         assert "DSN-02" in active_ids
@@ -74,14 +78,18 @@ class TestDesignEngineeringSkills:
 
     def test_evaluator_triggers_emil_design_engineering(self) -> None:
         evaluator = SkillEvaluator()
-        signal = SkillSignal(user_request="Implement micro-interaction with physics spring and layoutId morphing")
+        signal = SkillSignal(
+            user_request="Implement micro-interaction with physics spring and layoutId morphing"
+        )
         activations = evaluator.evaluate(signal)
         active_ids = {act.skill.id for act in activations}
         assert "DSN-04" in active_ids
 
     def test_evaluator_triggers_anthropic_frontend_design(self) -> None:
         evaluator = SkillEvaluator()
-        signal = SkillSignal(user_request="Design a bento grid with distinctive editorial typography")
+        signal = SkillSignal(
+            user_request="Design a bento grid with distinctive editorial typography"
+        )
         activations = evaluator.evaluate(signal)
         active_ids = {act.skill.id for act in activations}
         assert "ANT-01" in active_ids

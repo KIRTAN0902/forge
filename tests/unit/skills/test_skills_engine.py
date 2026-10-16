@@ -22,14 +22,30 @@ def test_registry_contains_all_24_skills() -> None:
     assert len(skills) == 24
 
     expected_ids = {
-        "DBG-01", "DBG-02", "DBG-03",
-        "REF-01", "REF-02", "REF-03",
-        "DB-01", "DB-02", "DB-03",
-        "API-01", "API-02", "API-03",
-        "SEC-01", "SEC-02", "SEC-03",
-        "PERF-01", "PERF-02", "PERF-03",
-        "TST-01", "TST-02", "TST-03",
-        "DOC-01", "DOC-02", "DOC-03",
+        "DBG-01",
+        "DBG-02",
+        "DBG-03",
+        "REF-01",
+        "REF-02",
+        "REF-03",
+        "DB-01",
+        "DB-02",
+        "DB-03",
+        "API-01",
+        "API-02",
+        "API-03",
+        "SEC-01",
+        "SEC-02",
+        "SEC-03",
+        "PERF-01",
+        "PERF-02",
+        "PERF-03",
+        "TST-01",
+        "TST-02",
+        "TST-03",
+        "DOC-01",
+        "DOC-02",
+        "DOC-03",
     }
     registered_ids = {s.id for s in skills}
     assert registered_ids == expected_ids
@@ -73,7 +89,9 @@ def test_evaluator_triggers_debugging_skills() -> None:
     assert any(a.skill.id == "DBG-01" for a in act1)
 
     # DBG-02: Regression report
-    sig2 = SkillSignal(user_request="This feature used to work before the last PR, please investigate the regression")
+    sig2 = SkillSignal(
+        user_request="This feature used to work before the last PR, please investigate the regression"
+    )
     act2 = evaluator.evaluate(sig2)
     assert any(a.skill.id == "DBG-02" for a in act2)
 

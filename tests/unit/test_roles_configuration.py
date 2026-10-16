@@ -249,7 +249,9 @@ class TestRolesConfiguration:
 
         with (
             patch("forge.cli.tui_modal.run_tui_modal", return_value=chosen_item),
-            patch("forge.cli.roles_wizard.get_provider_api_key", return_value="sk-test-existing-12345"),
+            patch(
+                "forge.cli.roles_wizard.get_provider_api_key", return_value="sk-test-existing-12345"
+            ),
             patch("forge.cli.roles_wizard.Prompt.ask") as mock_ask,
             patch("forge.cli.roles_wizard.save_stored_credentials") as mock_save,
             patch("forge.config.roles.set_provider_config"),
@@ -335,5 +337,3 @@ class TestRolesConfiguration:
             mock_save.assert_called_once_with(
                 "ollama", api_key="", base_url="http://localhost:11434/v1"
             )
-
-

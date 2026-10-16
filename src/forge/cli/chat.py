@@ -387,9 +387,7 @@ def _get_rprompt(state: ChatSessionState) -> list[tuple[str, str]]:
     return [("class:box_border", "│")]
 
 
-def _get_prompt_continuation(
-    width: int, line_number: int, is_soft_wrap: bool
-) -> list[tuple[str, str]]:
+def _get_prompt_continuation(width: int, line_number: int, wrap_count: int) -> Any:
     """Line prefix for multiline continuation inside the enclosed box."""
     return [
         ("class:box_border", "│ "),
@@ -861,7 +859,7 @@ def sanitize_response_for_display(text: str) -> str:
     )
 
     # 7. Format single-file grep output: 'line:content' -> '- **Line line**: `content`'
-    def format_grep_line(match: re.Match) -> str:
+    def format_grep_line(match: re.Match[str]) -> str:
         line_num = match.group(1)
         content = match.group(2).strip()
         return f"- **Line {line_num}**: `{content}`"

@@ -38,6 +38,7 @@ from forge.skills import (
 # Phase 1: Schemas and AutonomousSkillRouter Tests
 # ==============================================================================
 
+
 def test_autonomous_skill_router_catalog_and_filtering() -> None:
     router = AutonomousSkillRouter()
     all_specs = router.list_all_specs()
@@ -115,6 +116,7 @@ def test_compile_operation_sliced_prompt_token_ceiling() -> None:
 # Phase 2: Prosthetic Engine Tests
 # ==============================================================================
 
+
 def test_ast_context_slicer_skeletonization(tmp_path: Path) -> None:
     code = (
         "import os\n"
@@ -180,7 +182,9 @@ def test_fuzzy_anchor_patcher_all_tiers() -> None:
 
     # Tier 1: Exact Match
     search_exact = "    for item in items:\n        total += item.price"
-    replace_exact = "    for item in items:\n        if item.active:\n            total += item.price"
+    replace_exact = (
+        "    for item in items:\n        if item.active:\n            total += item.price"
+    )
     patched1 = FuzzyAnchorPatcher.apply_patch(original, search_exact, replace_exact)
     assert "if item.active:" in patched1
 
@@ -238,6 +242,7 @@ def test_sub100ms_compiler_reflexion_and_rollback(tmp_path: Path) -> None:
 # Phase 3: Amplifier Engine & Worktree Tournament Tests
 # ==============================================================================
 
+
 def test_live_runtime_tracer_execution() -> None:
     tracer = LiveRuntimeTracer(max_records=60)
 
@@ -265,7 +270,9 @@ def test_preflight_falsifier() -> None:
     assert cond.verified is False
 
     # Negative verification
-    res1 = PreFlightFalsifier.verify_condition_against_stderr(cond, "All 5 tests passed successfully")
+    res1 = PreFlightFalsifier.verify_condition_against_stderr(
+        cond, "All 5 tests passed successfully"
+    )
     assert res1.verified is False
 
     # Positive verification
@@ -376,6 +383,7 @@ async def test_speculative_escalation_router_escalation() -> None:
 # Phase 4: Adversarial QA & Episodic Memory Tests
 # ==============================================================================
 
+
 def test_adversarial_qa_cot_stripping() -> None:
     raw_response = (
         "<think>\n"
@@ -410,17 +418,17 @@ def test_ast_security_and_async_auditor() -> None:
         "    eval('1 + 1')\n"
         "    subprocess.run(cmd, shell=True)\n"
     )
-    sec_violations = AdversarialQAGatekeeper.run_pre_commit_audit(diff_text="", source_code=bad_sec_code)
+    sec_violations = AdversarialQAGatekeeper.run_pre_commit_audit(
+        diff_text="", source_code=bad_sec_code
+    )
     assert any("eval" in v for v in sec_violations)
     assert any("shell=True" in v for v in sec_violations)
 
     # 2. Blocking time.sleep inside async def
-    bad_async_code = (
-        "import time\n"
-        "async def fetch_user():\n"
-        "    time.sleep(1)\n"
+    bad_async_code = "import time\nasync def fetch_user():\n    time.sleep(1)\n"
+    async_violations = AdversarialQAGatekeeper.run_pre_commit_audit(
+        diff_text="", source_code=bad_async_code
     )
-    async_violations = AdversarialQAGatekeeper.run_pre_commit_audit(diff_text="", source_code=bad_async_code)
     assert any("time.sleep" in v for v in async_violations)
 
     # 3. Mock patch missing autospec=True
@@ -430,17 +438,16 @@ def test_ast_security_and_async_auditor() -> None:
         "    with patch('os.path.exists'):\n"
         "        pass\n"
     )
-    mock_violations = AdversarialQAGatekeeper.run_pre_commit_audit(diff_text="", source_code=bad_mock_code)
+    mock_violations = AdversarialQAGatekeeper.run_pre_commit_audit(
+        diff_text="", source_code=bad_mock_code
+    )
     assert any("autospec" in v for v in mock_violations)
 
 
 @pytest.mark.asyncio
 async def test_diff_scoped_mutation_engine() -> None:
     code = (
-        "def is_positive(x: int) -> bool:\n"
-        "    if x > 0:\n"
-        "        return True\n"
-        "    return False\n"
+        "def is_positive(x: int) -> bool:\n    if x > 0:\n        return True\n    return False\n"
     )
 
     # Generate mutants

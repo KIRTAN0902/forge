@@ -225,10 +225,7 @@ class JevDecisionEngine:
             score += matching_words * 0.8
 
             # Category boost based on phase
-            if (
-                effective_role == "planning"
-                and s.category in {"documentation", "design"}
-            ) or (
+            if (effective_role == "planning" and s.category in {"documentation", "design"}) or (
                 effective_role == "execution"
                 and s.category in {"debugging", "refactoring", "database", "api", "design"}
             ):
@@ -245,15 +242,11 @@ class JevDecisionEngine:
 
         # Normalize skill confidences
         max_s = max(skill_scores.values()) if skill_scores else 1.0
-        skill_confidences = {
-            s_id: round(sc / max_s, 3) for s_id, sc in skill_scores.items()
-        }
+        skill_confidences = {s_id: round(sc / max_s, 3) for s_id, sc in skill_scores.items()}
 
         # Select skills above confidence threshold (top 1-4 skills)
         sorted_skills = sorted(skill_confidences.items(), key=lambda kv: kv[1], reverse=True)
-        selected_skill_ids: list[str] = [
-            s_id for s_id, conf in sorted_skills if conf >= 0.75
-        ][:4]
+        selected_skill_ids: list[str] = [s_id for s_id, conf in sorted_skills if conf >= 0.75][:4]
 
         # Ensure at least top 1 is included if confidence is reasonable
         if not selected_skill_ids and sorted_skills and sorted_skills[0][1] >= 0.50:

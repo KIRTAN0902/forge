@@ -126,7 +126,11 @@ def parse_design_skills() -> list[tuple[SkillSpec, Skill, list[str]]]:
         skill_id = str(meta_override.get("id", f"DSN-{dirname}"))
         raw_agent = str(meta_override.get("target_agent", "executor"))
         target_agent: Literal["orchestrator", "executor", "qa"] = (
-            "orchestrator" if raw_agent == "orchestrator" else "qa" if raw_agent == "qa" else "executor"
+            "orchestrator"
+            if raw_agent == "orchestrator"
+            else "qa"
+            if raw_agent == "qa"
+            else "executor"
         )
         operations = meta_override.get("operations")
         op_set: set[OperationType] = (
@@ -135,7 +139,9 @@ def parse_design_skills() -> list[tuple[SkillSpec, Skill, list[str]]]:
         globs = meta_override.get("globs")
         glob_list: list[str] = [str(g) for g in globs] if isinstance(globs, list) else []
         keywords = meta_override.get("keywords")
-        keyword_list: list[str] = [str(k) for k in keywords] if isinstance(keywords, list) else [dirname]
+        keyword_list: list[str] = (
+            [str(k) for k in keywords] if isinstance(keywords, list) else [dirname]
+        )
         category = meta_override.get("category", SkillCategory.DESIGN)
         if not isinstance(category, SkillCategory):
             category = SkillCategory.DESIGN

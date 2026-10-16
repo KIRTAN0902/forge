@@ -14,6 +14,7 @@ from forge.core.errors import UserCancelledError
 @pytest.mark.asyncio
 async def test_run_with_esc_cancellation_normal_completion() -> None:
     """Coroutine completes and returns value when no cancellation occurs."""
+
     async def fast_task() -> str:
         await asyncio.sleep(0.01)
         return "done"
@@ -25,6 +26,7 @@ async def test_run_with_esc_cancellation_normal_completion() -> None:
 @pytest.mark.asyncio
 async def test_run_with_esc_cancellation_inner_error_propagates() -> None:
     """Exceptions raised inside the coroutine propagate normally."""
+
     async def failing_task() -> None:
         await asyncio.sleep(0.01)
         raise ValueError("test failure")

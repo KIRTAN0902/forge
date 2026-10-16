@@ -46,7 +46,9 @@ class TestJevPrimitives:
 class TestJevDecisionEngine:
     def test_decide_phase_planning(self) -> None:
         engine = JevDecisionEngine()
-        sig = SkillSignal(user_request="Brainstorm and create the architectural plan for the new bento UI")
+        sig = SkillSignal(
+            user_request="Brainstorm and create the architectural plan for the new bento UI"
+        )
         choice = engine.decide_phase(sig)
         assert choice.selected == "planning"
         assert choice.probabilities["planning"] > choice.probabilities["execution"]
@@ -89,7 +91,9 @@ class TestJevDecisionEngine:
 
     def test_evaluate_boolean_noul(self) -> None:
         engine = JevDecisionEngine()
-        sig = SkillSignal(user_request="Warning: found secret sk-proj-1234567890abcdef123456 in auth.py")
+        sig = SkillSignal(
+            user_request="Warning: found secret sk-proj-1234567890abcdef123456 in auth.py"
+        )
         noul = engine.evaluate_boolean(
             "Contains API secret",
             sig,

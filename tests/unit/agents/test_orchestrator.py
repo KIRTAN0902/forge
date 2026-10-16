@@ -50,7 +50,9 @@ async def test_orchestrator_conversational_brainstorming() -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_handoff_with_tag() -> None:
     provider = ScriptedProvider()
-    handoff_content = "Implement Alembic migration environment in db/migrations with SQLite support."
+    handoff_content = (
+        "Implement Alembic migration environment in db/migrations with SQLite support."
+    )
     provider.add(
         f"Understood. Handing off to the Planning Agent.\n\n"
         f"```forge-handoff\n{handoff_content}\n```"

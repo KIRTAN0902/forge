@@ -95,7 +95,9 @@ def test_zero_trust_citation_auditor_ghost_and_numeric_drift() -> None:
     assert any("Ghost citation detected: [@fake2026ghost]" in v for v in violations_ghost)
 
     # 2. Numeric drift test: Claim asserts 95% while evidence states 72%
-    drift_text = "Reflexion demonstrates an impressive pass@1 of 95% on HumanEval [@shinn2023reflexion]."
+    drift_text = (
+        "Reflexion demonstrates an impressive pass@1 of 95% on HumanEval [@shinn2023reflexion]."
+    )
     violations_drift = auditor.audit_manuscript_claims(drift_text, ledger)
     assert any(
         "Numeric drift detected in citation [@shinn2023reflexion]" in v and "95%" in v
@@ -131,12 +133,40 @@ async def test_storm_inquiry_engine_saturation_logic() -> None:
 
     # Wave 1 returns new nodes; Wave 2 returns nothing new (saturation)
     mock_harvester.search_arxiv.side_effect = [
-        [node1], [], [], [], [], [], [], [],
-        [], [], [], [], [], [], [], [],
+        [node1],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
     ]
     mock_harvester.search_semantic_scholar_and_snowball.side_effect = [
-        [node2], [], [], [], [], [], [], [],
-        [], [], [], [], [], [], [], [],
+        [node2],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
     ]
     mock_harvester.snowball_citations.return_value = []
 
@@ -263,7 +293,10 @@ def test_manuscript_compiler_end_to_end_artifacts(tmp_path: Path) -> None:
 
     # 1. Verify paper.md
     md_content = artifacts["paper_md"].read_text(encoding="utf-8")
-    assert "# Autonomous Cybernetic Synthesis: An Empirical Study of Autonomous Reasoning Architectures" in md_content
+    assert (
+        "# Autonomous Cybernetic Synthesis: An Empirical Study of Autonomous Reasoning Architectures"
+        in md_content
+    )
     assert "## Abstract" in md_content
     assert "## 1. Introduction & Formal Problem Definition" in md_content
     assert "## 2. Taxonomy & Multi-Perspective Literature Review" in md_content

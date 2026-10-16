@@ -20,6 +20,7 @@ from forge.skills.models import OperationType
 # 1. AST Context Slicer & Skeletonizer ([SLM-01] & [HRN-01])
 # ==============================================================================
 
+
 class Skeletonizer(ast.NodeTransformer):
     """AST Transformer that preserves the target symbol while skeletonizing others."""
 
@@ -178,6 +179,7 @@ def find_golden_exemplar(repo_root: Path | str, op_type: OperationType) -> str:
 # 2. Fuzzy Anchor Patcher ([SLM-03] & [HRN-03])
 # ==============================================================================
 
+
 class PatchAnchorNotFoundError(Exception):
     """Raised when search anchor cannot be located in the target source."""
 
@@ -218,7 +220,12 @@ class FuzzyAnchorPatcher:
                 # Matched normalized lines: replace window
                 before = "".join(source_lines[:i])
                 after = "".join(source_lines[i + search_len :])
-                return before + replace_block + ("\n" if not replace_block.endswith("\n") else "") + after
+                return (
+                    before
+                    + replace_block
+                    + ("\n" if not replace_block.endswith("\n") else "")
+                    + after
+                )
 
         # Tier 3: Sliding window with difflib SequenceMatcher >= 0.92
         best_ratio = 0.0
@@ -235,7 +242,9 @@ class FuzzyAnchorPatcher:
         if best_ratio >= 0.92:
             before = "".join(source_lines[:best_idx])
             after = "".join(source_lines[best_idx + search_len :])
-            return before + replace_block + ("\n" if not replace_block.endswith("\n") else "") + after
+            return (
+                before + replace_block + ("\n" if not replace_block.endswith("\n") else "") + after
+            )
 
         closest_candidate = "".join(source_lines[best_idx : best_idx + search_len])
         raise PatchAnchorNotFoundError(
@@ -248,6 +257,7 @@ class FuzzyAnchorPatcher:
 # ==============================================================================
 # 3. Sub-100ms Compiler Reflexion & Rollback ([SLM-05], [SLM-06], [HRN-02])
 # ==============================================================================
+
 
 class CompilerReflexionResult(BaseModel):
     """Result of in-memory AST and fast compiler validation."""

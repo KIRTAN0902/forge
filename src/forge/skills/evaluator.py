@@ -127,7 +127,10 @@ class SkillEvaluator:
 
         # API-01: Bi-Directional Schema & Contract Guard
         if any(
-            any(a in f.lower() for a in ("route", "api", "controller", "endpoint", "openapi", "pydantic"))
+            any(
+                a in f.lower()
+                for a in ("route", "api", "controller", "endpoint", "openapi", "pydantic")
+            )
             for f in signal.touched_files
         ):
             skill = self.registry.get("API-01")
@@ -281,8 +284,6 @@ class SkillEvaluator:
         # Filter by agent role if specified
         if agent_role:
             target_role = agent_role.lower().strip()
-            activations = [
-                act for act in activations if target_role in act.skill.target_agents
-            ]
+            activations = [act for act in activations if target_role in act.skill.target_agents]
 
         return activations

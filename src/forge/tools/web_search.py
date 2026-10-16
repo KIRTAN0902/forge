@@ -20,6 +20,7 @@ from forge.tools.environment import ToolEnvironment
 # HTML Result Parser for DuckDuckGo
 # ==============================================================================
 
+
 class DuckDuckGoHTMLParser(HTMLParser):
     """Parses search result titles, links, and snippets from DuckDuckGo HTML pages."""
 
@@ -78,6 +79,7 @@ class DuckDuckGoHTMLParser(HTMLParser):
 # Web Search Tool
 # ==============================================================================
 
+
 class WebSearchResultItem(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -126,7 +128,9 @@ class WebSearch(Tool[WebSearchInput, WebSearchOutput]):
     permissions: ClassVar[frozenset[Permission]] = frozenset({Permission.READ})
     timeout_s: ClassVar[float] = 30.0
 
-    async def _search_tavily(self, query: str, max_results: int, api_key: str) -> list[WebSearchResultItem]:
+    async def _search_tavily(
+        self, query: str, max_results: int, api_key: str
+    ) -> list[WebSearchResultItem]:
         url = "https://api.tavily.com/search"
         payload = {"api_key": api_key, "query": query, "max_results": max_results}
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -144,7 +148,9 @@ class WebSearch(Tool[WebSearchInput, WebSearchOutput]):
                 )
             return items
 
-    async def _search_brave(self, query: str, max_results: int, api_key: str) -> list[WebSearchResultItem]:
+    async def _search_brave(
+        self, query: str, max_results: int, api_key: str
+    ) -> list[WebSearchResultItem]:
         url = "https://api.search.brave.com/res/v1/web/search"
         headers = {"X-Subscription-Token": api_key, "Accept": "application/json"}
         params = {"q": query, "count": str(max_results)}
@@ -171,7 +177,9 @@ class WebSearch(Tool[WebSearchInput, WebSearchOutput]):
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            headers=headers, timeout=15.0, follow_redirects=True
+        ) as client:
             # Query DuckDuckGo Lite endpoint
             resp = await client.post("https://lite.duckduckgo.com/lite/", data={"q": query})
             if resp.status_code != 200:
@@ -232,8 +240,11 @@ class WebSearch(Tool[WebSearchInput, WebSearchOutput]):
 # Fetch Web Page Tool
 # ==============================================================================
 
+
 class FetchWebPageInput(ToolInput):
-    url: str = Field(description="The full HTTP/HTTPS URL of the documentation or web page to fetch.")
+    url: str = Field(
+        description="The full HTTP/HTTPS URL of the documentation or web page to fetch."
+    )
     max_chars: int = Field(
         default=6000,
         ge=200,
@@ -274,9 +285,16 @@ class FetchWebPage(Tool[FetchWebPageInput, FetchWebPageOutput]):
         title = html.unescape(title_match.group(1)).strip() if title_match else ""
 
         # Remove scripts, styles, head
-        cleaned = re.sub(r"<(script|style|head|noscript)[^>]*>[\s\S]*?</\1>", "", raw_html, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"<(script|style|head|noscript)[^>]*>[\s\S]*?</\1>", "", raw_html, flags=re.IGNORECASE
+        )
         # Convert links to markdown
-        cleaned = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', r"[\2](\1)", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+            r"[\2](\1)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         # Convert headers and paragraph breaks
         cleaned = re.sub(r"<(h[1-6]|p|div|br|li)[^>]*>", "\n", cleaned, flags=re.IGNORECASE)
         # Strip remaining tags
@@ -301,7 +319,9 @@ class FetchWebPage(Tool[FetchWebPageInput, FetchWebPageOutput]):
             "Accept": "text/html,application/xhtml+xml,text/plain,*/*",
         }
         try:
-            async with httpx.AsyncClient(headers=headers, timeout=20.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(
+                headers=headers, timeout=20.0, follow_redirects=True
+            ) as client:
                 resp = await client.get(args.url)
                 title, content = self._clean_html(resp.text, args.max_chars)
                 return FetchWebPageOutput(

@@ -65,7 +65,9 @@ def detect_secrets_in_text(text: str) -> list[str]:
         if is_hex and len(val) >= 20 and entropy > 3.0:
             violations.append(f"High-entropy hex literal (H={entropy:.2f}): {val[:4]}...{val[-4:]}")
         elif len(val) >= 24 and entropy > 4.5:
-            violations.append(f"High-entropy string literal (H={entropy:.2f}): {val[:4]}...{val[-4:]}")
+            violations.append(
+                f"High-entropy string literal (H={entropy:.2f}): {val[:4]}...{val[-4:]}"
+            )
 
     return violations
 
@@ -73,6 +75,7 @@ def detect_secrets_in_text(text: str) -> list[str]:
 # ==============================================================================
 # 2. AST Security & Asyncio Auditor ([SEC-01], [PERF-01], [TST-03])
 # ==============================================================================
+
 
 class SecurityAndAsyncVisitor(ast.NodeVisitor):
     """AST Visitor enforcing security policies, event-loop hygiene, and mock integrity."""
@@ -90,34 +93,59 @@ class SecurityAndAsyncVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         # Check eval() / exec()
         if isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"}:
-            self.violations.append(f"Dangerous dynamic code execution '{node.func.id}()' at line {node.lineno}")
+            self.violations.append(
+                f"Dangerous dynamic code execution '{node.func.id}()' at line {node.lineno}"
+            )
 
         # Check subprocess.run(..., shell=True)
-        if isinstance(node.func, ast.Attribute) and node.func.attr in {"run", "Popen", "check_output", "call"}:
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {
+            "run",
+            "Popen",
+            "check_output",
+            "call",
+        }:
             for kw in node.keywords:
-                if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                if (
+                    kw.arg == "shell"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                ):
                     self.violations.append(f"Subprocess call with shell=True at line {node.lineno}")
 
         # Check blocking calls in async def
         if self._in_async_def and isinstance(node.func, ast.Attribute):
             # time.sleep()
-            if isinstance(node.func.value, ast.Name) and node.func.value.id == "time" and node.func.attr == "sleep":
-                self.violations.append(f"Blocking 'time.sleep()' inside async def at line {node.lineno}")
+            if (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "time"
+                and node.func.attr == "sleep"
+            ):
+                self.violations.append(
+                    f"Blocking 'time.sleep()' inside async def at line {node.lineno}"
+                )
             if isinstance(node.func.value, ast.Name) and node.func.value.id == "requests":
-                self.violations.append(f"Blocking 'requests.{node.func.attr}()' inside async def at line {node.lineno}")
+                self.violations.append(
+                    f"Blocking 'requests.{node.func.attr}()' inside async def at line {node.lineno}"
+                )
 
         # Check Mock Integrity: unittest.mock.patch must specify autospec=True
         is_patch_call = False
-        if (isinstance(node.func, ast.Name) and node.func.id == "patch") or (isinstance(node.func, ast.Attribute) and node.func.attr in {"patch", "object"}):
+        if (isinstance(node.func, ast.Name) and node.func.id == "patch") or (
+            isinstance(node.func, ast.Attribute) and node.func.attr in {"patch", "object"}
+        ):
             is_patch_call = True
 
         if is_patch_call:
             has_autospec = any(
-                kw.arg == "autospec" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                kw.arg == "autospec"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
                 for kw in node.keywords
             )
             if not has_autospec:
-                self.violations.append(f"Mock patch at line {node.lineno} missing 'autospec=True' parameter")
+                self.violations.append(
+                    f"Mock patch at line {node.lineno} missing 'autospec=True' parameter"
+                )
 
         self.generic_visit(node)
 
@@ -137,6 +165,7 @@ def audit_python_code_ast(code: str) -> list[str]:
 # ==============================================================================
 # 3. Diff-Scoped AST Mutation Engine ([TST-01], [HRN-08])
 # ==============================================================================
+
 
 class ASTMutator(ast.NodeTransformer):
     """Generates targeted AST mutants across binary ops, comparisons, booleans, and constants."""
@@ -290,6 +319,7 @@ class DiffScopedMutationEngine:
 # 4. Adversarial QA Gatekeeper ([HRN-07])
 # ==============================================================================
 
+
 class AdversarialQAGatekeeper:
     """Zero-Trust QA Gatekeeper enforcing information barriers, audits, and mutation tests."""
 
@@ -299,7 +329,9 @@ class AdversarialQAGatekeeper:
         # Strip <think>...</think> tags
         cleaned = re.sub(r"<think>[\s\S]*?</think>", "", executor_text, flags=re.IGNORECASE)
         # Strip Thought: / Reasoning: prefixes
-        cleaned = re.sub(r"(?im)^(Thought|Reasoning|Chain of Thought):[\s\S]*?(?=\n\n|\Z)", "", cleaned)
+        cleaned = re.sub(
+            r"(?im)^(Thought|Reasoning|Chain of Thought):[\s\S]*?(?=\n\n|\Z)", "", cleaned
+        )
         return cleaned.strip()
 
     @staticmethod

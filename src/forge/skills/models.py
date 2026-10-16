@@ -51,23 +51,22 @@ class SkillSpec(BaseModel):
     )
     trigger_file_globs: list[str] = Field(
         default_factory=list,
-        description="File path globs that trigger activation (e.g. ['*migration*/*', 'alembic/*'])"
+        description="File path globs that trigger activation (e.g. ['*migration*/*', 'alembic/*'])",
     )
     trigger_ast_nodes: list[str] = Field(
-        default_factory=list,
-        description="AST node types or import names that trigger activation"
+        default_factory=list, description="AST node types or import names that trigger activation"
     )
     trigger_error_regexes: list[str] = Field(
         default_factory=list,
-        description="Error regex patterns in stderr/output that trigger activation"
+        description="Error regex patterns in stderr/output that trigger activation",
     )
     execution_rules: list[str] = Field(
         default_factory=list,
-        description="Compact, numbered imperative rules injected into the operational prompt"
+        description="Compact, numbered imperative rules injected into the operational prompt",
     )
     allowed_tools: list[str] = Field(
         default_factory=list,
-        description="Single-tool or restricted tool schemas permitted during this skill phase"
+        description="Single-tool or restricted tool schemas permitted during this skill phase",
     )
 
 
@@ -77,34 +76,28 @@ class RepoSignals(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     modified_files: list[str] = Field(
-        default_factory=list,
-        description="List of repo-relative paths of modified or touched files"
+        default_factory=list, description="List of repo-relative paths of modified or touched files"
     )
     ast_imports: list[str] = Field(
         default_factory=list,
-        description="Import symbols identified in touched files or AST analysis"
+        description="Import symbols identified in touched files or AST analysis",
     )
     ast_call_radius: int = Field(
-        default=0,
-        description="AST depth or number of dependent call sites affected by diff"
+        default=0, description="AST depth or number of dependent call sites affected by diff"
     )
     cyclomatic_complexity: int = Field(
-        default=0,
-        description="Estimated cyclomatic complexity of target symbol or file"
+        default=0, description="Estimated cyclomatic complexity of target symbol or file"
     )
     consecutive_failures: int = Field(
-        default=0,
-        description="Consecutive verification/execution failures on current node"
+        default=0, description="Consecutive verification/execution failures on current node"
     )
     last_stderr: str = Field(
-        default="",
-        description="Standard error or exception traceback from last command execution"
+        default="", description="Standard error or exception traceback from last command execution"
     )
     has_migration_files: bool = Field(
-        default=False,
-        description="Whether migration or schema definitions are modified"
+        default=False, description="Whether migration or schema definitions are modified"
     )
     model_tier: ModelTier = Field(
         default=ModelTier.AMPLIFIER_FRONTIER,
-        description="Topology tier of the currently executing model"
+        description="Topology tier of the currently executing model",
     )

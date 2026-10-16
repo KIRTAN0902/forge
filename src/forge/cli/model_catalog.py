@@ -32,7 +32,10 @@ CURATED_MODELS: dict[str, list[tuple[str, str]]] = {
     ],
     "nvidia": [
         ("nvidia/nemotron-3-super-120b-a12b", "Nemotron 3 Super 120B (Deep reasoning & planning)"),
-        ("nvidia/nemotron-3.5-lightning-30b-a3b", "Nemotron 3.5 Lightning 30B (Fast tool & code execution)"),
+        (
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "Nemotron 3.5 Lightning 30B (Fast tool & code execution)",
+        ),
         ("meta/llama-3.3-70b-instruct", "Llama 3.3 70B Instruct (General software tasks)"),
         ("meta/llama-3.1-405b-instruct", "Llama 3.1 405B Instruct (Frontier-scale intelligence)"),
         ("deepseek-ai/deepseek-r1", "DeepSeek R1 (Reasoning & algorithms)"),
@@ -213,12 +216,16 @@ def prompt_model_dropdown(
                 default_pick = k
                 break
 
-        choice = Prompt.ask(
-            f"Select model for {role_label.title()}",
-            choices=valid_choices,
-            default=default_pick,
-            console=console,
-        ).strip().lower()
+        choice = (
+            Prompt.ask(
+                f"Select model for {role_label.title()}",
+                choices=valid_choices,
+                default=default_pick,
+                console=console,
+            )
+            .strip()
+            .lower()
+        )
 
         if choice in {"0", "exit", "quit", "q"}:
             return current_model
@@ -227,12 +234,21 @@ def prompt_model_dropdown(
             return choices_map[choice]
 
         if choice == "c":
-            custom_id = Prompt.ask("Enter custom Model ID", default=current_model, console=console).strip()
+            custom_id = Prompt.ask(
+                "Enter custom Model ID", default=current_model, console=console
+            ).strip()
             return custom_id or current_model
 
         if choice == "s":
             # Interactive search query
-            keyword = Prompt.ask("Search models keyword (e.g. 'claude', 'deepseek', 'coder', 'llama')", console=console).strip().lower()
+            keyword = (
+                Prompt.ask(
+                    "Search models keyword (e.g. 'claude', 'deepseek', 'coder', 'llama')",
+                    console=console,
+                )
+                .strip()
+                .lower()
+            )
             if not keyword:
                 continue
 
@@ -241,7 +257,9 @@ def prompt_model_dropdown(
                 console.print(f"[yellow]No models found matching '{keyword}'.[/yellow]\n")
                 continue
 
-            search_table = Table(title=f"Search Results for '{keyword}' on {provider}", border_style="green")
+            search_table = Table(
+                title=f"Search Results for '{keyword}' on {provider}", border_style="green"
+            )
             search_table.add_column("No.", style="bold green", width=4, justify="right")
             search_table.add_column("Model ID", style="bold white")
 

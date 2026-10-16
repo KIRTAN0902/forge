@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # 1. Live Runtime Variable Tracer ([HRN-04])
 # ==============================================================================
 
+
 class TraceRecord(BaseModel):
     """Single execution event recorded in the tracer ring buffer."""
 
@@ -145,7 +146,9 @@ class LiveRuntimeTracer:
                     return monitoring_mod.DISABLE
 
                 monitoring_mod.register_callback(tool_id, monitoring_mod.events.LINE, on_line)
-                monitoring_mod.register_callback(tool_id, monitoring_mod.events.EXCEPTION, on_exception)
+                monitoring_mod.register_callback(
+                    tool_id, monitoring_mod.events.EXCEPTION, on_exception
+                )
                 return
             except (ValueError, AttributeError):
                 # Fall back to sys.settrace
@@ -165,8 +168,12 @@ class LiveRuntimeTracer:
         if self._monitoring_tool_id is not None and monitoring_mod is not None:
             try:
                 monitoring_mod.set_events(self._monitoring_tool_id, 0)
-                monitoring_mod.register_callback(self._monitoring_tool_id, monitoring_mod.events.LINE, None)
-                monitoring_mod.register_callback(self._monitoring_tool_id, monitoring_mod.events.EXCEPTION, None)
+                monitoring_mod.register_callback(
+                    self._monitoring_tool_id, monitoring_mod.events.LINE, None
+                )
+                monitoring_mod.register_callback(
+                    self._monitoring_tool_id, monitoring_mod.events.EXCEPTION, None
+                )
                 monitoring_mod.free_tool_id(self._monitoring_tool_id)
             except Exception:
                 pass
@@ -206,6 +213,7 @@ class LiveRuntimeTracer:
 # ==============================================================================
 # 2. Pre-Flight Falsifier ([HRN-05]) & Chesterton's Fence ([REF-01])
 # ==============================================================================
+
 
 class FalsificationCondition(BaseModel):
     """Observable condition formulated before high-impact changes."""

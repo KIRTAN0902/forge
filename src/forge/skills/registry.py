@@ -53,7 +53,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Infinite retry loops, context exhaustion, and destructive churn when an approach is fundamentally flawed.",
     ),
-
     # --- REFACTORING (REF) ---
     Skill(
         id="REF-01",
@@ -99,7 +98,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Accumulation of phantom functions, orphaned models, and dead imports that mislead future development.",
     ),
-
     # --- DATABASE (DB) ---
     Skill(
         id="DB-01",
@@ -143,7 +141,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Queries that run in milliseconds in dev with 10 rows but trigger full table scans and timeouts in production.",
     ),
-
     # --- API & CONTRACT (API) ---
     Skill(
         id="API-01",
@@ -187,7 +184,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Uncaught exceptions, unhandled null pointers, and server 500 crashes exposed to end users.",
     ),
-
     # --- SECURITY (SEC) ---
     Skill(
         id="SEC-01",
@@ -231,7 +227,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Installing malicious hallucinated packages or typosquatted malware created by adversaries to compromise developer machines.",
     ),
-
     # --- PERFORMANCE (PERF) ---
     Skill(
         id="PERF-01",
@@ -275,7 +270,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Heisenbugs, race conditions, negative balances, and data corruption occurring only under concurrent production traffic.",
     ),
-
     # --- TESTING & INTEGRITY (TST) ---
     Skill(
         id="TST-01",
@@ -319,7 +313,6 @@ ALL_SKILLS: tuple[Skill, ...] = (
         ),
         failure_mode_prevented="Tests that pass completely green because mocks mirror the developer's assumptions while the real code is broken.",
     ),
-
     # --- DOCUMENTATION (DOC) ---
     Skill(
         id="DOC-01",
@@ -427,7 +420,12 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         target_agent="executor",
         applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
         operation_types={OperationType.DEBUG_FAILURE},
-        trigger_error_regexes=[r"(?i)AssertionError", r"(?i)Traceback", r"(?i)Error:", r"(?i)FAILED"],
+        trigger_error_regexes=[
+            r"(?i)AssertionError",
+            r"(?i)Traceback",
+            r"(?i)Error:",
+            r"(?i)FAILED",
+        ],
         execution_rules=[
             "Write an isolated reproduction test that triggers the failure with exit code != 0 before touching application code.",
             "Localize root cause to the minimal AST frame rather than speculating.",
@@ -464,7 +462,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["run_command", "view_file"],
     ),
-
     # --- REFACTORING (REF) ---
     SkillSpec(
         skill_id="REF-01",
@@ -485,7 +482,10 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         target_agent="executor",
         applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
         operation_types={OperationType.REFACTOR_SIGNATURE},
-        trigger_error_regexes=[r"(?i)ImportError.*circular", r"(?i)cannot import name.*circular import"],
+        trigger_error_regexes=[
+            r"(?i)ImportError.*circular",
+            r"(?i)cannot import name.*circular import",
+        ],
         execution_rules=[
             "Run Tarjan SCC on module import ASTs to isolate cycle components.",
             "Extract shared interface/types into a dedicated leaf module.",
@@ -506,7 +506,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["view_file", "search_replace_edit", "run_command"],
     ),
-
     # --- DATABASE (DB) ---
     SkillSpec(
         skill_id="DB-01",
@@ -547,7 +546,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["run_command"],
     ),
-
     # --- API (API) ---
     SkillSpec(
         skill_id="API-01",
@@ -587,7 +585,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["run_command"],
     ),
-
     # --- SECURITY (SEC) ---
     SkillSpec(
         skill_id="SEC-01",
@@ -627,7 +624,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["view_file", "run_command"],
     ),
-
     # --- PERFORMANCE & TESTING (PERF & TST) ---
     SkillSpec(
         skill_id="PERF-01",
@@ -703,7 +699,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["view_file", "search_replace_edit"],
     ),
-
     # --- DOCUMENTATION (DOC) ---
     SkillSpec(
         skill_id="DOC-01",
@@ -741,7 +736,6 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["view_file"],
     ),
-
     # --- SLM PROSTHETICS (SLM-01 to SLM-09) ---
     SkillSpec(
         skill_id="SLM-01",
@@ -889,15 +883,20 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["run_command"],
     ),
-
     # --- HARNESS ENGINES (HRN-01 to HRN-10) ---
     SkillSpec(
         skill_id="HRN-01",
         name="AST Context Slicing Engine",
         target_agent="executor",
         applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
-        operation_types={OperationType.LOCATE_SYMBOL, OperationType.WRITE_PURE_FUNCTION, OperationType.DEBUG_FAILURE},
-        execution_rules=["Extract target AST subtree and skeletonize non-target symbols within budget."],
+        operation_types={
+            OperationType.LOCATE_SYMBOL,
+            OperationType.WRITE_PURE_FUNCTION,
+            OperationType.DEBUG_FAILURE,
+        },
+        execution_rules=[
+            "Extract target AST subtree and skeletonize non-target symbols within budget."
+        ],
         allowed_tools=["view_file"],
     ),
     SkillSpec(
@@ -906,7 +905,9 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         target_agent="executor",
         applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
         operation_types={OperationType.WRITE_PURE_FUNCTION, OperationType.DEBUG_FAILURE},
-        execution_rules=["Verify syntax in memory before disk write and perform micro-correction loop."],
+        execution_rules=[
+            "Verify syntax in memory before disk write and perform micro-correction loop."
+        ],
         allowed_tools=["search_replace_edit"],
     ),
     SkillSpec(
@@ -915,7 +916,9 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         target_agent="executor",
         applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
         operation_types={OperationType.WRITE_PURE_FUNCTION, OperationType.REFACTOR_SIGNATURE},
-        execution_rules=["Resolve search anchors across exact, whitespace-tolerant, and difflib similarity tiers."],
+        execution_rules=[
+            "Resolve search anchors across exact, whitespace-tolerant, and difflib similarity tiers."
+        ],
         allowed_tools=["search_replace_edit"],
     ),
     SkillSpec(
@@ -935,7 +938,11 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         name="Pre-Flight Assumption Falsifier",
         target_agent="orchestrator",
         applicable_tiers={ModelTier.AMPLIFIER_FRONTIER},
-        operation_types={OperationType.WRITE_PURE_FUNCTION, OperationType.DEBUG_FAILURE, OperationType.REFACTOR_SIGNATURE},
+        operation_types={
+            OperationType.WRITE_PURE_FUNCTION,
+            OperationType.DEBUG_FAILURE,
+            OperationType.REFACTOR_SIGNATURE,
+        },
         execution_rules=[
             "Formulate falsification conditions before generating implementation code.",
             "Verify assumptions against codebase reality before executing plan.",
@@ -1172,7 +1179,9 @@ class AutonomousSkillRouter:
                         ast_match = True
                         break
 
-            has_triggers = bool(spec.trigger_file_globs or spec.trigger_error_regexes or spec.trigger_ast_nodes)
+            has_triggers = bool(
+                spec.trigger_file_globs or spec.trigger_error_regexes or spec.trigger_ast_nodes
+            )
 
             # If any explicit trigger matched, or if skill has no explicit triggers (always applicable for tier/op)
             if (file_match or error_match or ast_match) or not has_triggers:
@@ -1236,10 +1245,12 @@ class AutonomousSkillRouter:
                 lines.append(f"- Focused Tools: {', '.join(skill.allowed_tools)}")
             lines.append("")
 
-        lines.extend([
-            "## Quality & Verification Mandate",
-            "- Pre-flight check: Verify assumptions before issuing destructive commands.",
-            "- Verification gate: Assert test and compiler pass before marking task complete.",
-        ])
+        lines.extend(
+            [
+                "## Quality & Verification Mandate",
+                "- Pre-flight check: Verify assumptions before issuing destructive commands.",
+                "- Verification gate: Assert test and compiler pass before marking task complete.",
+            ]
+        )
 
         return "\n".join(lines)

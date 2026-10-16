@@ -23,62 +23,68 @@ from rich.panel import Panel
 
 from forge.models.types import ContentPart, ImagePart, TextPart
 
-IMAGE_EXTENSIONS = frozenset({
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
-    ".gif",
-    ".bmp",
-    ".svg",
-    ".tiff",
-    ".ico",
-})
+IMAGE_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".bmp",
+        ".svg",
+        ".tiff",
+        ".ico",
+    }
+)
 
-CODE_EXTENSIONS = frozenset({
-    ".py",
-    ".ts",
-    ".js",
-    ".tsx",
-    ".jsx",
-    ".html",
-    ".css",
-    ".scss",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".md",
-    ".txt",
-    ".sh",
-    ".bash",
-    ".sql",
-    ".rs",
-    ".go",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".cs",
-    ".java",
-    ".kt",
-    ".swift",
-    ".log",
-    ".xml",
-    ".ini",
-    ".env",
-})
+CODE_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".ts",
+        ".js",
+        ".tsx",
+        ".jsx",
+        ".html",
+        ".css",
+        ".scss",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".md",
+        ".txt",
+        ".sh",
+        ".bash",
+        ".sql",
+        ".rs",
+        ".go",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".cs",
+        ".java",
+        ".kt",
+        ".swift",
+        ".log",
+        ".xml",
+        ".ini",
+        ".env",
+    }
+)
 
-DOCUMENT_EXTENSIONS = frozenset({
-    ".pdf",
-    ".docx",
-    ".doc",
-    ".xlsx",
-    ".xls",
-    ".pptx",
-    ".ppt",
-    ".csv",
-})
+DOCUMENT_EXTENSIONS = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".xlsx",
+        ".xls",
+        ".pptx",
+        ".ppt",
+        ".csv",
+    }
+)
 
 
 @dataclass
@@ -150,7 +156,10 @@ class Attachment:
             text = self.path.read_text(encoding="utf-8", errors="replace")
             # If exceedingly large (>250KB), truncate to preserve context window
             if len(text) > 250_000:
-                text = text[:250_000] + "\n\n... [Content truncated at 250KB to preserve context window] ..."
+                text = (
+                    text[:250_000]
+                    + "\n\n... [Content truncated at 250KB to preserve context window] ..."
+                )
             ext = self.path.suffix.lstrip(".").lower() or "txt"
             return (
                 f"--- Attached File: `{self.path.name}` ({self.kind}) ---\n"
@@ -499,7 +508,9 @@ def build_turn_content(
         if user_text:
             text_blocks.append(user_text)
         else:
-            text_blocks.append("Please analyze the attached image and diagnose any errors or details.")
+            text_blocks.append(
+                "Please analyze the attached image and diagnose any errors or details."
+            )
 
         for a in attachments:
             if not a.is_image:

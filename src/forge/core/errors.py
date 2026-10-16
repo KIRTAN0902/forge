@@ -53,4 +53,3 @@ class WorkflowError(ForgeError):
 
 class UserCancelledError(ForgeError):
     """An operation or agent thinking turn was cancelled by the user (e.g. Esc or Ctrl+C)."""
-

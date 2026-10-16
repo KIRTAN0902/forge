@@ -32,7 +32,9 @@ class ZeroTrustCitationAuditor:
             if re.match(r"^\d{4}\.\d{4,5}(?:v\d+)?$", node.doi_or_arxiv_id):
                 url = f"https://export.arxiv.org/api/query?id_list={node.doi_or_arxiv_id}"
                 try:
-                    async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=True) as client:
+                    async with httpx.AsyncClient(
+                        timeout=self.timeout_s, follow_redirects=True
+                    ) as client:
                         resp = await client.get(url)
                         if resp.status_code == 200 and "<entry>" in resp.text:
                             return True
@@ -44,7 +46,9 @@ class ZeroTrustCitationAuditor:
                 clean_doi = urllib.parse.quote(node.doi_or_arxiv_id.strip())
                 url = f"https://api.crossref.org/works/{clean_doi}"
                 try:
-                    async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=True) as client:
+                    async with httpx.AsyncClient(
+                        timeout=self.timeout_s, follow_redirects=True
+                    ) as client:
                         resp = await client.get(url)
                         if resp.status_code == 200:
                             return True
@@ -56,7 +60,9 @@ class ZeroTrustCitationAuditor:
             encoded_title = urllib.parse.quote(node.title)
             url = f"https://api.openalex.org/works?search={encoded_title}&per-page=1"
             try:
-                async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout_s, follow_redirects=True
+                ) as client:
                     resp = await client.get(url)
                     if resp.status_code == 200:
                         data = resp.json()
@@ -86,7 +92,9 @@ class ZeroTrustCitationAuditor:
         # Check Ghost Citations
         for key in sorted(cited_keys):
             if key not in ledger.evidence_map:
-                violations.append(f"Ghost citation detected: [@{key}] is not registered in ResearchLedger.")
+                violations.append(
+                    f"Ghost citation detected: [@{key}] is not registered in ResearchLedger."
+                )
 
         # 2. Check Numeric Drift in sentences with citations
         sentences = re.split(r"(?<=[.!?])\s+", markdown_text)
@@ -133,7 +141,10 @@ class ZeroTrustCitationAuditor:
                 continue
 
             # In technical and review sections, substantive assertions must cite sources
-            if any(sec.lower() in current_section.lower() for sec in ["technical", "methodology", "related work", "taxonomy"]):
+            if any(
+                sec.lower() in current_section.lower()
+                for sec in ["technical", "methodology", "related work", "taxonomy"]
+            ):
                 sent_count = len(re.findall(r"[.!?]\s+", p_strip)) + 1
                 has_citation = bool(re.search(r"[@\\]cite", p_strip))
                 if sent_count >= 2 and not has_citation and len(p_strip) > 120:
@@ -163,7 +174,9 @@ class ContradictionAnalyzer:
                 text_b = f"{node_b.title} {node_b.abstract_or_summary}".lower()
 
                 # Case 1: Prompt engineering vs Finetuning trade-offs
-                if ("prompt" in text_a and "in-context" in text_a) and ("finetuning" in text_b or "fine-tuning" in text_b):
+                if ("prompt" in text_a and "in-context" in text_a) and (
+                    "finetuning" in text_b or "fine-tuning" in text_b
+                ):
                     entries.append(
                         ContradictionEntry(
                             topic="In-Context Reasoning vs Parametric Fine-Tuning",
@@ -179,7 +192,9 @@ class ContradictionAnalyzer:
                     )
 
                 # Case 2: Small Language Models vs Frontier Scaling
-                elif ("small" in text_a or "7b" in text_a or "slm" in text_a) and ("scaling" in text_b or "frontier" in text_b or "70b" in text_b):
+                elif ("small" in text_a or "7b" in text_a or "slm" in text_a) and (
+                    "scaling" in text_b or "frontier" in text_b or "70b" in text_b
+                ):
                     entries.append(
                         ContradictionEntry(
                             topic="Small Model Specialization vs Frontier Scale Dominance",

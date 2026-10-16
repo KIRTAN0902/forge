@@ -12,20 +12,139 @@ import httpx
 from forge.research.models import EvidenceNode, PerspectivePersona, SourceTier
 
 STOPWORDS = {
-    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
-    "any", "are", "as", "at", "be", "because", "been", "before", "being", "below",
-    "between", "both", "but", "by", "can", "did", "do", "does", "doing", "don",
-    "down", "during", "each", "few", "for", "from", "further", "had", "has",
-    "have", "having", "he", "her", "here", "hers", "herself", "him", "himself",
-    "his", "how", "i", "if", "in", "into", "is", "it", "its", "itself", "just",
-    "me", "more", "most", "my", "myself", "no", "nor", "not", "now", "of", "off",
-    "on", "once", "only", "or", "other", "our", "ours", "ourselves", "out", "over",
-    "own", "s", "same", "she", "should", "so", "some", "such", "t", "than", "that",
-    "the", "their", "theirs", "them", "themselves", "then", "there", "these",
-    "they", "this", "those", "through", "to", "too", "under", "until", "up", "very",
-    "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom",
-    "why", "will", "with", "you", "your", "yours", "yourself", "yourselves",
-    "using", "towards", "scaling", "evaluating", "improving", "based",
+    "a",
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "by",
+    "can",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "don",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "here",
+    "hers",
+    "herself",
+    "him",
+    "himself",
+    "his",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "itself",
+    "just",
+    "me",
+    "more",
+    "most",
+    "my",
+    "myself",
+    "no",
+    "nor",
+    "not",
+    "now",
+    "of",
+    "off",
+    "on",
+    "once",
+    "only",
+    "or",
+    "other",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "s",
+    "same",
+    "she",
+    "should",
+    "so",
+    "some",
+    "such",
+    "t",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "to",
+    "too",
+    "under",
+    "until",
+    "up",
+    "very",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "using",
+    "towards",
+    "scaling",
+    "evaluating",
+    "improving",
+    "based",
 }
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
@@ -105,10 +224,18 @@ class AcademicHarvester:
             root = ET.fromstring(xml_text)
             for entry in root.findall("atom:entry", ATOM_NS):
                 title_elem = entry.find("atom:title", ATOM_NS)
-                title = re.sub(r"\s+", " ", title_elem.text or "").strip() if title_elem is not None else "Untitled"
+                title = (
+                    re.sub(r"\s+", " ", title_elem.text or "").strip()
+                    if title_elem is not None
+                    else "Untitled"
+                )
 
                 summary_elem = entry.find("atom:summary", ATOM_NS)
-                summary = re.sub(r"\s+", " ", summary_elem.text or "").strip() if summary_elem is not None else ""
+                summary = (
+                    re.sub(r"\s+", " ", summary_elem.text or "").strip()
+                    if summary_elem is not None
+                    else ""
+                )
 
                 authors: list[str] = []
                 for auth in entry.findall("atom:author", ATOM_NS):
@@ -176,7 +303,9 @@ class AcademicHarvester:
                     for paper in data.get("data", []):
                         title = paper.get("title", "").strip() or "Untitled"
                         year = paper.get("year") or 2024
-                        authors = [a.get("name", "") for a in paper.get("authors", []) if a.get("name")]
+                        authors = [
+                            a.get("name", "") for a in paper.get("authors", []) if a.get("name")
+                        ]
                         venue = paper.get("venue") or ""
                         citations = paper.get("citationCount") or 0
                         abstract = paper.get("abstract") or ""
@@ -199,7 +328,9 @@ class AcademicHarvester:
                             year=year,
                             venue_or_source=venue or "Academic Publication",
                             doi_or_arxiv_id=doi or None,
-                            url=f"https://doi.org/{doi}" if doi and "10." in doi else (f"https://arxiv.org/abs/{doi}" if doi else ""),
+                            url=f"https://doi.org/{doi}"
+                            if doi and "10." in doi
+                            else (f"https://arxiv.org/abs/{doi}" if doi else ""),
                             citation_count=citations,
                             source_tier=SourceTier.TIER_1_PRIMARY_PAPER,
                             abstract_or_summary=combined_summary,
@@ -238,7 +369,9 @@ class AcademicHarvester:
                         if raw_name:
                             authors.append(raw_name)
 
-                    venue = (work.get("primary_location") or {}).get("source", {}).get("display_name") or ""
+                    venue = (work.get("primary_location") or {}).get("source", {}).get(
+                        "display_name"
+                    ) or ""
                     doi = work.get("doi") or ""
                     doi_clean = doi.replace("https://doi.org/", "") if doi else None
                     citations = work.get("cited_by_count") or 0
@@ -298,10 +431,14 @@ class AcademicHarvester:
         # 1. Backward snowballing: search foundational terms from top seed titles
         for seed in seed_nodes[:3]:
             # Extract main technical keywords from seed title
-            keywords = [w for w in re.findall(r"[a-zA-Z]{4,}", seed.title) if w.lower() not in STOPWORDS]
+            keywords = [
+                w for w in re.findall(r"[a-zA-Z]{4,}", seed.title) if w.lower() not in STOPWORDS
+            ]
             if len(keywords) >= 2:
                 sub_query = f"{keywords[0]} {keywords[1]} foundational architecture"
-                foundational = await self.search_semantic_scholar_and_snowball(sub_query, limit=top_k)
+                foundational = await self.search_semantic_scholar_and_snowball(
+                    sub_query, limit=top_k
+                )
                 for node in foundational:
                     if node.cite_key not in existing_keys and node.cite_key not in snowballed:
                         snowballed[node.cite_key] = node
@@ -460,7 +597,9 @@ class STORMInquiryEngine:
                             collective_evidence[paper.cite_key] = paper
                             new_keys_in_wave += 1
 
-                    s2_papers = await self.harvester.search_semantic_scholar_and_snowball(query, limit=3)
+                    s2_papers = await self.harvester.search_semantic_scholar_and_snowball(
+                        query, limit=3
+                    )
                     for paper in s2_papers:
                         if paper.cite_key not in collective_evidence:
                             collective_evidence[paper.cite_key] = paper
@@ -468,7 +607,9 @@ class STORMInquiryEngine:
 
             # Perform snowballing on top 3 nodes if available
             if collective_evidence:
-                snowballed = await self.harvester.snowball_citations(list(collective_evidence.values())[:3], top_k=3)
+                snowballed = await self.harvester.snowball_citations(
+                    list(collective_evidence.values())[:3], top_k=3
+                )
                 for node in snowballed:
                     if node.cite_key not in collective_evidence:
                         collective_evidence[node.cite_key] = node

@@ -52,7 +52,10 @@ def test_web_search_output_render() -> None:
     )
     rendered = output.render()
     assert "## Web Search Results for 'python sys.monitoring'" in rendered
-    assert "[sys.monitoring — Execution event monitoring](https://docs.python.org/3/library/sys.monitoring.html)" in rendered
+    assert (
+        "[sys.monitoring — Execution event monitoring](https://docs.python.org/3/library/sys.monitoring.html)"
+        in rendered
+    )
     assert "sys.monitoring is a namespace" in rendered
 
 

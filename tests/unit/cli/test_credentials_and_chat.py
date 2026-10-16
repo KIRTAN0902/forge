@@ -166,8 +166,12 @@ class TestChatInterface:
 
         with (
             patch("forge.cli.chat.ensure_credentials_configured"),
-            patch("forge.cli.roles_wizard.run_model_menu", return_value=["Planner ➔ claude"]) as mock_menu,
-            patch("forge.cli.roles_wizard.run_provider_menu", return_value=["Provider: NVIDIA"]) as mock_prov,
+            patch(
+                "forge.cli.roles_wizard.run_model_menu", return_value=["Planner ➔ claude"]
+            ) as mock_menu,
+            patch(
+                "forge.cli.roles_wizard.run_provider_menu", return_value=["Provider: NVIDIA"]
+            ) as mock_prov,
             patch("forge.cli.chat.read_user_input", side_effect=lambda *args: next(inputs)),
         ):
             # Should run the commands and exit gracefully
@@ -176,10 +180,17 @@ class TestChatInterface:
             mock_menu.assert_called_once()
             mock_prov.assert_called_once()
 
-    def test_cli_default_launches_chat(self, tmp_path: Path) -> None:
+    def test_cli_default_launches_split_tui(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with patch("forge.ui.split_app.ForgeSplitPaneApp.run") as mock_split:
+            result = runner.invoke(app, ["--path", str(tmp_path)])
+            assert result.exit_code == 0
+            mock_split.assert_called_once()
+
+    def test_cli_classic_flag_launches_chat(self, tmp_path: Path) -> None:
         runner = CliRunner()
         with patch("forge.cli.chat.run_chat_session") as mock_chat:
-            result = runner.invoke(app, ["--path", str(tmp_path)])
+            result = runner.invoke(app, ["--classic", "--path", str(tmp_path)])
             assert result.exit_code == 0
             mock_chat.assert_called_once()
 
@@ -199,7 +210,9 @@ class TestChatInterface:
 
     def test_cli_provider_command(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        with patch("forge.cli.roles_wizard.run_provider_menu", return_value=["Provider: OpenRouter"]) as mock_prov:
+        with patch(
+            "forge.cli.roles_wizard.run_provider_menu", return_value=["Provider: OpenRouter"]
+        ) as mock_prov:
             result = runner.invoke(app, ["provider", "--path", str(tmp_path)])
             assert result.exit_code == 0
             mock_prov.assert_called_once()
@@ -246,7 +259,19 @@ class TestChatInterface:
         """Test switching agents via slash commands /anvil, /hammer, /temper, /planner, etc."""
         from forge.cli.chat import run_chat_session
 
-        inputs = iter(["/anvil", "/hammer", "/temper", "/planner", "/executor", "/qa", "/orch", "/agent", "/exit"])
+        inputs = iter(
+            [
+                "/anvil",
+                "/hammer",
+                "/temper",
+                "/planner",
+                "/executor",
+                "/qa",
+                "/orch",
+                "/agent",
+                "/exit",
+            ]
+        )
 
         with (
             patch("forge.cli.chat.ensure_credentials_configured"),
@@ -254,4 +279,3 @@ class TestChatInterface:
         ):
             run_chat_session(path=tmp_path)
             assert (tmp_path / ".forge").is_dir()
-

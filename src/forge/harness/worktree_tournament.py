@@ -21,6 +21,7 @@ from forge.skills.models import ModelTier
 # AST Cyclomatic Complexity Evaluator
 # ==============================================================================
 
+
 class CyclomaticComplexityVisitor(ast.NodeVisitor):
     """Calculates McCabe Cyclomatic Complexity of Python AST."""
 
@@ -80,6 +81,7 @@ def calculate_ast_complexity(code_or_tree: str | ast.AST) -> int:
 # Tournament Data Models
 # ==============================================================================
 
+
 class TournamentCandidate(BaseModel):
     """Result of an individual candidate branch in the worktree tournament."""
 
@@ -101,6 +103,7 @@ class TournamentCandidate(BaseModel):
 # ==============================================================================
 # Git Worktree Tournament ([HRN-06])
 # ==============================================================================
+
 
 class GitWorktreeTournament:
     """Manages parallel git-worktree tournaments to evaluate competing architectures."""
@@ -193,7 +196,9 @@ class GitWorktreeTournament:
 
             # Count lines modified from diff
             for line in diff_text.splitlines():
-                if (line.startswith("+") and not line.startswith("+++")) or (line.startswith("-") and not line.startswith("---")):
+                if (line.startswith("+") and not line.startswith("+++")) or (
+                    line.startswith("-") and not line.startswith("---")
+                ):
                     lines_modified += 1
 
             # 3. Measure AST complexity delta
@@ -304,6 +309,7 @@ class GitWorktreeTournament:
 # ==============================================================================
 # Speculative Escalation Router ([HRN-10])
 # ==============================================================================
+
 
 class SpeculativeEscalationRouter:
     """Fast-paths SLM speculative patches and escalates to Frontier Tournament if unresolved."""

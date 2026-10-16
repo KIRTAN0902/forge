@@ -221,7 +221,9 @@ def parse_anthropic_skills() -> list[tuple[SkillSpec, Skill, list[str]]]:
         globs = meta_override.get("globs")
         glob_list: list[str] = [str(g) for g in globs] if isinstance(globs, list) else []
         keywords = meta_override.get("keywords")
-        keyword_list: list[str] = [str(k) for k in keywords] if isinstance(keywords, list) else [dirname]
+        keyword_list: list[str] = (
+            [str(k) for k in keywords] if isinstance(keywords, list) else [dirname]
+        )
         category = meta_override.get("category", SkillCategory.DOCUMENTATION)
         if not isinstance(category, SkillCategory):
             category = SkillCategory.DOCUMENTATION
@@ -261,7 +263,13 @@ def parse_anthropic_skills() -> list[tuple[SkillSpec, Skill, list[str]]]:
             trigger_ast_nodes=[],
             trigger_error_regexes=[],
             execution_rules=execution_rules,
-            allowed_tools=["view_file", "write_to_file", "run_command", "web_search", "fetch_web_page"],
+            allowed_tools=[
+                "view_file",
+                "write_to_file",
+                "run_command",
+                "web_search",
+                "fetch_web_page",
+            ],
         )
 
         skill_item = Skill(
