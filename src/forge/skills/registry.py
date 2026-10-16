@@ -370,8 +370,27 @@ ALL_SKILLS: tuple[Skill, ...] = (
 class SkillRegistry:
     """In-memory indexed catalog of all built-in specialist skills."""
 
-    def __init__(self, skills: tuple[Skill, ...] = ALL_SKILLS) -> None:
-        self._skills: dict[str, Skill] = {s.id: s for s in skills}
+    def __init__(
+        self,
+        skills: tuple[Skill, ...] = ALL_SKILLS,
+        *,
+        include_anthropic: bool = False,
+    ) -> None:
+        raw_skills = list(skills)
+        if include_anthropic:
+            try:
+                from forge.skills.anthropic_loader import parse_anthropic_skills
+
+                for _, skill_item, _ in parse_anthropic_skills():
+                    raw_skills.append(skill_item)
+            except Exception:
+                pass
+        self._skills: dict[str, Skill] = {s.id: s for s in raw_skills}
+
+    @classmethod
+    def with_anthropic(cls) -> SkillRegistry:
+        """Create a SkillRegistry pre-populated with both core and Anthropic skills."""
+        return cls(include_anthropic=True)
 
     def get(self, skill_id: str) -> Skill | None:
         return self._skills.get(skill_id.upper().strip())
@@ -1062,7 +1081,17 @@ class AutonomousSkillRouter:
     """Autonomous router that dynamically adapts execution topology and rules."""
 
     def __init__(self, specs: tuple[SkillSpec, ...] | list[SkillSpec] | None = None) -> None:
-        raw_specs = specs if specs is not None else AUTONOMOUS_SKILLS
+        if specs is not None:
+            raw_specs = list(specs)
+        else:
+            raw_specs = list(AUTONOMOUS_SKILLS)
+            try:
+                from forge.skills.anthropic_loader import parse_anthropic_skills
+
+                for spec, _, _ in parse_anthropic_skills():
+                    raw_specs.append(spec)
+            except Exception:
+                pass
         self._specs: dict[str, SkillSpec] = {s.skill_id.upper().strip(): s for s in raw_specs}
 
     def get_spec(self, skill_id: str) -> SkillSpec | None:

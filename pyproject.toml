@@ -46,6 +46,7 @@ markers = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+exclude = ["src/forge/skills/anthropic"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF", "SIM"]
@@ -70,3 +71,4 @@ strict = true
 packages = ["forge"]
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+exclude = ["src/forge/skills/anthropic"]

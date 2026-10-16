@@ -28,6 +28,9 @@ class OperationType(StrEnum):
     DEBUG_FAILURE = "debug_failure"
     SECURITY_AUDIT = "security_audit"
     DEEP_RESEARCH = "deep_research"
+    UI_DESIGN = "ui_design"
+    OFFICE_DOCUMENT = "office_document"
+    TOOL_BUILDING = "tool_building"
 
 
 class SkillSpec(BaseModel):

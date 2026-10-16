@@ -36,7 +36,7 @@ class SkillEvaluator:
     """Evaluates telemetry signals to determine which skills to activate."""
 
     def __init__(self, registry: SkillRegistry | None = None) -> None:
-        self.registry = registry or SkillRegistry()
+        self.registry = registry if registry is not None else SkillRegistry.with_anthropic()
 
     def evaluate(self, signal: SkillSignal, agent_role: str | None = None) -> list[SkillActivation]:
         """Evaluate signals and return matching active skills."""
@@ -221,6 +221,34 @@ class SkillEvaluator:
                         rationale="Release or commit activity; classify changes and generate Conventional Commit message.",
                     )
                 )
+
+        # Anthropic Domain Skills (ANT-01 to ANT-19)
+        try:
+            from pathlib import Path
+
+            from forge.skills.anthropic_loader import parse_anthropic_skills
+
+            req_lower = signal.user_request.lower()
+            for spec, skill_item, keywords in parse_anthropic_skills():
+                kw_match = any(re.search(rf"\b{re.escape(kw)}\b", req_lower) for kw in keywords)
+                file_match = (
+                    any(
+                        any(Path(f).match(glob) for glob in spec.trigger_file_globs)
+                        for f in signal.touched_files
+                    )
+                    if spec.trigger_file_globs
+                    else False
+                )
+                if kw_match or file_match:
+                    activations.append(
+                        SkillActivation(
+                            skill=skill_item,
+                            target_agent=spec.target_agent,
+                            rationale=f"Triggered by Anthropic domain heuristics for {spec.name}.",
+                        )
+                    )
+        except Exception:
+            pass
 
         # Filter by agent role if specified
         if agent_role:
