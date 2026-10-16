@@ -980,6 +980,81 @@ AUTONOMOUS_SKILLS: tuple[SkillSpec, ...] = (
         ],
         allowed_tools=["run_command"],
     ),
+    SkillSpec(
+        skill_id="RES-01",
+        name="STORM Multi-Perspective Inquiry",
+        target_agent="orchestrator",
+        applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
+        operation_types={OperationType.DEEP_RESEARCH},
+        execution_rules=[
+            "Deploy 4 orthogonal perspective personas: Theoretical Formalist, Systems Runtime Engineer, Benchmark Auditor, and Failure-Mode Critic.",
+            "Execute iterative multi-hop retrieval waves until Information Gain Ratio drops below 0.10.",
+        ],
+        allowed_tools=["web_search", "fetch_web_page"],
+    ),
+    SkillSpec(
+        skill_id="RES-02",
+        name="Citation Graph Snowballing",
+        target_agent="orchestrator",
+        applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
+        operation_types={OperationType.DEEP_RESEARCH},
+        execution_rules=[
+            "Execute backward snowballing by parsing references of seed nodes for co-cited foundational papers.",
+            "Execute forward snowballing to harvest cutting-edge recent citations from academic graphs.",
+            "Generate deterministic BibTeX keys and blocks directly from verified metadata.",
+        ],
+        allowed_tools=["web_search", "fetch_web_page"],
+    ),
+    SkillSpec(
+        skill_id="RES-03",
+        name="Zero-Trust Claim-to-Quote & BibTeX Verifier",
+        target_agent="qa",
+        applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
+        operation_types={OperationType.DEEP_RESEARCH},
+        execution_rules=[
+            "Verify DOI, arXiv ID, or Crossref metadata against public registries.",
+            "Reject ungrounded citations missing from the research ledger.",
+            "Check numeric consistency between drafted claims and verbatim extracted evidence quotes.",
+        ],
+        allowed_tools=["web_search", "fetch_web_page"],
+    ),
+    SkillSpec(
+        skill_id="RES-04",
+        name="Contradiction & Confounder Matrix",
+        target_agent="orchestrator",
+        applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
+        operation_types={OperationType.DEEP_RESEARCH},
+        execution_rules=[
+            "Detect competing or conflicting empirical results across harvested papers.",
+            "Build contradiction matrices normalizing across datasets, compute scales, and evaluation metrics.",
+        ],
+        allowed_tools=["web_search", "fetch_web_page"],
+    ),
+    SkillSpec(
+        skill_id="RES-05",
+        name="Sandbox Empirical Hypothesis Verification",
+        target_agent="executor",
+        applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
+        operation_types={OperationType.DEEP_RESEARCH},
+        execution_rules=[
+            "Formulate testable algorithmic or performance hypotheses from research synthesis.",
+            "Execute seed-locked benchmark scripts inside the sandbox and capture stdout metrics tables.",
+        ],
+        allowed_tools=["run_command", "view_file", "write_to_file"],
+    ),
+    SkillSpec(
+        skill_id="RES-06",
+        name="Section-by-Section LaTeX/IEEE Manuscript Compiler",
+        target_agent="executor",
+        applicable_tiers={ModelTier.PROSTHETIC_SLM, ModelTier.AMPLIFIER_FRONTIER},
+        operation_types={OperationType.DEEP_RESEARCH},
+        execution_rules=[
+            "Synthesize manuscript sequentially section-by-section to prevent context truncation.",
+            "Audit every draft section against the ZeroTrustCitationAuditor before proceeding.",
+            "Compile paper.md, paper.tex, and verified references.bib artifacts.",
+        ],
+        allowed_tools=["write_to_file", "view_file"],
+    ),
 )
 
 

@@ -27,6 +27,7 @@ class OperationType(StrEnum):
     WRITE_UNIT_TEST = "write_unit_test"
     DEBUG_FAILURE = "debug_failure"
     SECURITY_AUDIT = "security_audit"
+    DEEP_RESEARCH = "deep_research"
 
 
 class SkillSpec(BaseModel):

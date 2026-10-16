@@ -60,8 +60,9 @@ ignore = ["RUF012", "SIM905"]
 "src/forge/policies/commands.py" = ["E501"]
 "src/forge/agents/**" = ["E501"]
 "src/forge/workflow/router.py" = ["E501"]
+"src/forge/research/**" = ["E501"]
 # Tests verify results with plain blocking subprocess calls.
-"tests/**" = ["ASYNC210", "ASYNC221", "E501"]
+"tests/**" = ["ASYNC210", "ASYNC221", "ASYNC240", "E501"]
 
 [tool.mypy]
 python_version = "3.11"

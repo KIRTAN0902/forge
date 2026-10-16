@@ -731,6 +731,20 @@ def run_chat_session(path: Path = Path(".")) -> None:
                 console.print("[yellow]Usage: /search <keywords or question>[/yellow]\n")
             continue
 
+        if lower_input.startswith("/research") or lower_input.startswith("--research"):
+            if lower_input.startswith("/research"):
+                topic_part = user_input[9:].strip()
+            else:
+                topic_part = user_input.replace("--research", "").strip()
+
+            if topic_part:
+                from forge.cli.app import research_command
+
+                research_command(topic=topic_part, path=path, max_waves=2)
+            else:
+                console.print("[yellow]Usage: /research <topic or paper inquiry>[/yellow]\n")
+            continue
+
         if lower_input.startswith("/agent"):
             parts = user_input.split()
             if len(parts) > 1 and session_state.set_agent(parts[1]):
