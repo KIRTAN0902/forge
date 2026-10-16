@@ -22,7 +22,6 @@ from forge import __version__
 from forge.agents.base import BaseAgent
 from forge.agents.executor import ExecutorAgent
 from forge.agents.orchestrator import OrchestratorAgent
-from forge.agents.planner import PlannerAgent
 from forge.agents.qa import QAAgent
 from forge.cli.cancellation import run_with_esc_cancellation
 from forge.cli.credentials import (
@@ -57,7 +56,7 @@ ASCII_LOGO = r"""
 [bold cyan]  ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝[/bold cyan]
 """
 
-AVAILABLE_AGENTS = ("orchestrator", "planner", "executor", "qa")
+AVAILABLE_AGENTS = ("orchestrator", "executor", "qa")
 
 AGENT_METADATA: dict[str, dict[str, str]] = {
     "orchestrator": {
@@ -65,14 +64,7 @@ AGENT_METADATA: dict[str, dict[str, str]] = {
         "icon": "🎯",
         "color": "cyan",
         "status_color": "bold cyan",
-        "description": "Brainstorming, requirements synthesis & technical lead (Default)",
-    },
-    "planner": {
-        "title": "Planner",
-        "icon": "📐",
-        "color": "magenta",
-        "status_color": "bold magenta",
-        "description": "Task decomposition, architecture DAG & implementation planning",
+        "description": "Brainstorming, architecture, task planning & technical lead (Default)",
     },
     "executor": {
         "title": "Executor",
@@ -112,11 +104,12 @@ class ChatSessionState:
         alias_map = {
             "orch": "orchestrator",
             "orchestrator": "orchestrator",
-            "planner": "planner",
-            "plan": "planner",
+            "planner": "orchestrator",
+            "plan": "orchestrator",
             "exec": "executor",
             "executor": "executor",
             "qa": "qa",
+            "audit": "qa",
         }
         if low in alias_map:
             self.active_agent = alias_map[low]
@@ -128,8 +121,7 @@ HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
     ("/models", "Interactive popup to select and configure agent models"),
     ("/provider", "Connect and configure model providers, API keys, and custom Base URIs/URLs"),
-    ("/orchestrator", "Switch active agent to Orchestrator (Default, brainstorming & tech lead)"),
-    ("/planner", "Switch active agent to Planner (Architecture & task graph)"),
+    ("/orchestrator", "Switch active agent to Orchestrator (Default, brainstorming, architecture & planning)"),
     ("/executor", "Switch active agent to Executor (Direct coding, tools & terminal execution)"),
     ("/qa", "Switch active agent to QA (Adversarial testing & security audit)"),
     ("/agent", "Show or switch the active chat agent (or press Tab at the prompt)"),
@@ -510,10 +502,8 @@ async def _run_agent_chat_turn(
         meta = AGENT_METADATA.get(agent_role, AGENT_METADATA["orchestrator"])
         adapter = await harness.registry.adapter(agent_role, events=event_bus)
 
-        if agent_role == "orchestrator":
+        if agent_role in {"orchestrator", "planner"}:
             agent: BaseAgent = OrchestratorAgent(adapter, runtime=harness.runtime, events=event_bus)
-        elif agent_role == "planner":
-            agent = PlannerAgent(adapter, runtime=harness.runtime, events=event_bus)
         elif agent_role == "executor":
             agent = ExecutorAgent(adapter, runtime=harness.runtime, events=event_bus)
         elif agent_role == "qa":
@@ -652,16 +642,10 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print("[green]Credentials updated.[/green]")
             continue
 
-        if lower_input in {"/orchestrator", "/orch"}:
+        if lower_input in {"/orchestrator", "/orch", "/planner", "/plan"}:
             session_state.set_agent("orchestrator")
             meta = AGENT_METADATA["orchestrator"]
             console.print(f"[bold cyan]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold cyan] [dim]({meta['description']})[/dim]\n")
-            continue
-
-        if lower_input == "/planner":
-            session_state.set_agent("planner")
-            meta = AGENT_METADATA["planner"]
-            console.print(f"[bold magenta]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold magenta] [dim]({meta['description']})[/dim]\n")
             continue
 
         if lower_input in {"/executor", "/exec"}:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from forge.agents.executor import ExecutorAgent
-from forge.agents.planner import PlannerAgent
+from forge.agents.orchestrator import OrchestratorAgent
 from forge.agents.qa import QAAgent
 from forge.context.analyzer import RepositoryAnalyzer
 from forge.context.builder import ContextBuilder
@@ -19,19 +19,24 @@ from forge.workflow.recovery import CheckpointManager
 
 
 class AgentRouter:
-    """Dispatches decisions to Planner, Executor, or QA and updates WorkflowState."""
+    """Dispatches decisions to Orchestrator (Planning), Executor, or QA and updates WorkflowState."""
 
     def __init__(
         self,
         *,
-        planner: PlannerAgent,
+        orchestrator: OrchestratorAgent | None = None,
+        planner: OrchestratorAgent | None = None,
         executor: ExecutorAgent,
         qa: QAAgent,
         runtime: ToolRuntime,
         checkpoint_mgr: CheckpointManager | None = None,
         events: EventBus | None = None,
     ) -> None:
-        self.planner = planner
+        resolved_orch = orchestrator or planner
+        if resolved_orch is None:
+            raise ValueError("An orchestrator agent must be provided to AgentRouter")
+        self.orchestrator: OrchestratorAgent = resolved_orch
+        self.planner: OrchestratorAgent = resolved_orch
         self.executor = executor
         self.qa = qa
         self.runtime = runtime
@@ -40,7 +45,7 @@ class AgentRouter:
 
     async def route(self, decision: Decision, state: WorkflowState) -> WorkflowState:
         """Execute the action specified by decision and record results in state."""
-        self.planner.workflow_id = state.workflow_id
+        self.orchestrator.workflow_id = state.workflow_id
         self.executor.workflow_id = state.workflow_id
         self.qa.workflow_id = state.workflow_id
         action = decision.action

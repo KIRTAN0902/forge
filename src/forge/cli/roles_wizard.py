@@ -175,10 +175,7 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
 
         console.print()
         orch_model = Prompt.ask(
-            "Orchestrator Agent Model (Brainstorming & Tech Lead)", default=p_def, console=console
-        ).strip()
-        planner_model = Prompt.ask(
-            "Planner Agent Model (Architect & Decomposition)", default=p_def, console=console
+            "Orchestrator Agent Model (Brainstorming, Architecture & Planning)", default=p_def, console=console
         ).strip()
         executor_model = Prompt.ask(
             "Executor Agent Model (Code Writing & Tools)", default=e_def, console=console
@@ -189,7 +186,7 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
 
         role_configs = {
             "orchestrator": (provider, orch_model),
-            "planner": (provider, planner_model),
+            "planner": (provider, orch_model),
             "executor": (provider, executor_model),
             "qa": (provider, qa_model),
             "default": (provider, orch_model),
@@ -202,28 +199,24 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
         console.print("\n[bold]Configuring Multi-Provider / Multi-Key Agents:[/bold]")
 
         console.print(
-            "\n[bold cyan]1. Configure Orchestrator Agent (Brainstorming & Tech Lead):[/bold cyan]"
+            "\n[bold cyan]1. Configure Orchestrator Agent (Brainstorming, Architecture & Planning):[/bold cyan]"
         )
         o_prov, _, o_def = _prompt_provider_and_key(console, "Orchestrator Agent")
         o_model = Prompt.ask("Orchestrator Model ID", default=o_def, console=console).strip()
 
-        console.print("\n[bold cyan]2. Configure Planner Agent (Architect & Strategy):[/bold cyan]")
-        p_prov, _, p_def = _prompt_provider_and_key(console, "Planner Agent")
-        p_model = Prompt.ask("Planner Model ID", default=p_def, console=console).strip()
-
         console.print(
-            "\n[bold cyan]3. Configure Executor Agent (Code Generation & Tools):[/bold cyan]"
+            "\n[bold cyan]2. Configure Executor Agent (Code Generation & Tools):[/bold cyan]"
         )
         e_prov, _, e_def = _prompt_provider_and_key(console, "Executor Agent")
         e_model = Prompt.ask("Executor Model ID", default=e_def, console=console).strip()
 
-        console.print("\n[bold cyan]4. Configure QA Agent (Testing & Auditing):[/bold cyan]")
+        console.print("\n[bold cyan]3. Configure QA Agent (Testing & Auditing):[/bold cyan]")
         q_prov, _, q_def = _prompt_provider_and_key(console, "QA Agent")
         q_model = Prompt.ask("QA Model ID", default=q_def, console=console).strip()
 
         role_configs = {
             "orchestrator": (o_prov, o_model),
-            "planner": (p_prov, p_model),
+            "planner": (o_prov, o_model),
             "executor": (e_prov, e_model),
             "qa": (q_prov, q_model),
             "default": (o_prov, o_model),
@@ -441,7 +434,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
         ),
     ]
 
-    for r_name in ("orchestrator", "planner", "executor", "qa"):
+    for r_name in ("orchestrator", "executor", "qa"):
         curr_binding = config.roles.get(r_name)
         curr_prof_name = curr_binding.model if curr_binding else None
         curr_m = "default"
@@ -449,8 +442,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
             curr_m = config.models[curr_prof_name].model.split("/")[-1]
 
         role_desc = {
-            "orchestrator": "(Brainstorming, requirements, tech lead)",
-            "planner": "(Task architecture & decomposition)",
+            "orchestrator": "(Brainstorming, architecture & task planning)",
             "executor": "(Code writing & tool runtime)",
             "qa": "(Verification, test suites & auditing)",
         }.get(r_name, "")
@@ -592,6 +584,8 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
             changes.append(f"All Agents ➔ [cyan]{selected_model_id}[/cyan] ({current_prov})")
         else:
             set_role_model(project_dir, chosen_role, model=selected_model_id, provider=current_prov)
+            if chosen_role == "orchestrator":
+                set_role_model(project_dir, "planner", model=selected_model_id, provider=current_prov)
             changes.append(f"{role_label} ➔ [cyan]{selected_model_id}[/cyan] ({current_prov})")
         break
 

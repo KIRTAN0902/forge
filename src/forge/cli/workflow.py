@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from forge.agents import ExecutorAgent, PlannerAgent, QAAgent
+from forge.agents import ExecutorAgent, OrchestratorAgent, QAAgent
 from forge.config import ForgeConfig
 from forge.events.bus import EventBus
 from forge.models import ModelRegistry, RoleBinding
@@ -63,16 +63,19 @@ async def build_workflow_harness(
         providers=config.providers, profiles=profiles, roles=roles
     )
 
-    planner_adapter = await model_registry.adapter("planner", events=events)
+    plan_role = "planner" if "planner" in model_registry.roles else "orchestrator"
+    plan_adapter = await model_registry.adapter(plan_role, events=events)
+    orch_adapter = await model_registry.adapter("orchestrator", events=events)
     executor_adapter = await model_registry.adapter("executor", events=events)
     qa_adapter = await model_registry.adapter("qa", events=events)
-    orch_adapter = await model_registry.adapter("orchestrator", events=events)
 
-    planner = PlannerAgent(planner_adapter, runtime=runtime, events=events)
+    orchestrator_agent = OrchestratorAgent(plan_adapter, runtime=runtime, events=events)
     executor = ExecutorAgent(executor_adapter, runtime=runtime, events=events)
     qa = QAAgent(qa_adapter, runtime=runtime, events=events)
 
-    router = AgentRouter(planner=planner, executor=executor, qa=qa, runtime=runtime, events=events)
+    router = AgentRouter(
+        orchestrator=orchestrator_agent, executor=executor, qa=qa, runtime=runtime, events=events
+    )
 
     limit = max_iterations or config.limits.max_iterations
     orchestrator = Orchestrator(

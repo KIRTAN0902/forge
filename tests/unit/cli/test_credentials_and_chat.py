@@ -205,14 +205,13 @@ class TestChatInterface:
             mock_prov.assert_called_once()
 
     def test_chat_session_state_cycling_and_aliases(self) -> None:
-        """Test default agent is orchestrator and cycling goes orchestrator -> planner -> executor -> qa."""
+        """Test default agent is orchestrator and cycling goes orchestrator -> executor -> qa."""
         from forge.cli.chat import ChatSessionState, _get_prompt_tokens
 
         state = ChatSessionState()
         assert state.active_agent == "orchestrator"
 
         # Tab cycle forward
-        assert state.cycle_agent() == "planner"
         assert state.cycle_agent() == "executor"
         assert state.cycle_agent() == "qa"
         assert state.cycle_agent() == "orchestrator"
@@ -223,7 +222,9 @@ class TestChatInterface:
 
         # Aliases
         assert state.set_agent("plan") is True
-        assert state.active_agent == "planner"
+        assert state.active_agent == "orchestrator"
+        assert state.set_agent("planner") is True
+        assert state.active_agent == "orchestrator"
         assert state.set_agent("exec") is True
         assert state.active_agent == "executor"
         assert state.set_agent("orch") is True

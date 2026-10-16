@@ -302,7 +302,7 @@ def models_ping(
 def models_config_cmd(
     path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
 ) -> None:
-    """Interactively configure models for orchestrator, planner, executor, and qa."""
+    """Interactively configure models for orchestrator, executor, and qa."""
     from forge.cli.roles_wizard import run_model_menu
 
     changes = run_model_menu(path.resolve(), console)
@@ -373,7 +373,7 @@ def provider_cmd(
 def roles_set_cmd(
     role: Annotated[
         str,
-        typer.Argument(help="Role to assign (planner, executor, qa, orchestrator, default)."),
+        typer.Argument(help="Role to assign (orchestrator, executor, qa, default)."),
     ],
     model: Annotated[str, typer.Argument(help="Model name or profile.")],
     provider: Annotated[
