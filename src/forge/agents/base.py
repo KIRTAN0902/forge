@@ -10,7 +10,7 @@ from forge.context.history import compact_history
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
 from forge.models.adapter import ModelAdapter
-from forge.models.types import Message
+from forge.models.types import ContentPart, Message
 from forge.tools.base import ToolResult
 from forge.tools.runtime import ToolRuntime
 
@@ -109,7 +109,7 @@ class BaseAgent:
 
     async def chat(
         self,
-        user_message: str,
+        user_message: str | list[ContentPart],
         history: Sequence[Message] | None = None,
         *,
         project_context: str = "",

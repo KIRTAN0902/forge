@@ -246,14 +246,14 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             return "openrouter_default", ModelProfile(
                 provider="openrouter",
                 model=model_name or "anthropic/claude-3.7-sonnet",
-                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
                 detect_capabilities=False,
             )
         if provider == "openai" and (os.environ.get("OPENAI_API_KEY") or stored.get("api_key")):
             return "openai_default", ModelProfile(
                 provider="openai",
                 model=model_name or "gpt-4o",
-                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
                 detect_capabilities=False,
             )
         if provider == "ollama":
@@ -286,7 +286,7 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
         return "openrouter_default", ModelProfile(
             provider="openrouter",
             model=model_name,
-            capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
             detect_capabilities=False,
         )
 
@@ -295,7 +295,7 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
         return "openai_default", ModelProfile(
             provider="openai",
             model=model_name,
-            capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
             detect_capabilities=False,
         )
 

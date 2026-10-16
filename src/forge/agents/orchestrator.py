@@ -21,7 +21,7 @@ from forge.core.contracts.requirements import RequirementContract
 from forge.events.bus import EventBus
 from forge.events.types import EventType
 from forge.models.adapter import ModelAdapter
-from forge.models.types import Message
+from forge.models.types import ContentPart, Message
 from forge.tools.defaults import READ_ONLY_TOOLS, ROLE_TOOLSETS
 from forge.tools.runtime import ToolRuntime
 
@@ -82,7 +82,7 @@ class OrchestratorAgent(BaseAgent):
 
     async def chat(
         self,
-        user_message: str,
+        user_message: str | list[ContentPart],
         history: Sequence[Message] | None = None,
         *,
         project_context: str = "",
@@ -133,10 +133,17 @@ class OrchestratorAgent(BaseAgent):
             clean_text = HANDOFF_PATTERN.sub("", raw_text).strip()
         else:
             # Check if user message was an explicit confirmation to build what was brainstormed
-            norm_input = user_message.strip().lower()
+            from forge.models.types import TextPart
+
+            text_msg = (
+                user_message
+                if isinstance(user_message, str)
+                else "".join(p.text for p in user_message if isinstance(p, TextPart))
+            )
+            norm_input = text_msg.strip().lower()
             if any(norm_input == trig or norm_input.startswith(f"{trig} ") for trig in EXECUTION_CONFIRM_TRIGGERS):
                 # Synthesize requirements from recent discussion
-                handoff_requirements = self._synthesize_from_history(history, user_message)
+                handoff_requirements = self._synthesize_from_history(history, text_msg)
 
         if handoff_requirements:
             await self._emit(

@@ -42,7 +42,7 @@ from forge.core.contracts.state import WorkflowState
 from forge.core.errors import ForgeError, UserCancelledError
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
-from forge.models.types import Message
+from forge.models.types import ContentPart, Message, TextPart
 from forge.storage.sqlite import SQLiteStore
 from forge.tools import create_environment
 from forge.workflow.recovery import CheckpointManager
@@ -125,14 +125,19 @@ HELP_COMMANDS = [
     ("/anvil", "Switch active agent to 🎯 ANVIL (Orchestrator: architecture & planning)"),
     ("/hammer", "Switch active agent to ⚡ HAMMER (Executor: coding & tool execution)"),
     ("/temper", "Switch active agent to 🔍 TEMPER (QA: adversarial testing & verification)"),
+    ("/paste", "Paste screenshot image or copied file directly from system clipboard"),
+    ("/image", "Attach image/screenshot from file path or clipboard for visual analysis (/img)"),
+    ("/screenshot", "Capture screen or clipboard screenshot and analyze with active agent"),
+    ("/file", "Attach a code, document, or log file to analyze (/attach)"),
     ("/search", "Perform a live web search for documentation, APIs, and error solutions"),
+    ("/research", "Run deep research with multi-perspective synthesis & verified BibTeX"),
     ("/models", "Interactive popup to select and configure agent models"),
     ("/provider", "Connect and configure model providers, API keys, and custom Base URIs/URLs"),
     ("/orchestrator", "Alias for /anvil"),
     ("/executor", "Alias for /hammer"),
     ("/qa", "Alias for /temper"),
     ("/agent", "Show or switch the active chat agent (or press Tab at the prompt)"),
-    ("/skills", "List all 24 pre-programmed specialist skills and autonomous triggers"),
+    ("/skills", "List all 43 specialist skills and autonomous triggers"),
     ("/run", "Directly trigger multi-agent planning & execution on a request"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
@@ -320,6 +325,41 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
         def _handle_shift_tab(event: KeyPressEvent) -> None:
             current_state.cycle_agent_reverse()
             event.app.invalidate()
+
+        @kb.add("c-v")
+        def _handle_ctrl_v(event: KeyPressEvent) -> None:
+            buf = event.app.current_buffer
+            try:
+                from forge.cli.attachments import get_clipboard_files, get_clipboard_image
+
+                att = get_clipboard_image()
+                if att is not None and att.is_image:
+                    buf.insert_text(f"[image: {att.path.as_posix()}] ")
+                    event.app.invalidate()
+                    return
+                files = get_clipboard_files()
+                if files:
+                    file_tokens = " ".join(
+                        f"[{'image' if f.is_image else 'file'}: {f.path.as_posix()}]" for f in files
+                    )
+                    buf.insert_text(f"{file_tokens} ")
+                    event.app.invalidate()
+                    return
+            except Exception:
+                pass
+
+            # Standard text paste fallback
+            try:
+                clipboard_data = event.app.clipboard.get_data()
+                if clipboard_data and clipboard_data.text:
+                    buf.insert_text(clipboard_data.text)
+            except Exception:
+                pass
+            event.app.invalidate()
+
+        @kb.add("escape", "v")
+        def _handle_alt_v(event: KeyPressEvent) -> None:
+            _handle_ctrl_v(event)
 
         prompt_style = Style.from_dict({
             "prompt_brand": "#00e5ff bold",
@@ -518,7 +558,7 @@ async def _run_workflow_turn(
 
 async def _run_agent_chat_turn(
     agent_role: str,
-    user_input: str,
+    user_input: str | list[ContentPart],
     path: Path,
     console: Console,
     history: list[Message],
@@ -555,9 +595,14 @@ async def _run_agent_chat_turn(
         )
 
         evaluator = SkillEvaluator()
+        text_for_signal = (
+            user_input
+            if isinstance(user_input, str)
+            else "\n".join(p.text for p in user_input if isinstance(p, TextPart))
+        )
         signal = SkillSignal(
-            user_request=user_input,
-            error_text=user_input,
+            user_request=text_for_signal,
+            error_text=text_for_signal,
         )
         active_skills = evaluator.evaluate(signal, agent_role=agent_role)
         if active_skills:
@@ -833,12 +878,230 @@ def run_chat_session(path: Path = Path(".")) -> None:
             console.print()
             continue
 
+        # Multimodal & Clipboard Slash Commands
+        from forge.cli.attachments import (
+            build_turn_content,
+            create_attachment_from_file,
+            get_clipboard_files,
+            get_clipboard_image,
+            parse_user_input_attachments,
+            take_screenshot,
+        )
+
+        if lower_input.startswith("/paste"):
+            query_arg = user_input[6:].strip()
+            media_dir = path / ".forge" / "media"
+            att = get_clipboard_image(media_dir)
+            if att is not None and att.is_image:
+                console.print()
+                console.print(att.render_panel())
+                query = (
+                    query_arg
+                    or "Please analyze this attached screenshot image and diagnose any issues, UI elements, or errors."
+                )
+                turn_content, _ = build_turn_content(query, [att])
+                try:
+                    conversation_history, wid = _run_async(
+                        _run_agent_chat_turn(
+                            agent_role=session_state.active_agent,
+                            user_input=turn_content,
+                            path=path,
+                            console=console,
+                            history=conversation_history,
+                            current_workflow_id=current_workflow_id,
+                        )
+                    )
+                    if wid is not None:
+                        current_workflow_id = wid
+                except UserCancelledError:
+                    console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
+                except ForgeError as exc:
+                    console.print(f"[red]error:[/red] {exc}")
+                except Exception as exc:
+                    console.print(f"[red]unexpected error:[/red] {exc}")
+                console.print()
+                continue
+
+            # Check if clipboard has files
+            c_files = get_clipboard_files()
+            if c_files:
+                console.print()
+                for cf in c_files:
+                    console.print(cf.render_panel())
+                query = query_arg or f"Please analyze the attached files: {', '.join(f.path.name for f in c_files)}."
+                turn_content, _ = build_turn_content(query, c_files)
+                try:
+                    conversation_history, wid = _run_async(
+                        _run_agent_chat_turn(
+                            agent_role=session_state.active_agent,
+                            user_input=turn_content,
+                            path=path,
+                            console=console,
+                            history=conversation_history,
+                            current_workflow_id=current_workflow_id,
+                        )
+                    )
+                    if wid is not None:
+                        current_workflow_id = wid
+                except UserCancelledError:
+                    console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
+                except ForgeError as exc:
+                    console.print(f"[red]error:[/red] {exc}")
+                except Exception as exc:
+                    console.print(f"[red]unexpected error:[/red] {exc}")
+                console.print()
+                continue
+
+            console.print("\n[yellow]⚠ No image or file detected in system clipboard.[/yellow]")
+            console.print(
+                "[dim]Tip: Take a screenshot with [bold cyan]Win+Shift+S[/bold cyan] (Windows) or [bold cyan]Cmd+Shift+4[/bold cyan] (Mac), then press [bold cyan]Ctrl+V[/bold cyan] or type [bold cyan]/paste[/bold cyan].[/dim]\n"
+            )
+            continue
+
+        if lower_input.startswith("/image") or lower_input.startswith("/img"):
+            cmd_prefix_len = 6 if lower_input.startswith("/image") else 4
+            arg_str = user_input[cmd_prefix_len:].strip()
+            parts = arg_str.split(maxsplit=1)
+            target_file = parts[0] if parts else ""
+            query_arg = parts[1] if len(parts) > 1 else ""
+
+            att = None
+            if target_file and (path / target_file).is_file():
+                att = create_attachment_from_file(path / target_file)
+            elif target_file and Path(target_file).is_file():
+                att = create_attachment_from_file(Path(target_file))
+            else:
+                media_dir = path / ".forge" / "media"
+                att = get_clipboard_image(media_dir)
+                if not query_arg and target_file:
+                    query_arg = target_file
+
+            if att is not None and att.is_image:
+                console.print()
+                console.print(att.render_panel())
+                query = query_arg or "Please inspect this image and diagnose any problems or key features."
+                turn_content, _ = build_turn_content(query, [att])
+                try:
+                    conversation_history, wid = _run_async(
+                        _run_agent_chat_turn(
+                            agent_role=session_state.active_agent,
+                            user_input=turn_content,
+                            path=path,
+                            console=console,
+                            history=conversation_history,
+                            current_workflow_id=current_workflow_id,
+                        )
+                    )
+                    if wid is not None:
+                        current_workflow_id = wid
+                except UserCancelledError:
+                    console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
+                except ForgeError as exc:
+                    console.print(f"[red]error:[/red] {exc}")
+                except Exception as exc:
+                    console.print(f"[red]unexpected error:[/red] {exc}")
+                console.print()
+                continue
+            else:
+                console.print(
+                    "\n[yellow]Usage: /image <path-to-image> [question] OR copy a screenshot and type /paste[/yellow]\n"
+                )
+                continue
+
+        if lower_input.startswith("/screenshot"):
+            query_arg = user_input[11:].strip()
+            media_dir = path / ".forge" / "media"
+            att = take_screenshot(media_dir)
+            if att is not None and att.is_image:
+                console.print()
+                console.print(att.render_panel())
+                query = (
+                    query_arg
+                    or "Please inspect this screenshot of the screen and analyze what is visible."
+                )
+                turn_content, _ = build_turn_content(query, [att])
+                try:
+                    conversation_history, wid = _run_async(
+                        _run_agent_chat_turn(
+                            agent_role=session_state.active_agent,
+                            user_input=turn_content,
+                            path=path,
+                            console=console,
+                            history=conversation_history,
+                            current_workflow_id=current_workflow_id,
+                        )
+                    )
+                    if wid is not None:
+                        current_workflow_id = wid
+                except UserCancelledError:
+                    console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
+                except ForgeError as exc:
+                    console.print(f"[red]error:[/red] {exc}")
+                except Exception as exc:
+                    console.print(f"[red]unexpected error:[/red] {exc}")
+                console.print()
+                continue
+            else:
+                console.print(
+                    "\n[yellow]⚠ Could not capture screenshot. Try Win+Shift+S (or PrtScn) and /paste.[/yellow]\n"
+                )
+                continue
+
+        if lower_input.startswith("/file") or lower_input.startswith("/attach"):
+            cmd_prefix_len = 5 if lower_input.startswith("/file") else 7
+            arg_str = user_input[cmd_prefix_len:].strip()
+            parts = arg_str.split(maxsplit=1)
+            target_file = parts[0] if parts else ""
+            query_arg = parts[1] if len(parts) > 1 else ""
+
+            target_path = Path(target_file) if Path(target_file).is_absolute() else path / target_file
+            if target_file and target_path.is_file():
+                att = create_attachment_from_file(target_path)
+                if att is not None:
+                    console.print()
+                    console.print(att.render_panel())
+                    query = query_arg or f"Please analyze the attached file: {att.path.name}."
+                    turn_content, _ = build_turn_content(query, [att])
+                    try:
+                        conversation_history, wid = _run_async(
+                            _run_agent_chat_turn(
+                                agent_role=session_state.active_agent,
+                                user_input=turn_content,
+                                path=path,
+                                console=console,
+                                history=conversation_history,
+                                current_workflow_id=current_workflow_id,
+                            )
+                        )
+                        if wid is not None:
+                            current_workflow_id = wid
+                    except UserCancelledError:
+                        console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
+                    except ForgeError as exc:
+                        console.print(f"[red]error:[/red] {exc}")
+                    except Exception as exc:
+                        console.print(f"[red]unexpected error:[/red] {exc}")
+                    console.print()
+                    continue
+            console.print("\n[yellow]Usage: /file <path-to-code-or-doc> [instruction][/yellow]\n")
+            continue
+
+        # Automatic detection of [image: ...], [file: ...], or dragged/quoted paths
+        cleaned_text, detected_attachments = parse_user_input_attachments(user_input, base_dir=path)
+        if detected_attachments:
+            console.print()
+            for att in detected_attachments:
+                console.print(att.render_panel())
+            turn_content, _ = build_turn_content(cleaned_text, detected_attachments)
+        else:
+            turn_content = user_input
+
         # Conversational pairing with the active agent (default: Orchestrator)
         try:
             conversation_history, wid = _run_async(
                 _run_agent_chat_turn(
                     agent_role=session_state.active_agent,
-                    user_input=user_input,
+                    user_input=turn_content,
                     path=path,
                     console=console,
                     history=conversation_history,

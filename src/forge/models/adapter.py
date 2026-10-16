@@ -299,7 +299,24 @@ class ModelAdapter:
         if not messages:
             raise ValueError("at least one message is required")
         if not self.capabilities.vision and any(m.has_images for m in messages):
-            raise ModelCapabilityError(f"{self.describe()} does not accept images")
+            model_name = (self.profile.model or "").lower()
+            vision_names = (
+                "gpt-4o",
+                "gpt-4-turbo",
+                "claude-3",
+                "claude-3-5",
+                "claude-3.7",
+                "gemini",
+                "vision",
+                "vl",
+                "pixtral",
+                "llava",
+                "qwen-vl",
+            )
+            if any(vn in model_name for vn in vision_names):
+                self.capabilities = self.capabilities.model_copy(update={"vision": True})
+            else:
+                raise ModelCapabilityError(f"{self.describe()} does not accept images")
 
     async def _call(self, request: ModelRequest, *, strategy: str) -> ModelResponse:
         response = await self.provider.complete(self.profile.model, request)
