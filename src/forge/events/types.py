@@ -27,6 +27,7 @@ class EventType(StrEnum):
     PLAN_REVISED = "PlanRevised"
     # Orchestration
     DECISION_MADE = "DecisionMade"
+    SKILL_ACTIVATED = "SkillActivated"
     # Execution
     TASK_STARTED = "TaskStarted"
     TASK_COMPLETED = "TaskCompleted"

@@ -396,6 +396,30 @@ def roles_set_cmd(
         raise typer.Exit(1) from exc
 
 
+skills_app = typer.Typer(
+    help="Inspect pre-programmed specialist skills and autonomous triggers.", no_args_is_help=False
+)
+app.add_typer(skills_app, name="skills")
+
+
+@skills_app.callback(invoke_without_command=True)
+def skills_main(ctx: typer.Context) -> None:
+    """List all 24 built-in specialist skills and activation triggers."""
+    if ctx.invoked_subcommand is not None:
+        return
+    from forge.cli.chat import print_skills_table
+
+    print_skills_table(console)
+
+
+@skills_app.command("list")
+def skills_list_cmd() -> None:
+    """List all 24 built-in specialist skills and activation triggers."""
+    from forge.cli.chat import print_skills_table
+
+    print_skills_table(console)
+
+
 @app.command("context")
 def show_context(
     request: Annotated[str, typer.Argument(help="What you want done, in plain language.")],

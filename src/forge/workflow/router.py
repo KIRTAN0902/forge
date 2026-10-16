@@ -14,6 +14,7 @@ from forge.core.contracts.qa import QAScope, QAStatus
 from forge.core.contracts.state import WorkflowState, WorkflowStatus
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
+from forge.skills import SkillEvaluator, SkillSignal, format_skills_for_prompt
 from forge.tools.runtime import ToolRuntime
 from forge.workflow.recovery import CheckpointManager
 
@@ -42,6 +43,7 @@ class AgentRouter:
         self.runtime = runtime
         self.checkpoint_mgr = checkpoint_mgr or CheckpointManager()
         self.events = events
+        self.skills = SkillEvaluator()
 
     async def route(self, decision: Decision, state: WorkflowState) -> WorkflowState:
         """Execute the action specified by decision and record results in state."""
@@ -112,8 +114,34 @@ class AgentRouter:
         is_replan = decision.action == OrchestratorAction.REPLAN
         is_research = decision.action == OrchestratorAction.REQUEST_RESEARCH
 
+        consec_fails = sum(1 for d in state.decisions[-3:] if d.action == OrchestratorAction.REPLAN)
+        plan_signal = SkillSignal(
+            user_request=state.user_request,
+            consecutive_failures=consec_fails,
+        )
+        plan_skills = self.skills.evaluate(plan_signal, agent_role="orchestrator")
+        for act in plan_skills:
+            if self.events is not None:
+                await self.events.publish(
+                    Event(
+                        type=EventType.SKILL_ACTIVATED,
+                        workflow_id=state.workflow_id,
+                        source="router",
+                        payload={
+                            "skill_id": act.skill.id,
+                            "name": act.skill.name,
+                            "agent": "orchestrator",
+                            "rationale": act.rationale,
+                        },
+                    )
+                )
+
+        effective_request = state.user_request
+        if plan_skills:
+            effective_request += f"\n\n{format_skills_for_prompt(plan_skills)}"
+
         result = await self.planner.plan(
-            request=state.user_request,
+            request=effective_request,
             context=context,
             requirements=state.requirements if is_replan else None,
             existing_plan=state.plan if is_replan else None,
@@ -177,8 +205,47 @@ class AgentRouter:
             findings = state.latest_qa.blocking_findings
 
         builder = await self._build_context_builder()
+
+        # Autonomous Skill Routing for Executor
+        git_repo = await self.runtime.env.git()
+        diff_str = await git_repo.diff() if git_repo is not None else ""
+        last_test_exit = state.test_results[-1].exit_code if state.test_results else None
+        last_test_out = state.test_results[-1].output_tail if state.test_results else ""
+
+        exec_signal = SkillSignal(
+            user_request=target_task.description,
+            touched_files=list(target_task.files_hint),
+            diff_text=diff_str,
+            test_exit_code=last_test_exit,
+            test_output=last_test_out,
+            consecutive_failures=target_task.attempts,
+        )
+        exec_skills = self.skills.evaluate(exec_signal, agent_role="executor")
+        for act in exec_skills:
+            if self.events is not None:
+                await self.events.publish(
+                    Event(
+                        type=EventType.SKILL_ACTIVATED,
+                        workflow_id=state.workflow_id,
+                        source="router",
+                        payload={
+                            "skill_id": act.skill.id,
+                            "name": act.skill.name,
+                            "agent": "executor",
+                            "rationale": act.rationale,
+                        },
+                    )
+                )
+
+        effective_task = target_task
+        if exec_skills:
+            skill_prompt = format_skills_for_prompt(exec_skills)
+            effective_task = target_task.model_copy(
+                update={"description": f"{target_task.description}\n\n{skill_prompt}"}
+            )
+
         context = builder.executor(
-            task=target_task,
+            task=effective_task,
             capabilities=self.executor.adapter.capabilities,
             optimization=self.executor.adapter.optimization,
             plan=state.plan,
@@ -187,7 +254,7 @@ class AgentRouter:
         )
 
         result = await self.executor.execute(
-            task=target_task,
+            task=effective_task,
             context=context,
             plan=state.plan,
             requirements=state.requirements,
@@ -218,11 +285,43 @@ class AgentRouter:
                 if c.path not in changed_files:
                     changed_files.append(c.path)
 
+        # Autonomous Skill Routing for QA
+        git_repo = await self.runtime.env.git()
+        diff_str = await git_repo.diff() if git_repo is not None else ""
+        qa_signal = SkillSignal(
+            user_request=state.user_request,
+            touched_files=changed_files,
+            diff_text=diff_str,
+        )
+        qa_skills = self.skills.evaluate(qa_signal, agent_role="qa")
+        for act in qa_skills:
+            if self.events is not None:
+                await self.events.publish(
+                    Event(
+                        type=EventType.SKILL_ACTIVATED,
+                        workflow_id=state.workflow_id,
+                        source="router",
+                        payload={
+                            "skill_id": act.skill.id,
+                            "name": act.skill.name,
+                            "agent": "qa",
+                            "rationale": act.rationale,
+                        },
+                    )
+                )
+
+        effective_reqs = state.requirements
+        if qa_skills and effective_reqs:
+            qa_skill_prompt = format_skills_for_prompt(qa_skills)
+            effective_reqs = effective_reqs.model_copy(
+                update={"summary": f"{effective_reqs.summary}\n\n{qa_skill_prompt}"}
+            )
+
         builder = await self._build_context_builder()
         context = builder.qa(
             capabilities=self.qa.adapter.capabilities,
             optimization=self.qa.adapter.optimization,
-            requirements=state.requirements,
+            requirements=effective_reqs,
             changed_files=changed_files,
             plan=state.plan,
             test_results=state.test_results,
@@ -230,7 +329,7 @@ class AgentRouter:
 
         report = await self.qa.review(
             context=context,
-            requirements=state.requirements,
+            requirements=effective_reqs,
             plan=state.plan,
             changed_files=changed_files,
             execution_results=state.execution_results,

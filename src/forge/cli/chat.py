@@ -125,6 +125,7 @@ HELP_COMMANDS = [
     ("/executor", "Switch active agent to Executor (Direct coding, tools & terminal execution)"),
     ("/qa", "Switch active agent to QA (Adversarial testing & security audit)"),
     ("/agent", "Show or switch the active chat agent (or press Tab at the prompt)"),
+    ("/skills", "List all 24 pre-programmed specialist skills and autonomous triggers"),
     ("/run", "Directly trigger multi-agent planning & execution on a request"),
     ("/status", "Show status, task graph, and QA verdict of current/latest workflow"),
     ("/diff", "Show git diff of modifications made by Forge"),
@@ -134,6 +135,27 @@ HELP_COMMANDS = [
     ("/clear", "Clear terminal screen and redraw status banner"),
     ("/exit", "Exit the interactive session (or /quit)"),
 ]
+
+
+def print_skills_table(console: Console) -> None:
+    """Render a formatted table of all 24 built-in specialist skills."""
+    from forge.skills import ALL_SKILLS
+
+    table = Table(title="Forge Pre-Programmed Specialist Skills", border_style="cyan")
+    table.add_column("ID", style="bold cyan", no_wrap=True)
+    table.add_column("Skill Name", style="bold white")
+    table.add_column("Category", style="magenta")
+    table.add_column("Target Agent(s)", style="yellow")
+    table.add_column("Primary Trigger Signal", style="dim")
+
+    agent_icons = {"orchestrator": "🎯 Orchestrator", "executor": "⚡ Executor", "qa": "🔍 QA"}
+    for sk in ALL_SKILLS:
+        agents_str = ", ".join(agent_icons.get(a, a) for a in sk.target_agents)
+        table.add_row(sk.id, sk.name, sk.category.value, agents_str, sk.primary_trigger)
+
+    console.print()
+    console.print(table)
+    console.print("[dim]These skills are autonomously evaluated and activated by the Orchestrator on matching signals.[/dim]\n")
 
 
 def _get_git_info(root: Path) -> str:
@@ -514,6 +536,20 @@ async def _run_agent_chat_turn(
         git_info = _get_git_info(path)
         project_context = f"Project: {path.name}\nBranch: {git_info}\nPath: {path.resolve()}"
 
+        # Autonomous Skill Routing for Chat Turns
+        from forge.skills import SkillEvaluator, SkillSignal, format_skills_badge, format_skills_for_prompt
+
+        evaluator = SkillEvaluator()
+        signal = SkillSignal(
+            user_request=user_input,
+            error_text=user_input,
+        )
+        active_skills = evaluator.evaluate(signal, agent_role=agent_role)
+        if active_skills:
+            console.print(format_skills_badge(active_skills))
+            skill_instruction = format_skills_for_prompt(active_skills)
+            project_context += f"\n\n{skill_instruction}"
+
         status_msg = f"[{meta['status_color']}]{meta['icon']} {meta['title']} thinking...[/{meta['status_color']}]"
         turn = await run_with_esc_cancellation(
             agent.chat(
@@ -640,6 +676,10 @@ def run_chat_session(path: Path = Path(".")) -> None:
         if lower_input == "/key":
             prompt_for_credentials(console)
             console.print("[green]Credentials updated.[/green]")
+            continue
+
+        if lower_input in {"/skills", "/skill"}:
+            print_skills_table(console)
             continue
 
         if lower_input in {"/orchestrator", "/orch", "/planner", "/plan"}:
