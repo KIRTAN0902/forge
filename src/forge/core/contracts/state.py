@@ -72,6 +72,16 @@ class UsageTotals(Contract):
     tool_calls: int = 0
 
 
+class ActivatedSkillRecord(Contract):
+    skill_id: str
+    name: str
+    category: str = "general"
+    agent: str = "ANVIL"
+    why: str = ""
+    iteration: int = 0
+    at: datetime = Field(default_factory=utcnow)
+
+
 class WorkflowState(Contract):
     workflow_id: str = Field(default_factory=lambda: new_id("wf"))
     user_request: str = Field(min_length=1)
@@ -88,6 +98,7 @@ class WorkflowState(Contract):
     test_results: list[TestRun] = Field(default_factory=list)
     qa_reports: list[QAReport] = Field(default_factory=list)
     decisions: list[Decision] = Field(default_factory=list)
+    skills_used: list[ActivatedSkillRecord] = Field(default_factory=list)
     errors: list[ErrorRecord] = Field(default_factory=list)
     checkpoints: list[Checkpoint] = Field(default_factory=list)
 

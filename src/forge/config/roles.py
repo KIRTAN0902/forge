@@ -95,20 +95,36 @@ def get_roles_summary(
 
 
 def _load_yaml_dict(path: Path) -> dict[str, Any]:
-    config_file = path / CONFIG_FILENAME if path.is_dir() else path
-    if config_file.is_file():
-        try:
-            data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
+    target_dir = path if path.is_dir() else path.parent
+    candidates = [
+        target_dir / ".forge" / "config.json",
+        target_dir / ".forge" / "config.yaml",
+        path if path.is_file() else target_dir / CONFIG_FILENAME,
+    ]
+    for config_file in candidates:
+        if config_file.is_file():
+            try:
+                data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
     return {}
 
 
 def _save_yaml_dict(path: Path, data: dict[str, Any]) -> Path:
-    config_file = path / CONFIG_FILENAME if path.is_dir() else path
-    config_file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    target_dir = path if path.is_dir() else path.parent
+    existing_yaml = target_dir / CONFIG_FILENAME
+    if existing_yaml.is_file():
+        existing_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+        return existing_yaml
+
+    forge_dir = target_dir / ".forge"
+    forge_dir.mkdir(parents=True, exist_ok=True)
+    config_file = forge_dir / "config.json"
+    import json
+
+    config_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return config_file
 
 

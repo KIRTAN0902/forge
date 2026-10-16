@@ -23,9 +23,17 @@ ENV_PREFIX = "FORGE__"
 
 
 def find_config(start: Path) -> Path | None:
-    """Search ``start`` and its parents for ``forge.yaml``."""
+    """Search ``start`` and its parents for configuration.
+
+    Checks .forge/config.json, .forge/config.yaml, or forge.yaml.
+    """
     start = start.resolve()
     for directory in (start, *start.parents):
+        forge_dir = directory / ".forge"
+        if (forge_dir / "config.json").is_file():
+            return forge_dir / "config.json"
+        if (forge_dir / "config.yaml").is_file():
+            return forge_dir / "config.yaml"
         candidate = directory / CONFIG_FILENAME
         if candidate.is_file():
             return candidate
@@ -40,7 +48,7 @@ def load_config(
 ) -> ForgeConfig:
     """Load the effective configuration.
 
-    ``path`` selects an explicit file; otherwise ``forge.yaml`` is searched for from
+    ``path`` selects an explicit file; otherwise configuration is searched for from
     ``start`` (default: cwd) upward. The project root is the directory holding the
     config file, or ``start`` when there is none.
     """
@@ -59,7 +67,10 @@ def load_config(
         where = str(source) if source else "defaults/environment"
         raise ConfigError(f"invalid configuration ({where}):\n{exc}") from exc
 
-    config.root = source.parent if source is not None else start
+    if source is not None:
+        config.root = source.parent.parent if source.parent.name == ".forge" else source.parent
+    else:
+        config.root = start
     config.source = source
     return config
 

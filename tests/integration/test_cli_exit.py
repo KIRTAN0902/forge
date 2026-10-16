@@ -94,8 +94,11 @@ def test_cli_end_to_end_exit_condition(sample_repo: Path) -> None:
     # Step 1: Initialize project via CLI
     init_res = runner.invoke(app, ["init", str(sample_repo)])
     assert init_res.exit_code == 0
-    assert (sample_repo / "forge.yaml").is_file()
+    assert not (sample_repo / "forge.yaml").exists()
     assert (sample_repo / ".forge").is_dir()
+    assert (sample_repo / ".forge" / "forge.md").is_file()
+    assert (sample_repo / ".forge" / "forge.json").is_file()
+    assert (sample_repo / ".forge" / "config.json").is_file()
 
     # Step 2: Check status before running anything
     status_empty = runner.invoke(app, ["status", "--path", str(sample_repo)])
@@ -219,6 +222,20 @@ def test_cli_end_to_end_exit_condition(sample_repo: Path) -> None:
     # Verify ops.py was modified
     ops_code = (sample_repo / "src" / "calc" / "ops.py").read_text(encoding="utf-8")
     assert "return a + b" in ops_code
+
+    # Verify .forge/forge.md and .forge/forge.json living artifacts
+    forge_md = (sample_repo / ".forge" / "forge.md").read_text(encoding="utf-8")
+    assert "Fix addition bug in calculator" in forge_md
+    assert "ANVIL" in forge_md
+    assert "HAMMER" in forge_md
+    assert "TEMPER" in forge_md
+
+    import json
+
+    forge_json = json.loads((sample_repo / ".forge" / "forge.json").read_text(encoding="utf-8"))
+    assert forge_json["goal"] == "Fix addition bug in calculator"
+    assert forge_json["status"] == "completed"
+    assert "summary" in forge_json
 
     # Step 4: Verify detailed workflow status via CLI
     status_res = runner.invoke(app, ["status", "--path", str(sample_repo)])

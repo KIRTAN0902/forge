@@ -77,23 +77,57 @@ class InitResult:
     gitignore_updated: bool = False
 
 
-def init_project(root: Path, *, name: str | None = None, force: bool = False) -> InitResult:
+def init_project(
+    root: Path,
+    *,
+    name: str | None = None,
+    force: bool = False,
+    create_yaml: bool = False,
+) -> InitResult:
+    import json
+
+    from forge.workflow.reporter import init_forge_artifacts
+
     root = root.resolve()
-    config_path = root / CONFIG_FILENAME
-    result = InitResult(config_path=config_path)
-
-    if config_path.exists() and not force:
-        result.skipped.append(config_path)
-    else:
-        config_path.write_text(
-            CONFIG_TEMPLATE.format(name=_yaml_str(name or root.name)), encoding="utf-8"
-        )
-        result.created.append(config_path)
-
     data_dir = root / ".forge"
+    data_dir_created = False
     if not data_dir.exists():
         data_dir.mkdir(parents=True)
+        data_dir_created = True
+
+    # 1. Initialize .forge/forge.md and .forge/forge.json
+    md_path, json_path = init_forge_artifacts(root, project_name=name)
+
+    # 2. Config path: save to .forge/config.json (or forge.yaml only if explicitly requested)
+    if create_yaml:
+        config_path = root / CONFIG_FILENAME
+        result = InitResult(config_path=config_path)
+        if config_path.exists() and not force:
+            result.skipped.append(config_path)
+        else:
+            config_path.write_text(
+                CONFIG_TEMPLATE.format(name=_yaml_str(name or root.name)), encoding="utf-8"
+            )
+            result.created.append(config_path)
+    else:
+        config_path = data_dir / "config.json"
+        result = InitResult(config_path=config_path)
+        if config_path.exists() and not force:
+            result.skipped.append(config_path)
+        else:
+            config_dict = {
+                "version": 1,
+                "project": {"name": name or root.name, "data_dir": ".forge"},
+            }
+            config_path.write_text(json.dumps(config_dict, indent=2), encoding="utf-8")
+            result.created.append(config_path)
+
+    if data_dir_created:
         result.created.append(data_dir)
+    if md_path not in result.created:
+        result.created.append(md_path)
+    if json_path not in result.created:
+        result.created.append(json_path)
 
     gitignore = root / ".gitignore"
     if (root / ".git").exists() or gitignore.exists():

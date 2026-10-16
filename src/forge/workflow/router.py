@@ -11,7 +11,7 @@ from forge.core.contracts.decisions import Decision, OrchestratorAction
 from forge.core.contracts.execution import ExecutionStatus
 from forge.core.contracts.plan import Task, TaskStatus
 from forge.core.contracts.qa import QAScope, QAStatus
-from forge.core.contracts.state import WorkflowState, WorkflowStatus
+from forge.core.contracts.state import ActivatedSkillRecord, WorkflowState, WorkflowStatus
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
 from forge.harness import EpisodicRepoMemory
@@ -55,6 +55,7 @@ class AgentRouter:
         ws_root = getattr(workspace, "root", None) if workspace is not None else None
         self.memory = EpisodicRepoMemory(ws_root)
         from forge.decision import JevDecisionEngine
+
         self.jev = JevDecisionEngine(self.skills.registry)
 
     async def route(self, decision: Decision, state: WorkflowState) -> WorkflowState:
@@ -119,6 +120,18 @@ class AgentRouter:
             state.status = WorkflowStatus.COMPLETED
 
         state.touch()
+
+        # Synchronize .forge/forge.md and .forge/forge.json
+        from pathlib import Path
+
+        from forge.workflow.reporter import sync_forge_artifacts
+
+        env = getattr(self.runtime, "env", None)
+        workspace = getattr(env, "workspace", None) if env else None
+        ws_root = getattr(workspace, "root", None) if workspace else None
+        root_path = Path(ws_root) if ws_root is not None else Path.cwd()
+        sync_forge_artifacts(root_path, state)
+
         return state
 
     async def _build_context_builder(self) -> ContextBuilder:
@@ -149,6 +162,16 @@ class AgentRouter:
         )
         plan_skills = self.skills.evaluate(plan_signal, agent_role="orchestrator")
         for act in plan_skills:
+            state.skills_used.append(
+                ActivatedSkillRecord(
+                    skill_id=act.skill.id,
+                    name=act.skill.name,
+                    category=getattr(act.skill, "category", "general"),
+                    agent="ANVIL",
+                    why=act.rationale,
+                    iteration=state.iteration,
+                )
+            )
             if self.events is not None:
                 await self.events.publish(
                     Event(
@@ -250,6 +273,16 @@ class AgentRouter:
         )
         exec_skills = self.skills.evaluate(exec_signal, agent_role="executor")
         for act in exec_skills:
+            state.skills_used.append(
+                ActivatedSkillRecord(
+                    skill_id=act.skill.id,
+                    name=act.skill.name,
+                    category=getattr(act.skill, "category", "general"),
+                    agent="HAMMER",
+                    why=act.rationale,
+                    iteration=state.iteration,
+                )
+            )
             if self.events is not None:
                 await self.events.publish(
                     Event(
@@ -323,6 +356,16 @@ class AgentRouter:
         )
         qa_skills = self.skills.evaluate(qa_signal, agent_role="qa")
         for act in qa_skills:
+            state.skills_used.append(
+                ActivatedSkillRecord(
+                    skill_id=act.skill.id,
+                    name=act.skill.name,
+                    category=getattr(act.skill, "category", "general"),
+                    agent="TEMPER",
+                    why=act.rationale,
+                    iteration=state.iteration,
+                )
+            )
             if self.events is not None:
                 await self.events.publish(
                     Event(

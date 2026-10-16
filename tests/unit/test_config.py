@@ -83,12 +83,15 @@ def test_cli_version_init_config(tmp_path: Path) -> None:
 
     result = runner.invoke(app, ["init", str(tmp_path)])
     assert result.exit_code == 0, result.stdout
-    assert (tmp_path / "forge.yaml").exists()
+    assert not (tmp_path / "forge.yaml").exists()
+    assert (tmp_path / ".forge" / "forge.md").exists()
+    assert (tmp_path / ".forge" / "forge.json").exists()
+    assert (tmp_path / ".forge" / "config.json").exists()
 
     result = runner.invoke(app, ["config", str(tmp_path)])
     assert result.exit_code == 0, result.stdout
     assert "max_iterations: 10" in result.stdout
 
-    (tmp_path / "forge.yaml").write_text("bogus: 1\n", encoding="utf-8")
+    (tmp_path / ".forge" / "config.json").write_text("bogus: 1\n", encoding="utf-8")
     result = runner.invoke(app, ["config", str(tmp_path)])
     assert result.exit_code == 1

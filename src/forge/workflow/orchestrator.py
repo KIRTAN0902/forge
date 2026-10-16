@@ -173,6 +173,20 @@ class Orchestrator:
                 )
             )
 
+        # Synchronize .forge/forge.md and .forge/forge.json
+        try:
+            from pathlib import Path
+
+            from forge.workflow.reporter import sync_forge_artifacts
+
+            env = getattr(self.router.runtime, "env", None)
+            workspace = getattr(env, "workspace", None) if env else None
+            ws_root = getattr(workspace, "root", None) if workspace else None
+            root_path = Path(ws_root) if ws_root is not None else Path.cwd()
+            sync_forge_artifacts(root_path, state)
+        except Exception:
+            pass
+
         return state
 
     async def approve(
