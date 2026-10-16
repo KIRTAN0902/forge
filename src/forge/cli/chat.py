@@ -274,21 +274,66 @@ def print_banner(console: Console, root: Path) -> None:
     )
 
 
-def position_cursor_at_bottom() -> None:
-    """Ensure cursor is anchored at the bottom rows of the viewport without scrolling out content."""
+def position_cursor_at_bottom(box_height: int = 3) -> None:
+    """Ensure cursor is anchored at the bottom of the viewport so the input box sits at the page base."""
     try:
+        import os
         import sys
 
-        if sys.stdout.isatty():
-            # \033[999B moves cursor to bottom line without scrolling; \033[1A leaves room for 2-line box
-            sys.stdout.write("\033[999B\033[1A\r")
-            sys.stdout.flush()
+        if not sys.stdout.isatty():
+            return
+
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class COORD(ctypes.Structure):
+                _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+            class SMALL_RECT(ctypes.Structure):
+                _fields_ = [
+                    ("Left", wintypes.SHORT),
+                    ("Top", wintypes.SHORT),
+                    ("Right", wintypes.SHORT),
+                    ("Bottom", wintypes.SHORT),
+                ]
+
+            class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", COORD),
+                    ("dwCursorPosition", COORD),
+                    ("wAttributes", wintypes.WORD),
+                    ("srWindow", SMALL_RECT),
+                    ("dwMaximumWindowSize", COORD),
+                ]
+
+            h_con = ctypes.windll.kernel32.CreateFileW(
+                "CONOUT$", 0x80000000 | 0x40000000, 1 | 2, None, 3, 0, None
+            )
+            if h_con != -1 and h_con != 0:
+                try:
+                    csbi = CONSOLE_SCREEN_BUFFER_INFO()
+                    if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(h_con, ctypes.byref(csbi)):
+                        window_height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+                        cursor_row = csbi.dwCursorPosition.Y - csbi.srWindow.Top
+                        lines_to_bottom = window_height - 1 - cursor_row
+                        pad = lines_to_bottom - (box_height - 1)
+                        if pad > 0:
+                            sys.stdout.write("\n" * pad)
+                            sys.stdout.flush()
+                        return
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(h_con)
+
+        # Fallback for non-Windows or if Win32 API is unavailable
+        sys.stdout.write(f"\033[999B\033[{max(1, box_height - 1)}A\r")
+        sys.stdout.flush()
     except Exception:
         pass
 
 
 def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
-    """Generate dynamic prompt_toolkit formatted text tokens for a compact 2-line bottom input box."""
+    """Generate dynamic prompt_toolkit formatted text tokens for a proper enclosed input box."""
     import shutil
 
     agent = state.active_agent
@@ -296,9 +341,9 @@ def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
     width = max(40, shutil.get_terminal_size((80, 24)).columns)
 
     if width >= 75:
-        hints = " [Tab: Agent · Ctrl+V: Paste · Esc: Clear] ─╮"
+        hints = " [Tab: Switch Agent · Esc: Clear] ─╮"
     elif width >= 55:
-        hints = " [Tab: Agent · Esc: Clear] ─╮"
+        hints = " [Tab: Switch Agent] ─╮"
     else:
         hints = " ─╮"
 
@@ -311,24 +356,48 @@ def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
         ("class:box_border", " " + ("─" * fill_len)),
         ("class:box_dim", hints[:-3]),
         ("class:box_border", " ─╮\n"),
-        ("class:box_border", "╰─ "),
+        ("class:box_border", "│ "),
         ("class:prompt_arrow", "> "),
     ]
+
+
+def _get_rprompt(state: ChatSessionState) -> list[tuple[str, str]]:
+    """Right border closing the input row of the box."""
+    return [("class:box_border", "│")]
 
 
 def _get_prompt_continuation(
     width: int, line_number: int, is_soft_wrap: bool
 ) -> list[tuple[str, str]]:
-    """Line prefix for multiline continuation inside the compact box."""
+    """Line prefix for multiline continuation inside the enclosed box."""
     return [
-        ("class:box_border", "   "),
+        ("class:box_border", "│ "),
         ("class:prompt_arrow", "· "),
     ]
 
 
-def _get_bottom_toolbar(state: ChatSessionState) -> list[tuple[str, str]] | None:
-    """No extra bottom toolbar line to keep the input box compact at 1-2 lines in height."""
-    return None
+def _get_bottom_toolbar(state: ChatSessionState) -> list[tuple[str, str]]:
+    """Bottom border closing the input box with keyboard shortcuts."""
+    import shutil
+
+    width = max(40, shutil.get_terminal_size((80, 24)).columns)
+
+    if width >= 80:
+        left = "╰─ [Enter] Send  [Shift+Enter] Multiline  [Tab] Agent  [Ctrl+V] Paste "
+        right = " [/help] ─╯"
+    elif width >= 60:
+        left = "╰─ [Enter] Send  [Tab] Agent  [Ctrl+V] Paste "
+        right = " [/help] ─╯"
+    else:
+        left = "╰─ [Enter] Send  [Tab] Agent "
+        right = " ─╯"
+
+    fill_len = max(2, width - len(left) - len(right))
+    return [
+        ("class:box_border", left),
+        ("class:box_border", "─" * fill_len),
+        ("class:box_border", right),
+    ]
 
 
 def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
@@ -492,10 +561,12 @@ def read_user_input(session: Any, console: Console, state: ChatSessionState | No
 
     if session is not None:
         try:
-            position_cursor_at_bottom()
+            position_cursor_at_bottom(box_height=3)
             return str(
                 session.prompt(
                     message=lambda: _get_prompt_tokens(current_state),
+                    rprompt=lambda: _get_rprompt(current_state),
+                    bottom_toolbar=lambda: _get_bottom_toolbar(current_state),
                 )
             ).strip()
         except (KeyboardInterrupt, EOFError):
