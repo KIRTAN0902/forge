@@ -9,9 +9,17 @@ from forge.ui.split_app import (
     render_sidebar_formatted_text,
     render_sidebar_plain_text,
 )
-from forge.ui.state import ForgeStage, ForgeTUIState, StageBuffer, format_tokens
+from forge.ui.state import (
+    CycleMode,
+    ForgeStage,
+    ForgeTUIState,
+    StageBuffer,
+    UserQuestion,
+    format_tokens,
+)
 
 __all__ = [
+    "CycleMode",
     "CycleVerdict",
     "ForgeCycleController",
     "ForgeSplitPaneApp",
@@ -19,6 +27,7 @@ __all__ = [
     "ForgeTUIState",
     "SidebarControl",
     "StageBuffer",
+    "UserQuestion",
     "format_tokens",
     "render_sidebar_formatted_text",
     "render_sidebar_plain_text",

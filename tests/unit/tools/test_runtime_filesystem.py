@@ -285,9 +285,10 @@ class TestFilesystemTools:
     ) -> None:
         runtime = make_runtime(sample_repo)
         definitions = {d.name: d for d in runtime.definitions()}
-        assert len(definitions) == 26
+        assert len(definitions) == 27
         assert "web_search" in definitions
         assert "fetch_web_page" in definitions
+        assert "ask_user_question" in definitions
         edit = definitions["edit_file"].parameters
         assert "title" not in edit
         assert set(edit["required"]) == {"path", "old_string", "new_string"}

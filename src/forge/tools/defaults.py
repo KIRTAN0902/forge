@@ -34,6 +34,7 @@ from forge.tools.git_tools import (
     GitRollback,
     GitStatus,
 )
+from forge.tools.human_question import AskUserQuestion
 from forge.tools.runtime import ToolRuntime
 from forge.tools.shell import ShellRunner, resolve_shell
 from forge.tools.terminal import (
@@ -81,6 +82,8 @@ def default_tools() -> list[Tool[Any, Any]]:
         SymbolSearch(),
         FileOutline(),
         DependencyAnalysis(),
+        # interactive human feedback
+        AskUserQuestion(),
     ]
 
 
@@ -99,6 +102,7 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     "git_diff",
     "git_log",
     "git_list_checkpoints",
+    "ask_user_question",
 )
 
 ROLE_TOOLSETS: dict[str, tuple[str, ...]] = {

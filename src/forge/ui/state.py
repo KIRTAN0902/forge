@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import io
@@ -21,6 +22,25 @@ class ForgeStage(StrEnum):
     ANVIL = "Anvil"
     HAMMER = "Hammer"
     TEMPER = "Temper"
+
+
+class CycleMode(StrEnum):
+    """Dynamic cycle loop execution policy."""
+
+    SINGLE_CYCLE = "Single Cycle"
+    UNTIL_FULFILLED = "Until Fulfilled"
+
+
+@dataclass
+class UserQuestion:
+    """Interactive question posed to the user with selectable options or custom text."""
+
+    question: str
+    options: list[str] = field(default_factory=list)
+    default_option: str | None = None
+    allow_custom: bool = True
+    stage: ForgeStage = ForgeStage.ANVIL
+    future: asyncio.Future[str] | None = None
 
 
 def format_tokens(count: int) -> str:
@@ -48,7 +68,7 @@ class StageBuffer:
     scroll_line: int = 0
     status: Literal["idle", "running", "passed", "failed"] = "idle"
 
-    def render_to_ansi(self, width: int = 80) -> str:
+    def render_to_ansi(self, width: int = 80, pending_question: UserQuestion | None = None) -> str:
         """Render the stage buffer into an ANSI-formatted string using Rich."""
         effective_width = max(30, width)
         sio = io.StringIO()
@@ -182,6 +202,32 @@ class StageBuffer:
                     )
                 )
 
+        # 5. Interactive Question Card (when Orchestrator or stage asks user for input)
+        if pending_question is not None and pending_question.stage == self.stage:
+            console.print()
+            q_text = Text()
+            q_text.append(f"{pending_question.question}\n\n", style="bold white")
+            for idx, opt in enumerate(pending_question.options, start=1):
+                is_default = opt == pending_question.default_option
+                def_marker = " (Default)" if is_default else ""
+                q_text.append(f"  [{idx}] ", style="bold #00e5ff")
+                q_text.append(
+                    f"{opt}{def_marker}\n",
+                    style="bright_cyan bold" if is_default else "white",
+                )
+            q_text.append(
+                f"\nSelect [1-{len(pending_question.options)}] or type your answer below:",
+                style="italic #94a3b8",
+            )
+            console.print(
+                Panel(
+                    q_text,
+                    title="[bold #00e5ff]❓ Question from Orchestrator[/bold #00e5ff]",
+                    border_style="#00e5ff",
+                    expand=True,
+                )
+            )
+
         full_output = sio.getvalue()
 
         # Handle vertical scrolling
@@ -199,6 +245,8 @@ class ForgeTUIState:
         self.selected_view_stage: ForgeStage = ForgeStage.ANVIL
         self.auto_follow: bool = True
         self.cycle_count: int = 1
+        self.cycle_mode: CycleMode = CycleMode.UNTIL_FULFILLED
+        self.pending_question: UserQuestion | None = None
         self.viewing_history_cycle: int | None = None
         self.active_stage_tokens: int = 0
         self.total_session_tokens: int = 0
@@ -330,6 +378,66 @@ class ForgeTUIState:
     def get_viewed_stage_tokens(self) -> int:
         """Get the token count of the currently viewed stage."""
         return self.get_active_view_buffer().stage_tokens
+
+    def set_cycle_mode(self, mode: CycleMode) -> None:
+        """Set the active cycle execution policy (Single Cycle vs Until Fulfilled)."""
+        self.cycle_mode = mode
+        self._notify_redraw()
+
+    def toggle_cycle_mode(self) -> CycleMode:
+        """Toggle between Single Cycle and Until Fulfilled modes."""
+        if self.cycle_mode == CycleMode.SINGLE_CYCLE:
+            self.cycle_mode = CycleMode.UNTIL_FULFILLED
+        else:
+            self.cycle_mode = CycleMode.SINGLE_CYCLE
+        self._notify_redraw()
+        return self.cycle_mode
+
+    def set_pending_question(self, question: UserQuestion | None) -> None:
+        """Register an active question awaiting user selection."""
+        self.pending_question = question
+        if question is not None and self.auto_follow:
+            self.selected_view_stage = question.stage
+        self._notify_redraw()
+
+    def resolve_pending_question(self, raw_input: str) -> str:
+        """Resolve the pending user question using the submitted input."""
+        if self.pending_question is None:
+            return ""
+        q = self.pending_question
+        clean = raw_input.strip()
+
+        # Match numeric option index
+        chosen: str
+        if clean.isdigit():
+            idx = int(clean) - 1
+            chosen = q.options[idx] if 0 <= idx < len(q.options) else clean
+        elif not clean and q.default_option:
+            chosen = q.default_option
+        else:
+            # Match prefix or exact text in options
+            lower_clean = clean.lower()
+            matched = None
+            for opt in q.options:
+                if opt.lower().startswith(lower_clean) or lower_clean in opt.lower():
+                    matched = opt
+                    break
+            chosen = matched if matched is not None else clean
+
+        if q.future is not None and not q.future.done():
+            q.future.set_result(chosen)
+
+        self.pending_question = None
+        self._notify_redraw()
+        return chosen
+
+    def cancel_pending_question(self) -> None:
+        """Cancel the pending question if the user interrupts with Ctrl+C."""
+        if self.pending_question is not None:
+            if self.pending_question.future and not self.pending_question.future.done():
+                self.pending_question.future.cancel()
+            self.pending_question = None
+            self._notify_redraw()
 
     def _notify_redraw(self) -> None:
         """Trigger TUI redraw if callback is registered."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Any
 
 from forge.tools.analysis.symbols import SymbolIndex
 from forge.tools.git import GitRepo
@@ -19,6 +20,7 @@ class ToolEnvironment:
     processes: ProcessManager = field(default_factory=ProcessManager)
     symbols: SymbolIndex = field(default_factory=SymbolIndex)
     test_command: str | None = None
+    ask_question: Any = None
     _git: GitRepo | None = field(default=None, init=False, repr=False)
     _git_checked: bool = field(default=False, init=False, repr=False)
 

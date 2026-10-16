@@ -27,7 +27,7 @@ from prompt_toolkit.output import DummyOutput, Output
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 
-from forge.ui.state import ForgeStage, ForgeTUIState, format_tokens
+from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, format_tokens
 
 
 def create_safe_output(output: Output | None = None) -> Output:
@@ -95,9 +95,10 @@ def render_sidebar_formatted_text(state: ForgeTUIState) -> StyleAndTextTuples:
 
         fragments.append(("", "\n"))
 
-    # Cycle Counter
+    # Cycle Counter & Dynamic Mode
     fragments.append(("class:border", "────────────────────────────\n"))
-    fragments.append(("class:cycle_counter", f"Cycle :- {state.cycle_count}\n\n"))
+    fragments.append(("class:cycle_counter", f"Cycle :- {state.cycle_count}\n"))
+    fragments.append(("class:cycle_mode", f"Mode  :- {state.cycle_mode.value}\n\n"))
 
     # Dual-Tier Token Counter
     fragments.append(("class:token_header", "Tokens :-\n"))
@@ -136,7 +137,8 @@ def render_sidebar_formatted_text(state: ForgeTUIState) -> StyleAndTextTuples:
     fragments.append(("class:hint", " [Alt+2] Hammer (Exec)\n"))
     fragments.append(("class:hint", " [Alt+3] Temper (QA)\n"))
     fragments.append(("class:hint", " [Alt+0] Auto-Follow\n"))
-    fragments.append(("class:hint", " [Alt+←/→] Cycle History\n"))
+    fragments.append(("class:hint", " [F5] Toggle Mode\n"))
+    fragments.append(("class:hint", " [Alt+←/→] History\n"))
     fragments.append(("class:hint", " [PgUp/Dn] Scroll View\n"))
     fragments.append(("class:hint", " [Ctrl+C] Cancel Task\n"))
     fragments.append(("class:hint", " [Ctrl+Q] Exit Forge\n"))
@@ -230,7 +232,7 @@ class ForgeSplitPaneApp:
             buffer=self.input_buffer,
         )
         self.input_prompt_control = FormattedTextControl(
-            text=[("class:prompt", "> ")],
+            text=self._render_input_prompt,
             show_cursor=False,
         )
         self.input_window = Window(
@@ -240,7 +242,11 @@ class ForgeSplitPaneApp:
         )
         self.input_box_row = VSplit(
             [
-                Window(content=self.input_prompt_control, width=3, style="class:input_box"),
+                Window(
+                    content=self.input_prompt_control,
+                    dont_extend_width=True,
+                    style="class:input_box",
+                ),
                 self.input_window,
             ],
             height=2,
@@ -279,6 +285,7 @@ class ForgeSplitPaneApp:
                 "hammer": "#ef4444 bold",
                 "temper": "#22c55e bold",
                 "cycle_counter": "#a855f7 bold",
+                "cycle_mode": "#c084fc italic",
                 "token_header": "#f97316 bold",
                 "token_stage": "#f97316",
                 "token_viewed": "#fdba74 italic",
@@ -290,6 +297,7 @@ class ForgeSplitPaneApp:
                 "header_title": "#3b82f6 bold",
                 "header_telemetry": "#94a3b8",
                 "prompt": "#38bdf8 bold",
+                "question_prompt": "#00e5ff bold",
                 "hint_title": "#64748b bold",
                 "hint": "#64748b",
             }
@@ -313,6 +321,14 @@ class ForgeSplitPaneApp:
         with contextlib.suppress(Exception):
             self.application.invalidate()
 
+    def _render_input_prompt(self) -> AnyFormattedText:
+        """Render dynamic prompt: switches to question option indicator when question is pending."""
+        if self.state.pending_question is not None:
+            num = len(self.state.pending_question.options)
+            prefix = f"[1-{num}]" if num > 0 else "[?]"
+            return [("class:question_prompt", f"? {prefix} > ")]
+        return [("class:prompt", "> ")]
+
     def _render_header(self) -> AnyFormattedText:
         """Render the top header banner with centered FORGE title and live telemetry bar."""
         worker_str = (
@@ -320,7 +336,7 @@ class ForgeSplitPaneApp:
         )
         viewport_str = self.state.selected_view_stage.value
         follow_str = "AUTO-FOLLOW" if self.state.auto_follow else "PINNED (Alt+0 to follow)"
-        cycle_str = f"Cycle #{self.state.cycle_count}"
+        cycle_str = f"Cycle #{self.state.cycle_count} [{self.state.cycle_mode.value}]"
         if self.state.viewing_history_cycle is not None:
             cycle_str += f" [VIEWING HISTORY: Cycle {self.state.viewing_history_cycle}]"
 
@@ -347,7 +363,9 @@ class ForgeSplitPaneApp:
         cols = shutil.get_terminal_size((100, 30)).columns
         viewport_width = max(30, cols - 32)
         stage_buffer = self.state.get_active_view_buffer()
-        ansi_output = stage_buffer.render_to_ansi(width=viewport_width)
+        ansi_output = stage_buffer.render_to_ansi(
+            width=viewport_width, pending_question=self.state.pending_question
+        )
         return ANSI(ansi_output)
 
     def _setup_keybindings(self) -> None:
@@ -381,6 +399,13 @@ class ForgeSplitPaneApp:
         def _history_next(event: KeyPressEvent) -> None:
             self.state.view_cycle_history(1)
 
+        @self.kb.add("f5")
+        @self.kb.add("escape", "m")
+        def _toggle_cycle_mode(event: KeyPressEvent) -> None:
+            new_mode = self.state.toggle_cycle_mode()
+            if self.controller and hasattr(self.controller, "set_cycle_mode"):
+                self.controller.set_cycle_mode(new_mode)
+
         @self.kb.add("pageup")
         def _scroll_up(event: KeyPressEvent) -> None:
             self.state.scroll_up(5)
@@ -391,28 +416,57 @@ class ForgeSplitPaneApp:
 
         @self.kb.add("enter")
         def _handle_enter(event: KeyPressEvent) -> None:
-            user_text = self.input_buffer.text.strip()
-            if not user_text:
-                return
-
+            user_text = self.input_buffer.text
             self.input_buffer.text = ""
 
+            # 1. Answer pending question if Orchestrator is awaiting user response
+            if self.state.pending_question is not None:
+                self.state.resolve_pending_question(user_text)
+                return
+
+            stripped = user_text.strip()
+            if not stripped:
+                return
+
             # If user types /exit or /quit
-            if user_text.lower() in {"/exit", "/quit", "exit", "quit"}:
+            if stripped.lower() in {"/exit", "/quit", "exit", "quit"}:
                 event.app.exit()
+                return
+
+            # Slash commands for dynamic cycle mode
+            if stripped.lower() in {"/single", "/step", "/1"}:
+                self.state.set_cycle_mode(CycleMode.SINGLE_CYCLE)
+                if self.controller and hasattr(self.controller, "set_cycle_mode"):
+                    self.controller.set_cycle_mode(CycleMode.SINGLE_CYCLE)
+                return
+
+            if stripped.lower() in {"/auto", "/continuous", "/fulfill"}:
+                self.state.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
+                if self.controller and hasattr(self.controller, "set_cycle_mode"):
+                    self.controller.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
+                return
+
+            if stripped.lower() in {"/mode", "/toggle"}:
+                new_m = self.state.toggle_cycle_mode()
+                if self.controller and hasattr(self.controller, "set_cycle_mode"):
+                    self.controller.set_cycle_mode(new_m)
                 return
 
             # Submit prompt to background cycle controller
             if self.controller is not None:
                 self._background_task = self.application.create_background_task(
-                    self.controller.run_cycle_loop(user_text)
+                    self.controller.run_cycle_loop(stripped)
                 )
             else:
                 # Standalone simulation or test invocation
-                self.state.append_thought(ForgeStage.ANVIL, f"User Goal: {user_text}")
+                self.state.append_thought(ForgeStage.ANVIL, f"User Goal: {stripped}")
 
         @self.kb.add("c-c")
         def _handle_ctrl_c(event: KeyPressEvent) -> None:
+            if self.state.pending_question is not None:
+                self.state.cancel_pending_question()
+                return
+
             if self._background_task and not self._background_task.done():
                 self._background_task.cancel()
                 if self.controller and hasattr(self.controller, "cancel"):

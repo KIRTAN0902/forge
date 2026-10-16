@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from forge.tools.human_question import AskUserQuestion, AskUserQuestionInput
 from forge.ui.cycle_controller import CycleVerdict, ForgeCycleController
 from forge.ui.split_app import (
     ForgeSplitPaneApp,
     render_sidebar_plain_text,
 )
-from forge.ui.state import ForgeStage, ForgeTUIState, format_tokens
+from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, UserQuestion, format_tokens
 
 
 def test_format_tokens_helper() -> None:
@@ -196,11 +197,207 @@ def test_split_pane_app_keybindings_and_controls() -> None:
     assert app.sidebar_control is not None
     assert app.viewport_control is not None
 
-    # Keybinding checks: F1, F2, F3, F4, etc. are bound
+    # Keybinding checks: F1, F2, F3, F4, F5, etc. are bound
     keys = [binding.keys for binding in app.kb.bindings]
     assert any("f1" in k or ("escape", "1") in k for k in keys)
     assert any("f2" in k or ("escape", "2") in k for k in keys)
     assert any("f3" in k or ("escape", "3") in k for k in keys)
     assert any("f4" in k or ("escape", "0") in k for k in keys)
+    assert any("f5" in k or ("escape", "m") in k for k in keys)
     assert any("pageup" in k for k in keys)
     assert any("pagedown" in k for k in keys)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_cycle_mode_single_cycle_stops_after_cycle_1() -> None:
+    """Verify that when the user specifies 'run first cycle and stop',
+
+    the orchestrator sets Single Cycle mode and halts after Cycle 1 even if rejected.
+    """
+    state = ForgeTUIState()
+
+    def mock_temper_reject_verifier(cycle: int, request: str) -> CycleVerdict:
+        return CycleVerdict(passed=False, feedback="P2 Defect: Edge case missing in validator.")
+
+    controller = ForgeCycleController(
+        state=state,
+        temper_verifier=mock_temper_reject_verifier,
+        max_cycles=5,
+    )
+
+    result = await controller.run_cycle_loop("Refactor auth system: run first cycle and stop")
+
+    assert controller.cycle_mode == CycleMode.SINGLE_CYCLE
+    assert state.cycle_mode == CycleMode.SINGLE_CYCLE
+    # Must halt after cycle 1 (does not loop to cycle 2)
+    assert state.cycle_count == 1
+    assert state.active_worker_stage is None
+    assert "Single Cycle completed" in result
+    assert "Edge case missing" in result
+
+
+@pytest.mark.asyncio
+async def test_dynamic_cycle_mode_continuous_until_fulfilled() -> None:
+    """Verify that when the user specifies 'run until requirements get fulfilled',
+
+    the orchestrator sets Until Fulfilled mode and loops through cycles until Temper passes.
+    """
+    state = ForgeTUIState()
+
+    def mock_temper_verifier(cycle: int, request: str) -> CycleVerdict:
+        if cycle == 1:
+            return CycleVerdict(passed=False, feedback="Missing regression test.")
+        return CycleVerdict(passed=True, deliverable="All requirements verified.")
+
+    controller = ForgeCycleController(
+        state=state,
+        temper_verifier=mock_temper_verifier,
+        max_cycles=5,
+    )
+
+    result = await controller.run_cycle_loop(
+        "Build payment webhook: run until requirements get fulfilled"
+    )
+
+    assert controller.cycle_mode == CycleMode.UNTIL_FULFILLED
+    assert state.cycle_mode == CycleMode.UNTIL_FULFILLED
+    assert state.cycle_count == 2
+    assert "All requirements verified" in result
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_asks_question_with_options_when_unspecified() -> None:
+    """Verify that if the user does NOT mention mode, the orchestrator asks a question with options
+
+    (like in Claude Code / Codex) and behaves dynamically based on the chosen option.
+    """
+    state = ForgeTUIState()
+    asked_questions: list[UserQuestion] = []
+
+    async def mock_question_handler(question: UserQuestion) -> str:
+        asked_questions.append(question)
+        # User selects option 1: Single Cycle
+        return question.options[0]
+
+    def mock_temper_reject_verifier(cycle: int, request: str) -> CycleVerdict:
+        return CycleVerdict(passed=False, feedback="Unresolved schema violation.")
+
+    controller = ForgeCycleController(
+        state=state,
+        temper_verifier=mock_temper_reject_verifier,
+        max_cycles=5,
+        question_handler=mock_question_handler,
+    )
+
+    result = await controller.run_cycle_loop("Create user profile export feature")
+
+    # Orchestrator prompted user with options
+    assert len(asked_questions) == 1
+    q = asked_questions[0]
+    assert "execute this task" in q.question
+    assert len(q.options) >= 2
+    assert "Run first cycle and stop" in q.options[0]
+
+    # Because user picked Single Cycle, halted after Cycle 1
+    assert controller.cycle_mode == CycleMode.SINGLE_CYCLE
+    assert state.cycle_count == 1
+    assert "Single Cycle completed" in result
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_generic_question_asking() -> None:
+    """Verify generic question asking ('not for this but anything if it wants to know')."""
+    state = ForgeTUIState()
+
+    async def mock_question_handler(question: UserQuestion) -> str:
+        # User selects option 2
+        return question.options[1]
+
+    controller = ForgeCycleController(
+        state=state,
+        question_handler=mock_question_handler,
+    )
+
+    answer = await controller.ask_question(
+        question="Which database backend should we configure for the cache?",
+        options=["Redis Cluster", "Memcached", "PostgreSQL Unlogged Table"],
+        default_option="Redis Cluster",
+        stage=ForgeStage.ANVIL,
+    )
+
+    assert answer == "Memcached"
+    # Anvil's thought buffer recorded the question and answer
+    anvil_thoughts = state.stage_buffers[ForgeStage.ANVIL].thoughts
+    assert any("Which database backend" in t for t in anvil_thoughts)
+    assert any("Memcached" in t for t in anvil_thoughts)
+
+
+def test_question_rendering_and_input_prompt_dynamics() -> None:
+    """Verify question card is rendered in ANSI viewport and input prompt switches to ? [1-N] >."""
+    state = ForgeTUIState()
+    app = ForgeSplitPaneApp(state=state)
+
+    # Initial prompt is standard
+    initial_prompt = app._render_input_prompt()
+    assert initial_prompt[0][1] == "> "
+
+    # Pose a question on Anvil
+    q = UserQuestion(
+        question="Select target API environment:",
+        options=["Production", "Staging", "Local Sandbox"],
+        default_option="Staging",
+        stage=ForgeStage.ANVIL,
+    )
+    state.set_pending_question(q)
+
+    # Prompt dynamically switches to question options indicator
+    question_prompt = app._render_input_prompt()
+    assert "? [1-3] > " in question_prompt[0][1]
+
+    # Viewport renders the Rich question card
+    ansi_view = app._render_viewport()
+    plain_view = str(ansi_view)
+    assert "Question from Orchestrator" in plain_view
+    assert "Select target API environment:" in plain_view
+    assert "Production" in plain_view
+    assert "Staging (Default)" in plain_view
+
+    # User answers by typing "2" (selects Staging)
+    chosen = state.resolve_pending_question("2")
+    assert chosen == "Staging"
+    assert state.pending_question is None
+
+    # Prompt returns to normal
+    restored_prompt = app._render_input_prompt()
+    assert restored_prompt[0][1] == "> "
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_tool() -> None:
+    """Verify AskUserQuestion tool executes and falls back safely in test environment."""
+    from forge.tools.environment import ToolEnvironment
+    from forge.tools.shell import ShellRunner, resolve_shell
+    from forge.tools.workspace import Workspace
+
+    workspace = Workspace(".")
+    shell = ShellRunner(spec=resolve_shell("auto"))
+    env = ToolEnvironment(workspace=workspace, shell=shell)
+
+    tool = AskUserQuestion()
+    inp = AskUserQuestionInput(
+        question="Choose test framework",
+        options=["pytest", "unittest"],
+        default_option="pytest",
+    )
+
+    # Without custom env handler, uses default option
+    out = await tool.run(inp, env)
+    assert out.answer == "pytest"
+
+    # With custom env handler, invokes handler
+    async def custom_ask(question: str, options: list[str], default: str | None) -> str:
+        return options[1]
+
+    env.ask_question = custom_ask
+    out2 = await tool.run(inp, env)
+    assert out2.answer == "unittest"
