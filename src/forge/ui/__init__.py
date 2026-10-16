@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from forge.ui.cycle_controller import CycleVerdict, ForgeCycleController
+from forge.ui.cycle_controller import (
+    CycleVerdict,
+    ForgeCycleController,
+    is_conversational_turn,
+)
 from forge.ui.split_app import (
     ForgeSplitPaneApp,
     SidebarControl,
@@ -29,6 +33,7 @@ __all__ = [
     "StageBuffer",
     "UserQuestion",
     "format_tokens",
+    "is_conversational_turn",
     "render_sidebar_formatted_text",
     "render_sidebar_plain_text",
 ]

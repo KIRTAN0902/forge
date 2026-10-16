@@ -266,42 +266,72 @@ async def test_dynamic_cycle_mode_continuous_until_fulfilled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_asks_question_with_options_when_unspecified() -> None:
-    """Verify that if the user does NOT mention mode, the orchestrator asks a question with options
+async def test_conversational_turn_behaves_like_chat_without_cycles_or_questions() -> None:
+    """Verify that pure conversational inquiries (like 'hi', 'hello', 'what can you do')
 
-    (like in Claude Code / Codex) and behaves dynamically based on the chosen option.
+    behave normally like chat: Anvil responds directly without triggering questions or
+    running Hammer/Temper stages.
     """
     state = ForgeTUIState()
     asked_questions: list[UserQuestion] = []
 
     async def mock_question_handler(question: UserQuestion) -> str:
         asked_questions.append(question)
-        # User selects option 1: Single Cycle
         return question.options[0]
-
-    def mock_temper_reject_verifier(cycle: int, request: str) -> CycleVerdict:
-        return CycleVerdict(passed=False, feedback="Unresolved schema violation.")
 
     controller = ForgeCycleController(
         state=state,
-        temper_verifier=mock_temper_reject_verifier,
-        max_cycles=5,
+        question_handler=mock_question_handler,
+    )
+
+    # 1. Test "hi"
+    result = await controller.run_cycle_loop("hi")
+
+    # No questions asked
+    assert len(asked_questions) == 0
+    # Responded conversationally
+    assert "Hello!" in result or "Forge" in result
+    assert state.stage_buffers[ForgeStage.ANVIL].status == "passed"
+    assert state.active_worker_stage is None
+
+    # Hammer & Temper stages were deferred (never executed)
+    assert len(state.stage_buffers[ForgeStage.HAMMER].thoughts) == 0
+    assert len(state.stage_buffers[ForgeStage.HAMMER].tool_events) == 0
+    assert len(state.stage_buffers[ForgeStage.TEMPER].thoughts) == 0
+
+    # 2. Test "what can you do"
+    result_help = await controller.run_cycle_loop("what can you do")
+    assert len(asked_questions) == 0
+    assert "Blacksmithing Pipeline" in result_help or "Anvil" in result_help
+
+
+@pytest.mark.asyncio
+async def test_unspecified_task_executes_without_unnecessary_question() -> None:
+    """Verify that an engineering task without explicit cycle keywords does NOT trigger
+
+    an unnecessary question; it executes smoothly using the active cycle mode.
+    """
+    state = ForgeTUIState()
+    asked_questions: list[UserQuestion] = []
+
+    async def mock_question_handler(question: UserQuestion) -> str:
+        asked_questions.append(question)
+        return question.options[0]
+
+    controller = ForgeCycleController(
+        state=state,
         question_handler=mock_question_handler,
     )
 
     result = await controller.run_cycle_loop("Create user profile export feature")
 
-    # Orchestrator prompted user with options
-    assert len(asked_questions) == 1
-    q = asked_questions[0]
-    assert "execute this task" in q.question
-    assert len(q.options) >= 2
-    assert "Run first cycle and stop" in q.options[0]
-
-    # Because user picked Single Cycle, halted after Cycle 1
-    assert controller.cycle_mode == CycleMode.SINGLE_CYCLE
-    assert state.cycle_count == 1
-    assert "Single Cycle completed" in result
+    # Zero intrusive questions asked to user
+    assert len(asked_questions) == 0
+    # Active mode was preserved
+    assert controller.cycle_mode == CycleMode.UNTIL_FULFILLED
+    assert state.cycle_mode == CycleMode.UNTIL_FULFILLED
+    # Finished successfully
+    assert "Final Deliverable for: 'Create user profile export feature'" in result
 
 
 @pytest.mark.asyncio

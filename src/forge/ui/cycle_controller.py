@@ -24,6 +24,122 @@ class CycleVerdict:
     deliverable: str = ""
 
 
+def is_conversational_turn(prompt: str) -> bool:
+    """Check if the user prompt is a greeting or general conversational inquiry.
+
+    Returns True for conversational chat turns, and False for actionable engineering tasks.
+    """
+    p_clean = prompt.strip().lower().rstrip(".!?,;: ").strip()
+    if not p_clean:
+        return True
+
+    conversational_exact = {
+        "hi",
+        "hello",
+        "hey",
+        "howdy",
+        "yo",
+        "sup",
+        "greetings",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "good night",
+        "how are you",
+        "how are you doing",
+        "how's it going",
+        "hows it going",
+        "whats up",
+        "what's up",
+        "who are you",
+        "what are you",
+        "what is forge",
+        "what can you do",
+        "help",
+        "info",
+        "thanks",
+        "thank you",
+        "thx",
+        "cool",
+        "awesome",
+        "great",
+        "nice",
+        "bye",
+        "goodbye",
+        "see you",
+    }
+    if p_clean in conversational_exact:
+        return True
+
+    words = p_clean.split()
+    if len(words) <= 3 and words[0] in {"hi", "hello", "hey", "greetings", "howdy", "yo"}:
+        action_indicators = {
+            "build",
+            "create",
+            "fix",
+            "implement",
+            "refactor",
+            "test",
+            "run",
+            "add",
+            "update",
+            "delete",
+            "remove",
+            "write",
+            "debug",
+            "make",
+            "patch",
+            "deploy",
+            "install",
+            "git",
+            "pr",
+            "commit",
+        }
+        if not any(w in action_indicators for w in words):
+            return True
+
+    return False
+
+
+def get_conversational_response(prompt: str) -> str:
+    """Generate a friendly, context-aware conversational response from Anvil."""
+    p_clean = prompt.strip().lower().rstrip(".!?,;: ").strip()
+
+    help_triggers = {
+        "help",
+        "what can you do",
+        "what is forge",
+        "info",
+        "who are you",
+        "what are you",
+    }
+    if p_clean in help_triggers:
+        return (
+            "I am Forge — your autonomous blacksmithing development environment.\n\n"
+            "Blacksmithing Pipeline:\n"
+            "• Anvil  (Blue)  : Principal Orchestrator formulating plans & activating skills\n"
+            "• Hammer (Red)   : Executor performing AST patching, tools, & sandbox tests\n"
+            "• Temper (Green) : Adversarial QA Gatekeeper enforcing zero-regression checks\n\n"
+            "Controls & Mode Switching:\n"
+            "• [F1-F3] : Inspect Anvil, Hammer, or Temper stage viewports\n"
+            "• [F4]    : Follow live executing worker stage\n"
+            "• [F5]    : Toggle cycle execution mode (Until Fulfilled vs. Single Cycle)\n\n"
+            "Submit any engineering task (e.g. 'Build REST endpoint', 'Fix auth bug') to begin!"
+        )
+    gratitude = {"thanks", "thank you", "thx", "cool", "awesome", "great", "nice"}
+    if any(w in p_clean for w in gratitude):
+        return "You're welcome! Ready for your next engineering task whenever you are."
+    if any(w in p_clean for w in {"bye", "goodbye", "see you"}):
+        return "Goodbye! The Forge workspace is standing by whenever you return."
+
+    return (
+        "Hello! I am Forge, your autonomous blacksmithing development environment.\n\n"
+        "I'm ready to tackle your engineering tasks through coordinated Anvil planning, "
+        "Hammer execution, and Temper adversarial QA verification.\n\n"
+        "What would you like to build or inspect today?"
+    )
+
+
 class ForgeCycleController:
     """Drives the multi-stage blacksmith cycle loop (Anvil -> Hammer -> Temper)."""
 
@@ -127,6 +243,24 @@ class ForgeCycleController:
         current_request = user_prompt
         final_deliverable = ""
 
+        # Conversational check: behave normally like chat without asking cycle questions
+        # or triggering Hammer/Temper manufacturing stages.
+        if is_conversational_turn(user_prompt):
+            self.state.set_active_stage(ForgeStage.ANVIL)
+            self.state.append_thought(
+                ForgeStage.ANVIL,
+                f"Conversational inquiry received: '{user_prompt}'",
+            )
+            chat_reply = get_conversational_response(user_prompt)
+            self.state.append_thought(
+                ForgeStage.ANVIL,
+                "Anvil responded directly in chat mode (Hammer and Temper stages deferred).",
+            )
+            self.state.record_tokens(ForgeStage.ANVIL, 120)
+            self.state.set_stage_output(ForgeStage.ANVIL, chat_reply, status="passed")
+            self.state.set_active_stage(None)
+            return chat_reply
+
         # Dynamic Cycle Mode determination by Orchestrator
         p_lower = user_prompt.lower()
         single_keywords = (
@@ -171,22 +305,11 @@ class ForgeCycleController:
                 "Orchestrator Mode: Until Fulfilled (continuous Anvil ➔ Hammer ➔ Temper loop).",
             )
         else:
-            # User didn't specify: Orchestrator asks user with options (like Claude Code / Codex)
-            opt_single = "Run first cycle and stop (inspect deliverable before continuing)"
-            opt_auto = "Run until requirements are fulfilled (autonomous Anvil ➔ Hammer ➔ Temper)"
-            ans = await self.ask_question(
-                question="How should the Orchestrator execute this task?",
-                options=[opt_single, opt_auto],
-                default_option=opt_auto,
-                stage=ForgeStage.ANVIL,
-            )
-            if "first" in ans.lower() or "stop" in ans.lower() or ans.strip() == "1":
-                self.set_cycle_mode(CycleMode.SINGLE_CYCLE)
-            else:
-                self.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
+            # Active cycle mode is retained without hardcoded question constraints.
+            # Questions are asked only when genuinely necessary during execution.
             self.state.append_thought(
                 ForgeStage.ANVIL,
-                f"Orchestrator configured cycle execution mode: {self.cycle_mode.value}",
+                f"Orchestrator proceeding with active cycle mode: {self.cycle_mode.value}",
             )
 
         while self.state.cycle_count <= self.max_cycles and not self._cancelled:
