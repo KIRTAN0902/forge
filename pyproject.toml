@@ -53,10 +53,13 @@ ignore = ["RUF012", "SIM905"]
 
 [tool.ruff.lint.per-file-ignores]
 # Pattern tables read best one rule per line.
-"src/forge/tools/analysis/symbols.py" = ["E501"]
-"src/forge/policies/commands.py" = ["E501"]
+"src/forge/tools/**" = ["E501"]
+"src/forge/cli/**" = ["E501", "ASYNC240", "RUF001"]
 "src/forge/skills/**" = ["E501"]
 "src/forge/harness/**" = ["E501", "ASYNC210", "ASYNC221"]
+"src/forge/policies/commands.py" = ["E501"]
+"src/forge/agents/**" = ["E501"]
+"src/forge/workflow/router.py" = ["E501"]
 # Tests verify results with plain blocking subprocess calls.
 "tests/**" = ["ASYNC210", "ASYNC221", "E501"]
 

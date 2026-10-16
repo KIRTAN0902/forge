@@ -155,7 +155,7 @@ class BaseAgent:
         else:
             resp = await self.adapter.generate(conversation)
             raw_text = resp.text
-            updated_messages = list(conversation) + [resp.message]
+            updated_messages = [*list(conversation), resp.message]
 
         return AgentChatTurn(
             response_text=raw_text,

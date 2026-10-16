@@ -140,6 +140,7 @@ class TestRolesConfiguration:
     def test_run_model_menu_exit(self, tmp_path: Path) -> None:
         """Test model menu prompt cleanly returns on 0."""
         from rich.console import Console
+
         from forge.cli.roles_wizard import run_model_menu
 
         save_single_model_preset(tmp_path, provider="nvidia", model="test-model")
@@ -151,6 +152,7 @@ class TestRolesConfiguration:
     def test_configure_single_role(self, tmp_path: Path) -> None:
         """Test configure_single_role updates orchestrator and planner models via dropdown."""
         from rich.console import Console
+
         from forge.cli.roles_wizard import configure_single_role
 
         save_single_model_preset(tmp_path, provider="nvidia", model="base-model")
@@ -169,6 +171,7 @@ class TestRolesConfiguration:
     def test_set_provider_config_and_menu(self, tmp_path: Path) -> None:
         """Test set_provider_config helper and run_provider_menu."""
         from rich.console import Console
+
         from forge.cli.roles_wizard import run_provider_menu
         from forge.config.roles import set_provider_config
 
@@ -202,6 +205,7 @@ class TestRolesConfiguration:
     def test_provider_modal_connected_available(self, tmp_path: Path) -> None:
         """Test that run_provider_modal shows only connected and available providers."""
         from rich.console import Console
+
         from forge.cli.roles_wizard import run_provider_modal
         from forge.cli.tui_modal import TuiItem
 

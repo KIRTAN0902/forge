@@ -14,12 +14,9 @@ from forge.core.contracts.qa import QAScope, QAStatus
 from forge.core.contracts.state import WorkflowState, WorkflowStatus
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
-from forge.harness import AdversarialQAGatekeeper, EpisodicRepoMemory
+from forge.harness import EpisodicRepoMemory
 from forge.skills import (
     AutonomousSkillRouter,
-    ModelTier,
-    OperationType,
-    RepoSignals,
     SkillEvaluator,
     SkillSignal,
     format_skills_for_prompt,

@@ -17,6 +17,7 @@ from forge.tools.environment import ToolEnvironment
 from forge.tools.git import CheckpointInfo, CheckpointManager, GitRepo, GitStatus
 from forge.tools.runtime import ToolRuntime
 from forge.tools.shell import ShellRunner, ShellSpec, resolve_shell
+from forge.tools.web_search import FetchWebPage, WebSearch
 from forge.tools.workspace import Workspace, WorkspaceError
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "ROLE_TOOLSETS",
     "CheckpointInfo",
     "CheckpointManager",
+    "FetchWebPage",
     "GitRepo",
     "GitStatus",
     "ShellRunner",
@@ -35,6 +37,7 @@ __all__ = [
     "ToolOutput",
     "ToolResult",
     "ToolRuntime",
+    "WebSearch",
     "Workspace",
     "WorkspaceError",
     "create_environment",

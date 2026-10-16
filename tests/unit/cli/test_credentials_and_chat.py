@@ -221,6 +221,12 @@ class TestChatInterface:
         assert state.cycle_agent_reverse() == "executor"
 
         # Aliases
+        assert state.set_agent("anvil") is True
+        assert state.active_agent == "orchestrator"
+        assert state.set_agent("hammer") is True
+        assert state.active_agent == "executor"
+        assert state.set_agent("temper") is True
+        assert state.active_agent == "qa"
         assert state.set_agent("plan") is True
         assert state.active_agent == "orchestrator"
         assert state.set_agent("planner") is True
@@ -234,13 +240,13 @@ class TestChatInterface:
 
         tokens = _get_prompt_tokens(state)
         token_text = "".join(t[1] for t in tokens)
-        assert "qa" in token_text
+        assert "TEMPER" in token_text
 
     def test_run_chat_session_switch_agents(self, tmp_path: Path) -> None:
-        """Test switching agents via slash commands /planner, /executor, /qa, /orch, /agent."""
+        """Test switching agents via slash commands /anvil, /hammer, /temper, /planner, etc."""
         from forge.cli.chat import run_chat_session
 
-        inputs = iter(["/planner", "/executor", "/qa", "/orch", "/agent", "/exit"])
+        inputs = iter(["/anvil", "/hammer", "/temper", "/planner", "/executor", "/qa", "/orch", "/agent", "/exit"])
 
         with (
             patch("forge.cli.chat.ensure_credentials_configured"),

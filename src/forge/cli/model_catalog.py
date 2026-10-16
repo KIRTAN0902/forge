@@ -6,12 +6,8 @@ and allows developers to select models via a clean, searchable dropdown menu.
 
 from __future__ import annotations
 
-import os
-from typing import Any
-
 import httpx
 from rich.console import Console
-from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 
@@ -191,7 +187,7 @@ def prompt_model_dropdown(
             "Type a number, [cyan]'s'[/cyan] to search, [cyan]'c'[/cyan] for custom ID, or [cyan]'0'[/cyan] to keep current.[/dim]\n"
         )
 
-        valid_choices = list(choices_map.keys()) + ["s", "c", "0", "exit", "quit", "q"]
+        valid_choices = [*list(choices_map.keys()), "s", "c", "0", "exit", "quit", "q"]
         default_pick = "1"
         for k, v in choices_map.items():
             if v == current_model:
@@ -243,7 +239,7 @@ def prompt_model_dropdown(
 
             s_choice = Prompt.ask(
                 "Pick model number (or 0 to cancel)",
-                choices=list(search_map.keys()) + ["0"],
+                choices=[*list(search_map.keys()), "0"],
                 default="1",
                 console=console,
             )

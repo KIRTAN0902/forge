@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 from forge.agents.base import AgentChatTurn, BaseAgent
 from forge.agents.prompts import ORCHESTRATOR_CHAT_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
@@ -121,7 +120,7 @@ class OrchestratorAgent(BaseAgent):
         else:
             resp = await self.adapter.generate(conversation)
             raw_text = resp.text
-            updated_messages = list(conversation) + [resp.message]
+            updated_messages = [*list(conversation), resp.message]
 
         # 5. Extract handoff block if present
         handoff_match = HANDOFF_PATTERN.search(raw_text)

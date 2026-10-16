@@ -51,9 +51,11 @@ async def test_run_with_esc_cancellation_triggers_on_esc() -> None:
         await asyncio.sleep(0.02)
         cancel_event.set()
 
-    with patch("forge.cli.cancellation._esc_listener", side_effect=mock_esc_listener):
-        with pytest.raises(UserCancelledError, match="Interrupted by user"):
-            await run_with_esc_cancellation(long_running_task())
+    with (
+        patch("forge.cli.cancellation._esc_listener", side_effect=mock_esc_listener),
+        pytest.raises(UserCancelledError, match="Interrupted by user"),
+    ):
+        await run_with_esc_cancellation(long_running_task())
 
     assert task_cancelled is True
 

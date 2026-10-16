@@ -44,6 +44,7 @@ from forge.tools.terminal import (
     StartProcess,
     StopProcess,
 )
+from forge.tools.web_search import FetchWebPage, WebSearch
 from forge.tools.workspace import Workspace
 
 
@@ -57,6 +58,9 @@ def default_tools() -> list[Tool[Any, Any]]:
         ListDirectory(),
         Search(),
         FindFiles(),
+        # web
+        WebSearch(),
+        FetchWebPage(),
         # terminal
         RunCommand(),
         RunTests(),
@@ -85,6 +89,8 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     "list_directory",
     "search",
     "find_files",
+    "web_search",
+    "fetch_web_page",
     "repository_structure",
     "symbol_search",
     "file_outline",

@@ -6,7 +6,6 @@ from typer.testing import CliRunner
 
 from forge.cli.app import app
 from forge.skills import (
-    ALL_SKILLS,
     SkillCategory,
     SkillEvaluator,
     SkillRegistry,

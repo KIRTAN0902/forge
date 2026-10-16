@@ -223,10 +223,7 @@ def run_tui_modal(
         nonlocal selected_index, scroll_offset
         filtered = get_filtered_items()
         n_items = len(filtered)
-        if n_items == 0:
-            selected_index = 0
-        else:
-            selected_index = max(0, min(selected_index, n_items - 1))
+        selected_index = 0 if n_items == 0 else max(0, min(selected_index, n_items - 1))
 
         display_entries = build_display_entries(filtered)
         n_entries = len(display_entries)

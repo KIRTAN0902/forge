@@ -90,10 +90,8 @@ async def _esc_listener(cancel_event: asyncio.Event) -> None:
                 await asyncio.sleep(0.04)
         finally:
             if fd is not None and old_settings is not None:
-                try:
+                with contextlib.suppress(Exception):
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                except Exception:
-                    pass
 
 
 async def run_with_esc_cancellation(
@@ -123,12 +121,12 @@ async def run_with_esc_cancellation(
         if status_message and console is not None:
             hint_msg = f"{status_message} [dim](Press Esc to cancel)[/dim]"
             with console.status(hint_msg, spinner=spinner):
-                done, pending = await asyncio.wait(
+                _done, _pending = await asyncio.wait(
                     [main_task, cancel_waiter],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
         else:
-            done, pending = await asyncio.wait(
+            _done, _pending = await asyncio.wait(
                 [main_task, cancel_waiter],
                 return_when=asyncio.FIRST_COMPLETED,
             )

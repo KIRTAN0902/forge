@@ -60,25 +60,25 @@ AVAILABLE_AGENTS = ("orchestrator", "executor", "qa")
 
 AGENT_METADATA: dict[str, dict[str, str]] = {
     "orchestrator": {
-        "title": "Orchestrator",
+        "title": "ANVIL",
         "icon": "🎯",
         "color": "cyan",
         "status_color": "bold cyan",
-        "description": "Brainstorming, architecture, task planning & technical lead (Default)",
+        "description": "Brainstorming, architecture, task planning & technical lead (Orchestrator)",
     },
     "executor": {
-        "title": "Executor",
+        "title": "HAMMER",
         "icon": "⚡",
         "color": "yellow",
         "status_color": "bold yellow",
-        "description": "Code writing, filesystem modification & terminal tool execution",
+        "description": "Code writing, filesystem modification & terminal tool execution (Executor)",
     },
     "qa": {
-        "title": "QA",
+        "title": "TEMPER",
         "icon": "🔍",
         "color": "green",
         "status_color": "bold green",
-        "description": "Adversarial testing, security audit & regression verification",
+        "description": "Adversarial testing, security audit & regression verification (QA)",
     },
 }
 
@@ -102,12 +102,15 @@ class ChatSessionState:
     def set_agent(self, agent: str) -> bool:
         low = agent.lower().strip()
         alias_map = {
+            "anvil": "orchestrator",
             "orch": "orchestrator",
             "orchestrator": "orchestrator",
             "planner": "orchestrator",
             "plan": "orchestrator",
+            "hammer": "executor",
             "exec": "executor",
             "executor": "executor",
+            "temper": "qa",
             "qa": "qa",
             "audit": "qa",
         }
@@ -119,11 +122,15 @@ class ChatSessionState:
 
 HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
+    ("/anvil", "Switch active agent to 🎯 ANVIL (Orchestrator: architecture & planning)"),
+    ("/hammer", "Switch active agent to ⚡ HAMMER (Executor: coding & tool execution)"),
+    ("/temper", "Switch active agent to 🔍 TEMPER (QA: adversarial testing & verification)"),
+    ("/search", "Perform a live web search for documentation, APIs, and error solutions"),
     ("/models", "Interactive popup to select and configure agent models"),
     ("/provider", "Connect and configure model providers, API keys, and custom Base URIs/URLs"),
-    ("/orchestrator", "Switch active agent to Orchestrator (Default, brainstorming, architecture & planning)"),
-    ("/executor", "Switch active agent to Executor (Direct coding, tools & terminal execution)"),
-    ("/qa", "Switch active agent to QA (Adversarial testing & security audit)"),
+    ("/orchestrator", "Alias for /anvil"),
+    ("/executor", "Alias for /hammer"),
+    ("/qa", "Alias for /temper"),
     ("/agent", "Show or switch the active chat agent (or press Tab at the prompt)"),
     ("/skills", "List all 24 pre-programmed specialist skills and autonomous triggers"),
     ("/run", "Directly trigger multi-agent planning & execution on a request"),
@@ -148,14 +155,14 @@ def print_skills_table(console: Console) -> None:
     table.add_column("Target Agent(s)", style="yellow")
     table.add_column("Primary Trigger Signal", style="dim")
 
-    agent_icons = {"orchestrator": "🎯 Orchestrator", "executor": "⚡ Executor", "qa": "🔍 QA"}
+    agent_icons = {"orchestrator": "🎯 ANVIL", "executor": "⚡ HAMMER", "qa": "🔍 TEMPER"}
     for sk in ALL_SKILLS:
         agents_str = ", ".join(agent_icons.get(a, a) for a in sk.target_agents)
         table.add_row(sk.id, sk.name, sk.category.value, agents_str, sk.primary_trigger)
 
     console.print()
     console.print(table)
-    console.print("[dim]These skills are autonomously evaluated and activated by the Orchestrator on matching signals.[/dim]\n")
+    console.print("[dim]These skills are autonomously evaluated and activated by ANVIL on matching signals.[/dim]\n")
 
 
 def _get_git_info(root: Path) -> str:
@@ -240,8 +247,8 @@ def print_banner(console: Console, root: Path) -> None:
         pass
 
     info_text = (
-        "\n[dim]Active Agent: [bold cyan]🎯 Orchestrator[/bold cyan] (Press [bold cyan]Tab[/bold cyan] to cycle: Orchestrator ➔ Planner ➔ Executor ➔ QA)\n"
-        "Type your prompt to begin, or [cyan]/help[/cyan] for commands. Use [cyan]/exit[/cyan] to quit.[/dim]"
+        "\n[dim]Active Agent: [bold cyan]🎯 ANVIL[/bold cyan] (Press [bold cyan]Tab[/bold cyan] to cycle: ANVIL ➔ HAMMER ➔ TEMPER)\n"
+        "Type your prompt to begin, or [cyan]/help[/cyan] for commands. Use [cyan]/search <query>[/cyan] for web search, [cyan]/exit[/cyan] to quit.[/dim]"
     )
     console.print(
         Panel(
@@ -259,7 +266,7 @@ def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
     return [
         ("class:prompt_brand", "forge"),
         ("class:prompt_bracket", " ["),
-        (f"class:prompt_agent_{agent}", f"{meta['icon']} {agent}"),
+        (f"class:prompt_agent_{agent}", f"{meta['icon']} {meta['title']}"),
         ("class:prompt_bracket", "] > "),
     ]
 
@@ -280,8 +287,12 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
 
         commands = [cmd for cmd, _ in HELP_COMMANDS] + [
             "/quit",
+            "/anvil",
+            "/hammer",
+            "/temper",
             "/orch",
             "/exec",
+            "/search",
         ]
         completer = WordCompleter(commands, ignore_case=True, match_middle=False)
 
@@ -346,12 +357,11 @@ def read_user_input(
 
     # Fallback to standard input
     color = meta.get("color", "cyan")
-    prompt_str = f"forge [{meta['icon']} {current_state.active_agent}] >"
     try:
         from rich.prompt import Prompt
 
         return Prompt.ask(
-            f"[bold cyan]forge[/bold cyan] [[bold {color}]{meta['icon']} {current_state.active_agent}[/bold {color}]] >",
+            f"[bold cyan]forge[/bold cyan] [[bold {color}]{meta['icon']} {meta['title']}[/bold {color}]] >",
             console=console,
         ).strip()
     except (KeyboardInterrupt, EOFError):
@@ -537,7 +547,12 @@ async def _run_agent_chat_turn(
         project_context = f"Project: {path.name}\nBranch: {git_info}\nPath: {path.resolve()}"
 
         # Autonomous Skill Routing for Chat Turns
-        from forge.skills import SkillEvaluator, SkillSignal, format_skills_badge, format_skills_for_prompt
+        from forge.skills import (
+            SkillEvaluator,
+            SkillSignal,
+            format_skills_badge,
+            format_skills_for_prompt,
+        )
 
         evaluator = SkillEvaluator()
         signal = SkillSignal(
@@ -682,22 +697,38 @@ def run_chat_session(path: Path = Path(".")) -> None:
             print_skills_table(console)
             continue
 
-        if lower_input in {"/orchestrator", "/orch", "/planner", "/plan"}:
+        if lower_input in {"/anvil", "/orchestrator", "/orch", "/planner", "/plan"}:
             session_state.set_agent("orchestrator")
             meta = AGENT_METADATA["orchestrator"]
             console.print(f"[bold cyan]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold cyan] [dim]({meta['description']})[/dim]\n")
             continue
 
-        if lower_input in {"/executor", "/exec"}:
+        if lower_input in {"/hammer", "/executor", "/exec"}:
             session_state.set_agent("executor")
             meta = AGENT_METADATA["executor"]
             console.print(f"[bold yellow]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold yellow] [dim]({meta['description']})[/dim]\n")
             continue
 
-        if lower_input in {"/qa", "/audit"}:
+        if lower_input in {"/temper", "/qa", "/audit"}:
             session_state.set_agent("qa")
             meta = AGENT_METADATA["qa"]
             console.print(f"[bold green]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold green] [dim]({meta['description']})[/dim]\n")
+            continue
+
+        if lower_input.startswith("/search"):
+            query_part = user_input[7:].strip()
+            if query_part:
+                from forge.tools.web_search import WebSearch, WebSearchInput
+                search_tool = WebSearch()
+                env = create_environment(load_config(path), root=path)
+                with console.status(f"[bold cyan]🔍 Searching the web for '{query_part}'...[/bold cyan]"):
+                    search_res = _run_async(search_tool.run(WebSearchInput(query=query_part), env))
+                console.print()
+                from rich.markdown import Markdown
+                console.print(Markdown(search_res.render()))
+                console.print()
+            else:
+                console.print("[yellow]Usage: /search <keywords or question>[/yellow]\n")
             continue
 
         if lower_input.startswith("/agent"):
@@ -712,7 +743,8 @@ def run_chat_session(path: Path = Path(".")) -> None:
                 for a_name in AVAILABLE_AGENTS:
                     m = AGENT_METADATA[a_name]
                     prefix = "●" if a_name == session_state.active_agent else "•"
-                    console.print(f"  {prefix} [bold {m['color']}]/{a_name:<12}[/bold {m['color']}] - {m['description']}")
+                    cmd_name = f"/{m['title'].lower()}"
+                    console.print(f"  {prefix} [bold {m['color']}]{cmd_name:<10}[/bold {m['color']}] - {m['description']}")
                 console.print()
             continue
 
