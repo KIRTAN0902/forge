@@ -280,33 +280,38 @@ def position_cursor_at_bottom() -> None:
         import sys
 
         if sys.stdout.isatty():
-            # \033[999B moves cursor to bottom line without scrolling; \033[2A leaves room for 3-line box
-            sys.stdout.write("\033[999B\033[2A\r")
+            # \033[999B moves cursor to bottom line without scrolling; \033[1A leaves room for 2-line box
+            sys.stdout.write("\033[999B\033[1A\r")
             sys.stdout.flush()
     except Exception:
         pass
 
 
 def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
-    """Generate dynamic prompt_toolkit formatted text tokens reflecting the active agent in a framed box."""
+    """Generate dynamic prompt_toolkit formatted text tokens for a compact 2-line bottom input box."""
     import shutil
 
     agent = state.active_agent
     meta = AGENT_METADATA.get(agent, AGENT_METADATA["orchestrator"])
     width = max(40, shutil.get_terminal_size((80, 24)).columns)
 
-    header_left = f"╭─ {meta['icon']} {meta['title']} (Tab to switch) "
-    header_right = " [Esc: clear] ─╮"
-    fill_len = max(0, width - len(header_left) - len(header_right))
+    if width >= 75:
+        hints = " [Tab: Agent · Ctrl+V: Paste · Esc: Clear] ─╮"
+    elif width >= 55:
+        hints = " [Tab: Agent · Esc: Clear] ─╮"
+    else:
+        hints = " ─╮"
+
+    left = f"╭─ {meta['icon']} {meta['title']} "
+    fill_len = max(2, width - len(left) - len(hints))
 
     return [
         ("class:box_border", "╭─ "),
         (f"class:prompt_agent_{agent}", f"{meta['icon']} {meta['title']}"),
-        ("class:box_dim", " (Tab to switch) "),
-        ("class:box_border", "─" * fill_len),
-        ("class:box_dim", " [Esc: clear]"),
+        ("class:box_border", " " + ("─" * fill_len)),
+        ("class:box_dim", hints[:-3]),
         ("class:box_border", " ─╮\n"),
-        ("class:box_border", "│ "),
+        ("class:box_border", "╰─ "),
         ("class:prompt_arrow", "> "),
     ]
 
@@ -314,63 +319,16 @@ def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
 def _get_prompt_continuation(
     width: int, line_number: int, is_soft_wrap: bool
 ) -> list[tuple[str, str]]:
-    """Line prefix for multiline continuation inside the box."""
+    """Line prefix for multiline continuation inside the compact box."""
     return [
-        ("class:box_border", "│ "),
-        ("class:box_dim", "· "),
+        ("class:box_border", "   "),
+        ("class:prompt_arrow", "· "),
     ]
 
 
-def _get_bottom_toolbar(state: ChatSessionState) -> list[tuple[str, str]]:
-    """Bottom status bar framing the bottom of the sticky prompt box."""
-    import shutil
-
-    width = max(40, shutil.get_terminal_size((80, 24)).columns)
-
-    if width >= 85:
-        left = "╰─ [Enter] Send  [Shift+Enter] Multiline  [Tab] Agent  [Ctrl+V] Paste "
-        right = " [/help] ─╯"
-        fill_len = max(0, width - len(left) - len(right))
-        return [
-            ("class:box_border", "╰─ "),
-            ("class:box_key", "[Enter] Send"),
-            ("class:box_dim", "  "),
-            ("class:box_key", "[Shift+Enter] Multiline"),
-            ("class:box_dim", "  "),
-            ("class:box_key", "[Tab] Agent"),
-            ("class:box_dim", "  "),
-            ("class:box_key", "[Ctrl+V] Paste"),
-            ("class:box_border", "  " + ("─" * fill_len)),
-            ("class:box_key", " [/help]"),
-            ("class:box_border", " ─╯"),
-        ]
-    elif width >= 65:
-        left = "╰─ [Enter] Send  [Tab] Agent  [Ctrl+V] Paste "
-        right = " [/help] ─╯"
-        fill_len = max(0, width - len(left) - len(right))
-        return [
-            ("class:box_border", "╰─ "),
-            ("class:box_key", "[Enter] Send"),
-            ("class:box_dim", "  "),
-            ("class:box_key", "[Tab] Agent"),
-            ("class:box_dim", "  "),
-            ("class:box_key", "[Ctrl+V] Paste"),
-            ("class:box_border", "  " + ("─" * fill_len)),
-            ("class:box_key", " [/help]"),
-            ("class:box_border", " ─╯"),
-        ]
-    else:
-        left = "╰─ [Enter] Send  [Tab] Agent "
-        right = " ─╯"
-        fill_len = max(0, width - len(left) - len(right))
-        return [
-            ("class:box_border", "╰─ "),
-            ("class:box_key", "[Enter] Send"),
-            ("class:box_dim", "  "),
-            ("class:box_key", "[Tab] Agent"),
-            ("class:box_border", "  " + ("─" * fill_len)),
-            ("class:box_border", " ─╯"),
-        ]
+def _get_bottom_toolbar(state: ChatSessionState) -> list[tuple[str, str]] | None:
+    """No extra bottom toolbar line to keep the input box compact at 1-2 lines in height."""
+    return None
 
 
 def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
@@ -538,7 +496,6 @@ def read_user_input(session: Any, console: Console, state: ChatSessionState | No
             return str(
                 session.prompt(
                     message=lambda: _get_prompt_tokens(current_state),
-                    bottom_toolbar=lambda: _get_bottom_toolbar(current_state),
                 )
             ).strip()
         except (KeyboardInterrupt, EOFError):
