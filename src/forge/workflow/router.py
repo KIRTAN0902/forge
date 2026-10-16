@@ -14,7 +14,16 @@ from forge.core.contracts.qa import QAScope, QAStatus
 from forge.core.contracts.state import WorkflowState, WorkflowStatus
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
-from forge.skills import SkillEvaluator, SkillSignal, format_skills_for_prompt
+from forge.harness import AdversarialQAGatekeeper, EpisodicRepoMemory
+from forge.skills import (
+    AutonomousSkillRouter,
+    ModelTier,
+    OperationType,
+    RepoSignals,
+    SkillEvaluator,
+    SkillSignal,
+    format_skills_for_prompt,
+)
 from forge.tools.runtime import ToolRuntime
 from forge.workflow.recovery import CheckpointManager
 
@@ -44,6 +53,10 @@ class AgentRouter:
         self.checkpoint_mgr = checkpoint_mgr or CheckpointManager()
         self.events = events
         self.skills = SkillEvaluator()
+        self.autonomous_router = AutonomousSkillRouter()
+        workspace = getattr(runtime.env, "workspace", None)
+        ws_root = getattr(workspace, "root", None) if workspace is not None else None
+        self.memory = EpisodicRepoMemory(ws_root)
 
     async def route(self, decision: Decision, state: WorkflowState) -> WorkflowState:
         """Execute the action specified by decision and record results in state."""
@@ -338,7 +351,16 @@ class AgentRouter:
         )
 
         state.qa_reports.append(report)
-        if report.status != QAStatus.PASS and self.events is not None:
+        if report.status == QAStatus.PASS:
+            self.memory.record_sft_trace(
+                timestamp=str(state.iteration),
+                prompt=state.user_request,
+                initial_code="",
+                sliced_context=f"Files: {', '.join(changed_files)}",
+                patch_diff=diff_str,
+                verification_evidence=f"QA passed ({len(state.test_results)} test executions)",
+            )
+        elif self.events is not None:
             await self.events.publish(
                 Event(
                     type=EventType.REWORK_REQUESTED,

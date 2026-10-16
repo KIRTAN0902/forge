@@ -55,8 +55,10 @@ ignore = ["RUF012", "SIM905"]
 # Pattern tables read best one rule per line.
 "src/forge/tools/analysis/symbols.py" = ["E501"]
 "src/forge/policies/commands.py" = ["E501"]
+"src/forge/skills/**" = ["E501"]
+"src/forge/harness/**" = ["E501", "ASYNC210", "ASYNC221"]
 # Tests verify results with plain blocking subprocess calls.
-"tests/**" = ["ASYNC210", "ASYNC221"]
+"tests/**" = ["ASYNC210", "ASYNC221", "E501"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+
 from forge.skills.registry import SkillRegistry
 from forge.skills.types import SkillActivation, SkillSignal
 
