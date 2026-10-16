@@ -12,6 +12,12 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 CURATED_MODELS: dict[str, list[tuple[str, str]]] = {
+    "anthropic": [
+        ("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet (Frontier reasoning & hybrid thinking)"),
+        ("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet (High precision code generation)"),
+        ("claude-3-5-haiku-20241022", "Claude 3.5 Haiku (Ultra-fast execution)"),
+        ("claude-3-opus-20240229", "Claude 3 Opus (Deep analysis)"),
+    ],
     "openrouter": [
         ("anthropic/claude-3.7-sonnet", "Claude 3.7 Sonnet (Frontier reasoning & coding)"),
         ("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet (High precision code generation)"),
@@ -70,7 +76,20 @@ def fetch_provider_models(
     models: list[str] = []
 
     try:
-        if provider == "openrouter":
+        if provider == "anthropic":
+            url = f"{base_url.rstrip('/') if base_url else 'https://api.anthropic.com/v1'}/models"
+            headers = {
+                "x-api-key": api_key or "",
+                "anthropic-version": "2023-06-01",
+            }
+            resp = httpx.get(url, headers=headers, timeout=4.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("data", []):
+                    if isinstance(item, dict) and "id" in item:
+                        models.append(item["id"])
+
+        elif provider == "openrouter":
             url = "https://openrouter.ai/api/v1/models"
             resp = httpx.get(url, timeout=4.0)
             if resp.status_code == 200:

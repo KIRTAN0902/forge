@@ -31,13 +31,14 @@ from forge.config.roles import (
 )
 from forge.config.schema import ForgeConfig
 
-PROVIDER_CHOICES = ["1", "2", "3", "4", "5"]
+PROVIDER_CHOICES = ["1", "2", "3", "4", "5", "6"]
 PROVIDER_MAP = {
     "1": "nvidia",
     "2": "openrouter",
     "3": "openai",
-    "4": "ollama",
-    "5": "custom",
+    "4": "anthropic",
+    "5": "ollama",
+    "6": "custom",
 }
 
 
@@ -76,8 +77,9 @@ def _prompt_provider_and_key(console: Console, role_label: str = "") -> tuple[st
         "  [cyan]1[/cyan] NVIDIA NIM (Nemotron 3 Super 120B, Nemotron 3.5 Lightning)\n"
         "  [cyan]2[/cyan] OpenRouter (Claude 3.7, Sonnet 3.5, GPT-4o, DeepSeek)\n"
         "  [cyan]3[/cyan] OpenAI (GPT-4o, GPT-4o-mini)\n"
-        "  [cyan]4[/cyan] Ollama (Local, free, private on port 11434)\n"
-        "  [cyan]5[/cyan] Custom OpenAI-compatible endpoint"
+        "  [cyan]4[/cyan] Anthropic (Claude 3.7 Sonnet, Claude 3.5 Sonnet, Haiku)\n"
+        "  [cyan]5[/cyan] Ollama (Local, free, private on port 11434)\n"
+        "  [cyan]6[/cyan] Custom OpenAI-compatible endpoint"
     )
     console.print(banner)
 
@@ -93,7 +95,7 @@ def _prompt_provider_and_key(console: Console, role_label: str = "") -> tuple[st
     existing_key = get_provider_api_key(provider)
     api_key = existing_key or ""
 
-    if provider in {"nvidia", "openrouter", "openai", "custom"}:
+    if provider in {"nvidia", "openrouter", "openai", "anthropic", "custom"}:
         if existing_key:
             masked = (
                 f"{existing_key[:7]}...{existing_key[-4:]}" if len(existing_key) > 12 else "****"
@@ -168,10 +170,22 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
             p_def = "nvidia/nemotron-3-super-120b-a12b"
             e_def = "nvidia/nemotron-3.5-lightning-30b-a3b"
             q_def = "nvidia/nemotron-3-super-120b-a12b"
+        elif provider == "anthropic":
+            p_def = "claude-3-7-sonnet-20250219"
+            e_def = "claude-3-5-sonnet-20241022"
+            q_def = "claude-3-7-sonnet-20250219"
         elif provider == "openrouter":
             p_def = "anthropic/claude-3.7-sonnet"
             e_def = "anthropic/claude-3.5-sonnet"
             q_def = "openai/gpt-4o"
+        elif provider == "openai":
+            p_def = "gpt-4o"
+            e_def = "gpt-4o-mini"
+            q_def = "gpt-4o"
+        elif provider == "ollama":
+            p_def = "qwen2.5-coder:32b"
+            e_def = "qwen2.5-coder:7b"
+            q_def = "qwen2.5-coder:latest"
 
         console.print()
         orch_model = Prompt.ask(
@@ -303,9 +317,10 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
     stored_provs = stored.get("providers", {})
 
     all_providers = [
-        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1"),
-        ("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
+        ("anthropic", "Anthropic", "https://api.anthropic.com/v1"),
         ("openai", "OpenAI", "https://api.openai.com/v1"),
+        ("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1"),
+        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1"),
         ("ollama", "Ollama (Local)", "http://localhost:11434/v1"),
         ("custom", "Custom Endpoint", "http://localhost:8000/v1"),
     ]
@@ -380,11 +395,17 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
     elif isinstance(stored_provs, dict) and provider in stored_provs:
         existing_url = stored_provs[provider].get("base_url", default_url)
 
-    new_url = Prompt.ask(
-        f"Base URI / URL for {name}",
-        default=existing_url,
-        console=console,
-    ).strip()
+    # Only in custom provider do we ask for the URI / URL again
+    # Built-in providers (anthropic, openai, nvidia, openrouter, ollama) are already configured with URI/URL only
+    if provider == "custom":
+        new_url = Prompt.ask(
+            f"Base URI / URL for {name}",
+            default=existing_url,
+            console=console,
+        ).strip()
+    else:
+        new_url = existing_url
+        console.print(f"[dim]Endpoint URL: {new_url}[/dim]")
 
     existing_key = get_provider_api_key(provider) or ""
     api_key = existing_key
@@ -396,11 +417,20 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
                 else "****"
             )
             console.print(f"[dim]Existing key detected: {masked}[/dim]")
-            keep = Confirm.ask("Keep existing API key?", default=True, console=console)
-            if not keep:
-                api_key = Prompt.ask("New API Key", password=True, console=console).strip()
+            new_key = Prompt.ask(
+                "Enter API Key (press Enter to keep existing)",
+                password=True,
+                default="",
+                show_default=False,
+                console=console,
+            ).strip()
+            api_key = new_key if new_key else existing_key
         else:
             api_key = Prompt.ask("Paste API Key", password=True, console=console).strip()
+    else:
+        console.print(
+            f"[green]✔ Local Ollama endpoint active at {new_url} (no API key required).[/green]"
+        )
 
     from forge.config.roles import set_provider_config
 

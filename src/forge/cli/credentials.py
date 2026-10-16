@@ -24,6 +24,13 @@ CREDENTIALS_FILE = CREDENTIALS_DIR / "credentials.json"
 RECENT_MODELS_FILE = CREDENTIALS_DIR / "recent_models.json"
 
 PROVIDER_METADATA: dict[str, dict[str, Any]] = {
+    "anthropic": {
+        "name": "Anthropic",
+        "env": "ANTHROPIC_API_KEY",
+        "default_model": "claude-3-7-sonnet-20250219",
+        "base_url": "https://api.anthropic.com/v1",
+        "label": "Anthropic (Claude 3.7 Sonnet, Claude 3.5 Sonnet, Claude 3.5 Haiku)",
+    },
     "nvidia": {
         "name": "NVIDIA NIM",
         "env": "NVIDIA_API_KEY",
@@ -240,6 +247,15 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
                 capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
                 detect_capabilities=False,
             )
+        if provider == "anthropic" and (
+            os.environ.get("ANTHROPIC_API_KEY") or stored.get("api_key")
+        ):
+            return "anthropic_default", ModelProfile(
+                provider="anthropic",
+                model=model_name or "claude-3-7-sonnet-20250219",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+                detect_capabilities=False,
+            )
         if provider == "openrouter" and (
             os.environ.get("OPENROUTER_API_KEY") or stored.get("api_key")
         ):
@@ -272,6 +288,15 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             )
 
     # Fallback to direct environment variables
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        model_name = os.environ.get("FORGE_DEFAULT_MODEL", "claude-3-7-sonnet-20250219")
+        return "anthropic_default", ModelProfile(
+            provider="anthropic",
+            model=model_name,
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+            detect_capabilities=False,
+        )
+
     if os.environ.get("NVIDIA_API_KEY"):
         model_name = os.environ.get("FORGE_DEFAULT_MODEL", "nvidia/nemotron-3-super-120b-a12b")
         return "nvidia_default", ModelProfile(

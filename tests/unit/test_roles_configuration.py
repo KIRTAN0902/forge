@@ -224,10 +224,116 @@ class TestRolesConfiguration:
         # Sections should only be Connected Providers and/or Available Providers
         assert sections.issubset({"Connected Providers", "Available Providers"})
         prov_ids = {it.id for it in captured_items}
+        assert "anthropic" in prov_ids
         assert "openrouter" in prov_ids
         assert "nvidia" in prov_ids
         assert "openai" in prov_ids
         assert "ollama" in prov_ids
         assert "custom" in prov_ids
+
+    def test_provider_modal_connected_provider_only_asks_api_key(self, tmp_path: Path) -> None:
+        """Connected provider does NOT ask for URL, only asks for API key."""
+        from rich.console import Console
+
+        from forge.cli.roles_wizard import run_provider_modal
+        from forge.cli.tui_modal import TuiItem
+
+        console = Console(record=True)
+        chosen_item = TuiItem(
+            id="openai",
+            title="OpenAI",
+            subtitle="(https://api.openai.com/v1)",
+            section="Connected Providers",
+            badge="Connected",
+        )
+
+        with (
+            patch("forge.cli.tui_modal.run_tui_modal", return_value=chosen_item),
+            patch("forge.cli.roles_wizard.get_provider_api_key", return_value="sk-test-existing-12345"),
+            patch("forge.cli.roles_wizard.Prompt.ask") as mock_ask,
+            patch("forge.cli.roles_wizard.save_stored_credentials") as mock_save,
+            patch("forge.config.roles.set_provider_config"),
+        ):
+            # User enters a new API key without being asked for URL
+            mock_ask.return_value = "sk-new-key-67890"
+            changes = run_provider_modal(tmp_path, console)
+            assert len(changes) == 1
+            assert "OpenAI" in changes[0]
+            # Prompt.ask should have been called ONCE for API Key only, NEVER for Base URI / URL
+            assert mock_ask.call_count == 1
+            prompt_arg = mock_ask.call_args[0][0]
+            assert "Base URI" not in prompt_arg
+            assert "API Key" in prompt_arg
+            # Verify URL used was preconfigured OpenAI endpoint
+            mock_save.assert_called_once_with(
+                "openai", api_key="sk-new-key-67890", base_url="https://api.openai.com/v1"
+            )
+
+    def test_provider_modal_custom_asks_both_url_and_key(self, tmp_path: Path) -> None:
+        """Custom provider asks for BOTH URL and API key."""
+        from rich.console import Console
+
+        from forge.cli.roles_wizard import run_provider_modal
+        from forge.cli.tui_modal import TuiItem
+
+        console = Console(record=True)
+        chosen_item = TuiItem(
+            id="custom",
+            title="Custom Endpoint",
+            subtitle="(http://localhost:8000/v1)",
+            section="Available Providers",
+            badge="",
+        )
+
+        with (
+            patch("forge.cli.tui_modal.run_tui_modal", return_value=chosen_item),
+            patch("forge.cli.roles_wizard.get_provider_api_key", return_value=None),
+            patch("forge.cli.roles_wizard.Prompt.ask") as mock_ask,
+            patch("forge.cli.roles_wizard.save_stored_credentials") as mock_save,
+            patch("forge.config.roles.set_provider_config"),
+        ):
+            # Prompt 1: URL, Prompt 2: API key
+            mock_ask.side_effect = ["http://my-custom-vllm:8000/v1", "my-secret-key"]
+            changes = run_provider_modal(tmp_path, console)
+            assert len(changes) == 1
+            assert mock_ask.call_count == 2
+            first_prompt = mock_ask.call_args_list[0][0][0]
+            second_prompt = mock_ask.call_args_list[1][0][0]
+            assert "Base URI" in first_prompt
+            assert "API Key" in second_prompt
+            mock_save.assert_called_once_with(
+                "custom", api_key="my-secret-key", base_url="http://my-custom-vllm:8000/v1"
+            )
+
+    def test_provider_modal_ollama_does_not_ask_url_or_key(self, tmp_path: Path) -> None:
+        """Ollama is pre-configured with URL and does not ask for URL or key."""
+        from rich.console import Console
+
+        from forge.cli.roles_wizard import run_provider_modal
+        from forge.cli.tui_modal import TuiItem
+
+        console = Console(record=True)
+        chosen_item = TuiItem(
+            id="ollama",
+            title="Ollama (Local)",
+            subtitle="(http://localhost:11434/v1)",
+            section="Available Providers",
+            badge="",
+        )
+
+        with (
+            patch("forge.cli.tui_modal.run_tui_modal", return_value=chosen_item),
+            patch("forge.cli.roles_wizard.Prompt.ask") as mock_ask,
+            patch("forge.cli.roles_wizard.save_stored_credentials") as mock_save,
+            patch("forge.config.roles.set_provider_config"),
+        ):
+            changes = run_provider_modal(tmp_path, console)
+            assert len(changes) == 1
+            assert "Ollama" in changes[0]
+            # Prompt.ask should NEVER be called for Ollama
+            assert mock_ask.call_count == 0
+            mock_save.assert_called_once_with(
+                "ollama", api_key="", base_url="http://localhost:11434/v1"
+            )
 
 

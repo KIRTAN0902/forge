@@ -49,6 +49,11 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
         reasoning_style="openai",
     ),
     "ollama": ProviderConfig(base_url="http://localhost:11434/v1", reasoning_style="none"),
+    "anthropic": ProviderConfig(
+        base_url="https://api.anthropic.com/v1",
+        api_key_env="ANTHROPIC_API_KEY",
+        reasoning_style="none",
+    ),
 }
 
 
