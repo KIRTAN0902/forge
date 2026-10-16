@@ -61,3 +61,19 @@ class CliApprover:
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _prompt)
+
+
+class AutoApprover:
+    """Non-blocking approver for AUTO mode. Automatically approves actions and logs them."""
+
+    def __init__(self, console: Console | None = None, silent: bool = False) -> None:
+        self.console = console or Console()
+        self.silent = silent
+
+    async def request_approval(self, action: ProposedAction, decision: PolicyDecision) -> bool:
+        if not self.silent:
+            self.console.print(
+                f"[dim]⚡ [Auto Mode] Auto-approved action:[/dim] [cyan]{action.name}[/cyan] "
+                f"[dim]({action.risk.value.upper()})[/dim]"
+            )
+        return True

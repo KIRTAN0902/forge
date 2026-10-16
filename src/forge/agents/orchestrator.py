@@ -25,7 +25,9 @@ from forge.models.types import ContentPart, Message
 from forge.tools.defaults import READ_ONLY_TOOLS, ROLE_TOOLSETS
 from forge.tools.runtime import ToolRuntime
 
-HANDOFF_PATTERN = re.compile(r"```(?:forge-handoff|handoff)\s*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+HANDOFF_PATTERN = re.compile(
+    r"```(?:forge-handoff|handoff)\s*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE
+)
 
 EXECUTION_CONFIRM_TRIGGERS = (
     "build it",
@@ -41,6 +43,16 @@ EXECUTION_CONFIRM_TRIGGERS = (
     "do it",
     "yes build it",
     "yes implement it",
+    "begin",
+    "orchestrator begin",
+    "start",
+    "let's begin",
+    "lets begin",
+    "let's start",
+    "lets start",
+    "begin implementation",
+    "start now",
+    "execute",
 )
 
 
@@ -141,7 +153,10 @@ class OrchestratorAgent(BaseAgent):
                 else "".join(p.text for p in user_message if isinstance(p, TextPart))
             )
             norm_input = text_msg.strip().lower()
-            if any(norm_input == trig or norm_input.startswith(f"{trig} ") for trig in EXECUTION_CONFIRM_TRIGGERS):
+            if any(
+                norm_input == trig or norm_input.startswith(f"{trig} ")
+                for trig in EXECUTION_CONFIRM_TRIGGERS
+            ):
                 # Synthesize requirements from recent discussion
                 handoff_requirements = self._synthesize_from_history(history, text_msg)
 
@@ -159,9 +174,7 @@ class OrchestratorAgent(BaseAgent):
             messages=updated_messages,
         )
 
-    def _synthesize_from_history(
-        self, history: Sequence[Message] | None, user_trigger: str
-    ) -> str:
+    def _synthesize_from_history(self, history: Sequence[Message] | None, user_trigger: str) -> str:
         """Fallback synthesis when user confirms implementation without model tag."""
         recent_turns: list[str] = []
         if history:

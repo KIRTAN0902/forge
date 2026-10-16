@@ -30,7 +30,7 @@ from forge.cli.credentials import (
     load_stored_credentials,
     prompt_for_credentials,
 )
-from forge.cli.interactive import CliApprover
+from forge.cli.interactive import AutoApprover, CliApprover
 from forge.cli.render import (
     CliEventPrinter,
     print_workflow_list,
@@ -84,10 +84,20 @@ AGENT_METADATA: dict[str, dict[str, str]] = {
 
 
 class ChatSessionState:
-    """Tracks the active chat agent and handles cycling and switching."""
+    """Tracks the active chat agent and mode (interactive chat vs autonomous AUTO mode)."""
 
-    def __init__(self, default_agent: str = "orchestrator") -> None:
+    def __init__(self, default_agent: str = "orchestrator", auto_mode: bool = False) -> None:
         self.active_agent: str = default_agent
+        self.auto_mode: bool = auto_mode
+
+    def toggle_auto_mode(self) -> bool:
+        """Toggle between interactive chat mode and autonomous AUTO mode."""
+        self.auto_mode = not self.auto_mode
+        return self.auto_mode
+
+    def set_auto_mode(self, enabled: bool) -> None:
+        """Explicitly set AUTO mode state."""
+        self.auto_mode = enabled
 
     def cycle_agent(self) -> str:
         idx = (
@@ -130,6 +140,7 @@ class ChatSessionState:
 
 HELP_COMMANDS = [
     ("/help", "Show this list of available slash commands"),
+    ("/auto", "Toggle AUTO mode (autonomous Planning ➔ Execution ➔ QA without pausing)"),
     ("/anvil", "Switch active agent to 🎯 ANVIL (Orchestrator: architecture & planning)"),
     ("/hammer", "Switch active agent to ⚡ HAMMER (Executor: coding & tool execution)"),
     ("/temper", "Switch active agent to 🔍 TEMPER (QA: adversarial testing & verification)"),
@@ -263,6 +274,7 @@ def print_banner(console: Console, root: Path) -> None:
 
     info_text = (
         "\n[dim]Active Agent: [bold cyan]🎯 ANVIL[/bold cyan] (Press [bold cyan]Tab[/bold cyan] to cycle: ANVIL ➔ HAMMER ➔ TEMPER)\n"
+        "Press [bold green]F2[/bold green] or [bold green]Alt+A[/bold green] to toggle [bold green]⚡ AUTO mode[/bold green] (autonomous Planning ➔ Execution ➔ QA).\n"
         "Type your prompt to begin, or [cyan]/help[/cyan] for commands. Use [cyan]/search <query>[/cyan] for web search, [cyan]/exit[/cyan] to quit.[/dim]"
     )
     console.print(
@@ -340,25 +352,34 @@ def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
     meta = AGENT_METADATA.get(agent, AGENT_METADATA["orchestrator"])
     width = max(40, shutil.get_terminal_size((80, 24)).columns)
 
+    mode_status = "Auto: ON" if state.auto_mode else "Auto: OFF"
     if width >= 75:
-        hints = " [Tab: Switch Agent · Esc: Clear] ─╮"
+        hints = f" [F2: {mode_status} · Tab: Agent · Esc: Clear] ─╮"
     elif width >= 55:
-        hints = " [Tab: Switch Agent] ─╮"
+        hints = f" [F2: {mode_status} · Tab: Agent] ─╮"
     else:
         hints = " ─╮"
 
-    left = f"╭─ {meta['icon']} {meta['title']} "
+    mode_suffix = " [⚡ AUTO]" if state.auto_mode else ""
+    left = f"╭─ {meta['icon']} {meta['title']}{mode_suffix} "
     fill_len = max(2, width - len(left) - len(hints))
 
-    return [
+    tokens = [
         ("class:box_border", "╭─ "),
         (f"class:prompt_agent_{agent}", f"{meta['icon']} {meta['title']}"),
-        ("class:box_border", " " + ("─" * fill_len)),
-        ("class:box_dim", hints[:-3]),
-        ("class:box_border", " ─╮\n"),
-        ("class:box_border", "│ "),
-        ("class:prompt_arrow", "> "),
     ]
+    if state.auto_mode:
+        tokens.append(("class:prompt_mode_auto", " [⚡ AUTO]"))
+    tokens.extend(
+        [
+            ("class:box_border", " " + ("─" * fill_len)),
+            ("class:box_dim", hints[:-3]),
+            ("class:box_border", " ─╮\n"),
+            ("class:box_border", "│ "),
+            ("class:prompt_arrow", "> "),
+        ]
+    )
+    return tokens
 
 
 def _get_rprompt(state: ChatSessionState) -> list[tuple[str, str]]:
@@ -381,15 +402,17 @@ def _get_bottom_toolbar(state: ChatSessionState) -> list[tuple[str, str]]:
     import shutil
 
     width = max(40, shutil.get_terminal_size((80, 24)).columns)
+    action_label = "Run Auto" if state.auto_mode else "Send"
+    auto_label = "Auto: ON" if state.auto_mode else "Auto: OFF"
 
     if width >= 80:
-        left = "╰─ [Enter] Send  [Shift+Enter] Multiline  [Tab] Agent  [Ctrl+V] Paste "
+        left = f"╰─ [Enter] {action_label}  [F2 / Alt+A] {auto_label}  [Tab] Agent  [Ctrl+V] Paste "
         right = " [/help] ─╯"
     elif width >= 60:
-        left = "╰─ [Enter] Send  [Tab] Agent  [Ctrl+V] Paste "
+        left = f"╰─ [Enter] {action_label}  [F2] {auto_label}  [Tab] Agent "
         right = " [/help] ─╯"
     else:
-        left = "╰─ [Enter] Send  [Tab] Agent "
+        left = f"╰─ [Enter] {action_label}  [F2] {auto_label} "
         right = " ─╯"
 
     fill_len = max(2, width - len(left) - len(right))
@@ -422,6 +445,8 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
             "/orch",
             "/exec",
             "/search",
+            "/auto",
+            "/mode",
         ]
         completer = WordCompleter(commands, ignore_case=True, match_middle=False)
 
@@ -449,6 +474,34 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
         def _handle_shift_tab(event: KeyPressEvent) -> None:
             current_state.cycle_agent_reverse()
             event.app.invalidate()
+
+        @kb.add("f2")
+        def _handle_f2(event: KeyPressEvent) -> None:
+            """F2 toggles AUTO mode."""
+            current_state.toggle_auto_mode()
+            event.app.invalidate()
+
+        @kb.add("escape", "a")
+        def _handle_alt_a(event: KeyPressEvent) -> None:
+            """Alt+A toggles AUTO mode."""
+            current_state.toggle_auto_mode()
+            event.app.invalidate()
+
+        @kb.add("c-o")
+        def _handle_ctrl_o(event: KeyPressEvent) -> None:
+            """Ctrl+O toggles AUTO mode."""
+            current_state.toggle_auto_mode()
+            event.app.invalidate()
+
+        @kb.add("c-a")
+        def _handle_ctrl_a(event: KeyPressEvent) -> None:
+            """Ctrl+A toggles AUTO mode if input is empty; otherwise moves cursor to beginning of line."""
+            buf = event.app.current_buffer
+            if not buf.text:
+                current_state.toggle_auto_mode()
+                event.app.invalidate()
+            else:
+                buf.cursor_position += buf.document.get_start_of_line_position()
 
         @kb.add("c-j")
         @kb.add("escape", "enter")
@@ -520,6 +573,7 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
                 "prompt_agent_planner": "#d946ef bold",
                 "prompt_agent_executor": "#eab308 bold",
                 "prompt_agent_qa": "#10b981 bold",
+                "prompt_mode_auto": "#10b981 bold",
                 "box_border": "#475569",
                 "box_dim": "#64748b",
                 "box_key": "#94a3b8",
@@ -547,7 +601,11 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
             multiline=True,
             erase_when_done=True,
             prompt_continuation=_get_prompt_continuation,
-            placeholder="Type your message, /help for commands, or paste code/images...",
+            placeholder=lambda: (
+                "AUTO mode: Enter request for autonomous Planning ➔ Execution ➔ QA (F2 to switch)..."
+                if current_state.auto_mode
+                else "Type your message, /help for commands, or press F2 for AUTO mode..."
+            ),
             output=pt_output,
         )
     except Exception:
@@ -692,13 +750,14 @@ async def _run_workflow_turn(
     path: Path,
     console: Console,
     current_workflow_id: str | None = None,
+    auto_mode: bool = False,
 ) -> WorkflowState | None:
     """Run an autonomous workflow turn for the user's prompt."""
     config = load_config(path)
     event_bus = EventBus()
     event_bus.subscribe(CliEventPrinter(console))
 
-    approver = CliApprover(console)
+    approver = AutoApprover(console) if auto_mode else CliApprover(console)
     harness = await build_workflow_harness(config, approver=approver, event_bus=event_bus)
 
     try:
@@ -709,7 +768,9 @@ async def _run_workflow_turn(
                 if not existing.is_terminal:
                     console.print(f"[dim]Continuing workflow {current_workflow_id}...[/dim]")
                     final_state = await run_with_esc_cancellation(
-                        harness.orchestrator.resume(existing, feedback=request),
+                        harness.orchestrator.resume(
+                            existing, feedback=request, auto_mode=auto_mode
+                        ),
                         status_message="[bold green]Workflow resuming...[/bold green]",
                         console=console,
                     )
@@ -724,8 +785,10 @@ async def _run_workflow_turn(
         # Otherwise, start a fresh workflow for this instruction
         state = WorkflowState(user_request=request)
         final_state = await run_with_esc_cancellation(
-            harness.orchestrator.run(state),
-            status_message="[bold green]Workflow executing...[/bold green]",
+            harness.orchestrator.run(state, auto_mode=auto_mode),
+            status_message="[bold green]⚡ AUTO mode executing (Planning ➔ Execution ➔ QA)...[/bold green]"
+            if auto_mode
+            else "[bold green]Workflow executing...[/bold green]",
             console=console,
         )
         console.print()
@@ -733,6 +796,36 @@ async def _run_workflow_turn(
         return final_state
     finally:
         await harness.aclose()
+
+
+def print_auto_mode_completion(state: WorkflowState, console: Console) -> None:
+    """Display an elevated completion banner when AUTO mode finishes planning, execution, and QA."""
+    tasks_count = len(state.plan.tasks) if state.plan else 0
+    done_count = sum(
+        1 for t in (state.plan.tasks if state.plan else []) if t.status.value in {"done", "skipped"}
+    )
+    qa_status = state.qa_reports[-1].status.value.upper() if state.qa_reports else "NOT RUN"
+    qa_color = "green" if qa_status == "PASS" else ("yellow" if qa_status == "WARN" else "red")
+
+    summary_lines = [
+        f"[bold white]Request:[/bold white] {state.user_request[:120]}{'...' if len(state.user_request) > 120 else ''}",
+        f"[bold white]Status:[/bold white] [bold green]✔ {state.status.value.upper()}[/bold green]  "
+        f"[bold white]Iterations:[/bold white] {state.iteration}",
+        "",
+        "  • [bold cyan]Planning (ANVIL):[/bold cyan] Requirements contract & dependency graph generated",
+        f"  • [bold yellow]Execution (HAMMER):[/bold yellow] {done_count}/{tasks_count} tasks completed",
+        f"  • [bold green]QA Verification (TEMPER):[/bold green] [{qa_color}]{qa_status}[/{qa_color}]",
+        "",
+        "[dim]Full audit trail recorded in .forge/forge.md and .forge/forge.json[/dim]",
+    ]
+
+    console.print(
+        Panel(
+            "\n".join(summary_lines),
+            title="[bold green]⚡ AUTO MODE COMPLETED — All Stages Verified[/bold green]",
+            border_style="green",
+        )
+    )
 
 
 def sanitize_response_for_display(text: str) -> str:
@@ -970,6 +1063,33 @@ def run_chat_session(path: Path = Path(".")) -> None:
             print_skills_table(console)
             continue
 
+        if lower_input in {"/auto", "/automode", "/mode"}:
+            is_on = session_state.toggle_auto_mode()
+            mode_badge = (
+                "[bold green]ON (Autonomous Planning ➔ Execution ➔ QA)[/bold green]"
+                if is_on
+                else "[bold cyan]OFF (Interactive Chat Pairing)[/bold cyan]"
+            )
+            console.print(f"\n[bold]⚡ AUTO Mode is now {mode_badge}[/bold]")
+            console.print(
+                "[dim]Tip: You can also press [bold cyan]F2[/bold cyan], [bold cyan]Alt+A[/bold cyan], or [bold cyan]Ctrl+O[/bold cyan] at the prompt to toggle AUTO mode instantly.[/dim]\n"
+            )
+            continue
+
+        if lower_input == "/auto on":
+            session_state.auto_mode = True
+            console.print(
+                "\n[bold green]⚡ AUTO Mode enabled (Autonomous Planning ➔ Execution ➔ QA without pausing).[/bold green]\n"
+            )
+            continue
+
+        if lower_input == "/auto off":
+            session_state.auto_mode = False
+            console.print(
+                "\n[bold cyan]💬 AUTO Mode disabled (Interactive Chat Pairing active).[/bold cyan]\n"
+            )
+            continue
+
         if lower_input in {"/anvil", "/orchestrator", "/orch", "/planner", "/plan"}:
             session_state.set_agent("orchestrator")
             meta = AGENT_METADATA["orchestrator"]
@@ -1105,6 +1225,7 @@ def run_chat_session(path: Path = Path(".")) -> None:
                         path=path,
                         console=console,
                         current_workflow_id=current_workflow_id,
+                        auto_mode=session_state.auto_mode,
                     )
                 )
                 if state is not None:
@@ -1115,6 +1236,8 @@ def run_chat_session(path: Path = Path(".")) -> None:
                             f"[Workflow {state.workflow_id} executed with status {state.status.value}]"
                         )
                     )
+                    if session_state.auto_mode:
+                        print_auto_mode_completion(state, console)
             except UserCancelledError:
                 console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
             except ForgeError as exc:
@@ -1349,6 +1472,59 @@ def run_chat_session(path: Path = Path(".")) -> None:
             turn_content, _ = build_turn_content(cleaned_text, detected_attachments)
         else:
             turn_content = user_input
+
+        # Check if AUTO mode is active: autonomous Planning ➔ Execution ➔ QA without intermediate pauses
+        if session_state.auto_mode:
+            req_text = user_input
+            # If user said "begin" or "start" and prior conversation history exists
+            if (
+                lower_input in {"begin", "start", "proceed", "go ahead", "orchestrator begin"}
+                and conversation_history
+            ):
+                recent_user_msgs = [
+                    m.text for m in conversation_history if m.role == "user" and m.text
+                ]
+                if recent_user_msgs:
+                    req_text = f"Execute request: {recent_user_msgs[-1]}"
+
+            console.print(
+                Panel(
+                    f"[bold green]Autonomous full-cycle execution initiated:[/bold green]\n"
+                    f"[bold white]{req_text}[/bold white]\n\n"
+                    f"[dim]Running without prompts: 🎯 Planning (ANVIL) ➔ ⚡ Execution (HAMMER) ➔ 🔍 QA (TEMPER)...[/dim]",
+                    title="⚡ AUTO MODE ACTIVATED",
+                    border_style="green",
+                )
+            )
+
+            try:
+                state = _run_async(
+                    _run_workflow_turn(
+                        req_text,
+                        path=path,
+                        console=console,
+                        current_workflow_id=current_workflow_id,
+                        auto_mode=True,
+                    )
+                )
+                if state is not None:
+                    current_workflow_id = state.workflow_id
+                    conversation_history.append(Message.user(user_input))
+                    conversation_history.append(
+                        Message.assistant(
+                            f"[AUTO MODE completed: Workflow {state.workflow_id} ended with status: {state.status.value}. "
+                            f"Tasks executed: {len(state.tasks)}]"
+                        )
+                    )
+                    print_auto_mode_completion(state, console)
+            except UserCancelledError:
+                console.print("\n[yellow]⚠ Interrupted by user (Esc).[/yellow]")
+            except ForgeError as exc:
+                console.print(f"[red]error:[/red] {exc}")
+            except Exception as exc:
+                console.print(f"[red]unexpected error:[/red] {exc}")
+            console.print()
+            continue
 
         # Conversational pairing with the active agent (default: Orchestrator)
         try:

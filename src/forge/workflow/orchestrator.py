@@ -109,7 +109,13 @@ class Orchestrator:
 
         return decision, state
 
-    async def run(self, state: WorkflowState, *, max_steps: int | None = None) -> WorkflowState:
+    async def run(
+        self,
+        state: WorkflowState,
+        *,
+        max_steps: int | None = None,
+        auto_mode: bool = False,
+    ) -> WorkflowState:
         """Run the workflow loop until completion, block, or iteration ceiling."""
         is_resume = state.iteration > 0
         start_event = EventType.WORKFLOW_RESUMED if is_resume else EventType.WORKFLOW_STARTED
@@ -137,7 +143,13 @@ class Orchestrator:
             steps_executed += 1
             _, state = await self.step(state)
             if state.status == WorkflowStatus.AWAITING_APPROVAL:
-                break
+                if auto_mode:
+                    state = await self.approve(
+                        state,
+                        feedback="Auto-approved in AUTO mode: proceeding with execution.",
+                    )
+                else:
+                    break
 
         if (
             not state.is_terminal
@@ -228,11 +240,12 @@ class Orchestrator:
         *,
         feedback: str | None = None,
         max_steps: int | None = None,
+        auto_mode: bool = False,
     ) -> WorkflowState:
         """Approve (if awaiting) and resume running the workflow."""
         if state.status == WorkflowStatus.AWAITING_APPROVAL:
             await self.approve(state, feedback=feedback)
-        return await self.run(state, max_steps=max_steps)
+        return await self.run(state, max_steps=max_steps, auto_mode=auto_mode)
 
     async def rollback(
         self,
