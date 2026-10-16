@@ -736,7 +736,7 @@ async def _run_workflow_turn(
 
 
 def sanitize_response_for_display(text: str) -> str:
-    """Clean raw internal tool artifacts (line numbers, pagination tags) if regurgitated by LLMs."""
+    """Clean raw internal tool artifacts (line numbers, pagination tags, raw grep dumps) if regurgitated by LLMs."""
     if not text:
         return ""
     import re
@@ -751,6 +751,30 @@ def sanitize_response_for_display(text: str) -> str:
         r"**`\1`** *(lines \2)*\n",
         cleaned,
     )
+    # 4. Clean raw terminal command dump header: '$ cmd [exit 0, 0.1s]'
+    cleaned = re.sub(
+        r"(?m)^\$\s+(.+?)\s*(?:\n|\s+)\[(exit\s+\d+|timed\s+out)[^\]]*\]\s*",
+        r"**Command Output (`\1`):**\n\n",
+        cleaned,
+    )
+    # 5. Split inlined/squished grep results back onto separate lines
+    cleaned = re.sub(r"\s+(\d+:)", r"\n\1", cleaned)
+
+    # 6. Format multi-file grep output: 'path:line:content' -> '- **`path`** (Line line): `content`'
+    cleaned = re.sub(
+        r"(?m)^([a-zA-Z0-9_\-./\\]+):(\d+):(.*)$",
+        r"- **`\1`** (Line \2): `\3`",
+        cleaned,
+    )
+
+    # 7. Format single-file grep output: 'line:content' -> '- **Line line**: `content`'
+    def format_grep_line(match: re.Match) -> str:
+        line_num = match.group(1)
+        content = match.group(2).strip()
+        return f"- **Line {line_num}**: `{content}`"
+
+    cleaned = re.sub(r"(?m)^(\d+):(.*)$", format_grep_line, cleaned)
+
     return cleaned
 
 
