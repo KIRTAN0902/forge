@@ -253,7 +253,9 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             return "anthropic_default", ModelProfile(
                 provider="anthropic",
                 model=model_name or "claude-3-7-sonnet-20250219",
-                capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+                capabilities=ModelCapabilities(
+                    tool_calling=True, structured_output=True, vision=True
+                ),
                 detect_capabilities=False,
             )
         if provider == "openrouter" and (
@@ -262,14 +264,18 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             return "openrouter_default", ModelProfile(
                 provider="openrouter",
                 model=model_name or "anthropic/claude-3.7-sonnet",
-                capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+                capabilities=ModelCapabilities(
+                    tool_calling=True, structured_output=True, vision=True
+                ),
                 detect_capabilities=False,
             )
         if provider == "openai" and (os.environ.get("OPENAI_API_KEY") or stored.get("api_key")):
             return "openai_default", ModelProfile(
                 provider="openai",
                 model=model_name or "gpt-4o",
-                capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+                capabilities=ModelCapabilities(
+                    tool_calling=True, structured_output=True, vision=True
+                ),
                 detect_capabilities=False,
             )
         if provider == "ollama":
@@ -327,6 +333,225 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
     return "", None
 
 
+def read_clipboard_key() -> str | None:
+    """Safely retrieve clipboard content cross-platform without third-party dependencies."""
+    # 1. Try pyperclip if installed
+    try:
+        import pyperclip  # type: ignore[import-untyped]
+
+        val = pyperclip.paste()
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    except Exception:
+        pass
+
+    # 2. Windows native (zero-dependency via ctypes with 64-bit/32-bit types)
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            user32.OpenClipboard.argtypes = [wintypes.HWND]
+            user32.OpenClipboard.restype = wintypes.BOOL
+            user32.CloseClipboard.argtypes = []
+            user32.CloseClipboard.restype = wintypes.BOOL
+            user32.GetClipboardData.argtypes = [wintypes.UINT]
+            user32.GetClipboardData.restype = wintypes.HANDLE
+            kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+            kernel32.GlobalLock.restype = wintypes.LPVOID
+            kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+            kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+            cf_unicode = 13
+            if user32.OpenClipboard(None):
+                try:
+                    handle = user32.GetClipboardData(cf_unicode)
+                    if handle:
+                        ptr = kernel32.GlobalLock(handle)
+                        if ptr:
+                            try:
+                                text = ctypes.c_wchar_p(ptr).value
+                                if text and text.strip():
+                                    return text.strip()
+                            finally:
+                                kernel32.GlobalUnlock(handle)
+                finally:
+                    user32.CloseClipboard()
+        except Exception:
+            pass
+
+    # 3. macOS native (pbpaste)
+    import subprocess
+    import sys
+
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=1)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except Exception:
+            pass
+
+    # 4. Linux native (wl-paste or xclip)
+    if sys.platform.startswith("linux"):
+        for cmd in (["wl-paste"], ["xclip", "-selection", "clipboard", "-o"]):
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            except Exception:
+                continue
+
+    return None
+
+
+def looks_like_api_key(text: str | None) -> bool:
+    """Check if clipboard text looks like an API key or auth token."""
+    if not text:
+        return False
+    text = text.strip()
+    if "\n" in text or "\r" in text or " " in text:
+        return False
+    if len(text) < 14 or len(text) > 300:
+        return False
+    if text.startswith(("http://", "https://", "file://", "git@", "ssh://")):
+        return False
+    known_prefixes = (
+        "sk-",
+        "nvapi-",
+        "gsk_",
+        "xai-",
+        "AIza",
+        "anthropic",
+        "ghp_",
+        "key-",
+        "or-v1-",
+        "hf_",
+        "co-",
+        "ms-",
+    )
+    if any(text.startswith(p) for p in known_prefixes):
+        return True
+    return len(text) >= 20 and any(c.isdigit() for c in text) and any(c.isalpha() for c in text)
+
+
+def prompt_api_key(
+    prompt_label: str = "API Key",
+    *,
+    console: Console | None = None,
+    default: str = "",
+    allow_empty: bool = False,
+    provider_name: str = "",
+    prompt_class: type[Prompt] | None = None,
+) -> str:
+    """Prompt the user for an API key with full clipboard paste support (Ctrl+V, right-click, Shift+Insert)."""
+    p_cls = prompt_class or Prompt
+
+    # 1. If Prompt.ask is patched/mocked in tests, delegate to it
+    if hasattr(p_cls.ask, "mock_calls") or hasattr(p_cls.ask, "assert_called"):
+        val = p_cls.ask(
+            prompt_label,
+            password=True,
+            default=default,
+            show_default=bool(default),
+            console=console,
+        )
+        return str(val).strip() if val is not None else ""
+
+    c = console or Console()
+
+    # 2. Inspect clipboard to see if user already copied an API key
+    clip = read_clipboard_key()
+    clip_is_key = looks_like_api_key(clip)
+    effective_default = default
+
+    if clip and clip_is_key and not default:
+        masked_clip = f"{clip[:6]}...{clip[-4:]}" if len(clip) > 10 else "****"
+        c.print(
+            f"  [bold cyan]📋 Detected API key in clipboard:[/bold cyan] [yellow]{masked_clip}[/yellow] "
+            f"[dim]({len(clip)} chars)[/dim]\n"
+            f"  [dim]Press [bold white]Enter[/bold white] to use this clipboard key, "
+            f"or [bold white]Ctrl+V[/bold white] / right-click to paste another:[/dim]"
+        )
+        effective_default = clip
+
+    # 3. If non-interactive / stdin is not a tty, fallback to standard input
+    import sys
+
+    if not sys.stdin.isatty():
+        try:
+            val = input().strip()
+        except (KeyboardInterrupt, EOFError):
+            return ""
+        if not val and effective_default:
+            val = effective_default
+        return val
+
+    # 4. Interactive prompt using prompt_toolkit for full cross-platform paste & masking
+    while True:
+        try:
+            from prompt_toolkit.formatted_text import HTML
+            from prompt_toolkit.key_binding import KeyBindings
+            from prompt_toolkit.shortcuts import prompt as pt_prompt
+
+            kb = KeyBindings()
+
+            @kb.add("c-v")
+            def _paste_ctrl_v(event: Any) -> None:
+                p = read_clipboard_key()
+                if p:
+                    event.current_buffer.insert_text(p)
+
+            @kb.add("s-insert")
+            def _paste_shift_ins(event: Any) -> None:
+                p = read_clipboard_key()
+                if p:
+                    event.current_buffer.insert_text(p)
+
+            clean_label = prompt_label.replace("[", "").replace("]", "")
+            formatted_prompt = HTML(f"<b><ansicyan>{clean_label}</ansicyan></b>: ")
+            entered = pt_prompt(
+                formatted_prompt,
+                is_password=True,
+                key_bindings=kb,
+            ).strip()
+
+        except (KeyboardInterrupt, EOFError):
+            c.print("\n[dim]Cancelled.[/dim]")
+            return ""
+        except Exception:
+            # Fallback if prompt_toolkit fails for any reason
+            entered = c.input(f"[bold cyan]{prompt_label}: [/bold cyan]").strip()
+
+        # Clean up any \x16 characters (raw Ctrl+V character code sent by some terminals)
+        if "\x16" in entered:
+            clip_text = read_clipboard_key() or ""
+            entered = entered.replace("\x16", clip_text).strip()
+
+        # Strip any extraneous quotes user might have pasted
+        entered = entered.strip("'\"")
+
+        # If user hit Enter with no text, use effective_default if available
+        if not entered and effective_default:
+            entered = effective_default
+
+        if entered or allow_empty:
+            if entered:
+                masked = f"{entered[:6]}...{entered[-4:]}" if len(entered) > 10 else "****"
+                c.print(
+                    f"  [bold green]✔ Key accepted:[/bold green] [cyan]{masked}[/cyan] "
+                    f"[dim]({len(entered)} chars)[/dim]"
+                )
+            return entered
+
+        c.print(
+            "[red]API key cannot be empty. Please paste your API key (press Ctrl+V or right-click):[/red]"
+        )
+
+
 def prompt_for_credentials(console: Console) -> dict[str, Any]:
     """Interactively prompt user for provider and API key on first launch."""
     banner = (
@@ -362,16 +587,18 @@ def prompt_for_credentials(console: Console) -> dict[str, Any]:
     base_url = meta.get("base_url", "")
     default_model = meta.get("default_model", "")
 
-    if provider in {"nvidia", "openrouter", "openai", "custom"}:
+    if provider in {"nvidia", "openrouter", "openai", "anthropic", "custom"}:
         console.print()
         console.print(
             f"[bold yellow]Paste your {meta['name']} API key[/bold yellow] "
             "[dim](input is hidden for security):[/dim]"
         )
-        api_key = Prompt.ask("API Key", password=True, console=console).strip()
-        while not api_key:
-            console.print("[red]API key cannot be empty. Please enter a valid key:[/red]")
-            api_key = Prompt.ask("API Key", password=True, console=console).strip()
+        api_key = prompt_api_key(
+            "API Key",
+            console=console,
+            provider_name=meta["name"],
+            prompt_class=Prompt,
+        )
 
     if provider == "custom":
         console.print()

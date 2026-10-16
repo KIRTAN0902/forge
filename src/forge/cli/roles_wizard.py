@@ -21,6 +21,7 @@ from forge.cli.credentials import (
     get_provider_api_key,
     init_credentials_env,
     load_stored_credentials,
+    prompt_api_key,
     save_stored_credentials,
 )
 from forge.config.loader import load_config
@@ -105,13 +106,19 @@ def _prompt_provider_and_key(console: Console, role_label: str = "") -> tuple[st
                 f"Keep existing {meta['name']} API key?", default=True, console=console
             )
             if not use_existing:
-                api_key = Prompt.ask(
-                    f"New {meta['name']} API Key", password=True, console=console
-                ).strip()
+                api_key = prompt_api_key(
+                    f"New {meta['name']} API Key",
+                    console=console,
+                    provider_name=meta["name"],
+                    prompt_class=Prompt,
+                )
         else:
-            api_key = Prompt.ask(
-                f"Paste your {meta['name']} API Key", password=True, console=console
-            ).strip()
+            api_key = prompt_api_key(
+                f"Paste your {meta['name']} API Key",
+                console=console,
+                provider_name=meta["name"],
+                prompt_class=Prompt,
+            )
 
         if api_key:
             save_stored_credentials(provider, api_key)
@@ -189,7 +196,9 @@ def run_roles_wizard(project_dir: Path, console: Console) -> None:
 
         console.print()
         orch_model = Prompt.ask(
-            "Orchestrator Agent Model (Brainstorming, Architecture & Planning)", default=p_def, console=console
+            "Orchestrator Agent Model (Brainstorming, Architecture & Planning)",
+            default=p_def,
+            console=console,
         ).strip()
         executor_model = Prompt.ask(
             "Executor Agent Model (Code Writing & Tools)", default=e_def, console=console
@@ -278,7 +287,9 @@ def configure_single_role(project_dir: Path, role: str, console: Console) -> str
     )
 
     set_role_model(project_dir, role, model=chosen_model, provider=provider)
-    console.print(f"\n[bold green]✔ Updated {role_title} model to {provider}/{chosen_model}[/bold green]\n")
+    console.print(
+        f"\n[bold green]✔ Updated {role_title} model to {provider}/{chosen_model}[/bold green]\n"
+    )
     Prompt.ask("Press Enter to continue...", console=console)
     return f"{role_title} ➔ [cyan]{chosen_model}[/cyan] ({provider})"
 
@@ -302,7 +313,9 @@ def _quick_setup_all(project_dir: Path, console: Console) -> str | None:
     )
 
     save_single_model_preset(project_dir, provider=provider, model=chosen_model)
-    console.print(f"\n[bold green]✔ Configured all agents with {provider}/{chosen_model}[/bold green]\n")
+    console.print(
+        f"\n[bold green]✔ Configured all agents with {provider}/{chosen_model}[/bold green]\n"
+    )
     Prompt.ask("Press Enter to continue...", console=console)
     return f"All Agents ➔ [cyan]{chosen_model}[/cyan] ({provider})"
 
@@ -412,21 +425,25 @@ def run_provider_modal(project_dir: Path, console: Console) -> list[str]:
     if provider != "ollama":
         if existing_key:
             masked = (
-                f"{existing_key[:6]}...{existing_key[-4:]}"
-                if len(existing_key) > 10
-                else "****"
+                f"{existing_key[:6]}...{existing_key[-4:]}" if len(existing_key) > 10 else "****"
             )
             console.print(f"[dim]Existing key detected: {masked}[/dim]")
-            new_key = Prompt.ask(
+            new_key = prompt_api_key(
                 "Enter API Key (press Enter to keep existing)",
-                password=True,
-                default="",
-                show_default=False,
+                default=existing_key,
+                allow_empty=True,
                 console=console,
-            ).strip()
+                provider_name=meta.get("name", provider),
+                prompt_class=Prompt,
+            )
             api_key = new_key if new_key else existing_key
         else:
-            api_key = Prompt.ask("Paste API Key", password=True, console=console).strip()
+            api_key = prompt_api_key(
+                "Paste API Key",
+                console=console,
+                provider_name=meta.get("name", provider),
+                prompt_class=Prompt,
+            )
     else:
         console.print(
             f"[green]✔ Local Ollama endpoint active at {new_url} (no API key required).[/green]"
@@ -554,7 +571,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
 
         for m_id in user_recents:
             seen_ids.add(m_id)
-            is_active = (m_id == current_model)
+            is_active = m_id == current_model
             m_short = m_id.split("/")[-1]
             prov_tag = m_id.split("/")[0].title() if "/" in m_id else current_prov.title()
             model_items.append(
@@ -572,7 +589,7 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
         prov_section = f"Available Models ({current_prov.title()})"
         for m_id in all_models:
             if m_id not in seen_ids:
-                is_active = (m_id == current_model)
+                is_active = m_id == current_model
                 m_short = m_id.split("/")[-1]
                 prov_tag = m_id.split("/")[0].title() if "/" in m_id else current_prov.title()
                 model_items.append(
@@ -615,7 +632,9 @@ def run_models_modal(project_dir: Path, console: Console) -> list[str]:
         else:
             set_role_model(project_dir, chosen_role, model=selected_model_id, provider=current_prov)
             if chosen_role == "orchestrator":
-                set_role_model(project_dir, "planner", model=selected_model_id, provider=current_prov)
+                set_role_model(
+                    project_dir, "planner", model=selected_model_id, provider=current_prov
+                )
             changes.append(f"{role_label} ➔ [cyan]{selected_model_id}[/cyan] ({current_prov})")
         break
 
@@ -630,4 +649,3 @@ def run_model_menu(project_dir: Path, console: Console) -> list[str]:
 def run_provider_menu(project_dir: Path, console: Console) -> list[str]:
     """Interactive Provider & URI/URL Configuration Menu (/provider)."""
     return run_provider_modal(project_dir, console)
-
