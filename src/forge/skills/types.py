@@ -15,6 +15,7 @@ class SkillCategory(StrEnum):
     PERFORMANCE = "performance"
     TESTING = "testing"
     DOCUMENTATION = "documentation"
+    DESIGN = "design"
 
 
 @dataclass(frozen=True)

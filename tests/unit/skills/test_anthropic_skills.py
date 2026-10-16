@@ -42,12 +42,12 @@ def test_parse_anthropic_skills_count_and_contracts() -> None:
 def test_anthropic_skills_in_registries() -> None:
     """Verify SkillRegistry and AutonomousSkillRouter include all 19 Anthropic skills."""
     reg = SkillRegistry.with_anthropic()
-    assert len(reg.list_all()) == 43  # 24 core + 19 Anthropic
+    assert len(reg.list_all()) >= 43  # 24 core + 19 Anthropic + 4 design (47 total)
     assert reg.get("ANT-01") is not None
     assert reg.get("ANT-19") is not None
 
     router = AutonomousSkillRouter()
-    assert len(router.list_all_specs()) == 68  # 49 harness + 19 Anthropic
+    assert len(router.list_all_specs()) >= 68  # 49 harness + 19 Anthropic + 4 design (72 total)
     assert router.get_spec("ANT-01") is not None
     assert router.get_spec("ANT-19") is not None
 

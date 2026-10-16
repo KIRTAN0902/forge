@@ -250,6 +250,34 @@ class SkillEvaluator:
         except Exception:
             pass
 
+        # Frontend & Design Engineering Skills (DSN-01 to DSN-04)
+        try:
+            from pathlib import Path
+
+            from forge.skills.design_loader import parse_design_skills
+
+            req_lower = signal.user_request.lower()
+            for spec, skill_item, keywords in parse_design_skills():
+                kw_match = any(re.search(rf"\b{re.escape(kw)}\b", req_lower) for kw in keywords)
+                file_match = (
+                    any(
+                        any(Path(f).match(glob) for glob in spec.trigger_file_globs)
+                        for f in signal.touched_files
+                    )
+                    if spec.trigger_file_globs
+                    else False
+                )
+                if kw_match or file_match:
+                    activations.append(
+                        SkillActivation(
+                            skill=skill_item,
+                            target_agent=spec.target_agent,
+                            rationale=f"Triggered by design engineering heuristics for {spec.name}.",
+                        )
+                    )
+        except Exception:
+            pass
+
         # Filter by agent role if specified
         if agent_role:
             target_role = agent_role.lower().strip()

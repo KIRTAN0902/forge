@@ -385,11 +385,18 @@ class SkillRegistry:
                     raw_skills.append(skill_item)
             except Exception:
                 pass
+            try:
+                from forge.skills.design_loader import parse_design_skills
+
+                for _, skill_item, _ in parse_design_skills():
+                    raw_skills.append(skill_item)
+            except Exception:
+                pass
         self._skills: dict[str, Skill] = {s.id: s for s in raw_skills}
 
     @classmethod
     def with_anthropic(cls) -> SkillRegistry:
-        """Create a SkillRegistry pre-populated with both core and Anthropic skills."""
+        """Create a SkillRegistry pre-populated with core, Anthropic, and Design skills."""
         return cls(include_anthropic=True)
 
     def get(self, skill_id: str) -> Skill | None:
@@ -1089,6 +1096,13 @@ class AutonomousSkillRouter:
                 from forge.skills.anthropic_loader import parse_anthropic_skills
 
                 for spec, _, _ in parse_anthropic_skills():
+                    raw_specs.append(spec)
+            except Exception:
+                pass
+            try:
+                from forge.skills.design_loader import parse_design_skills
+
+                for spec, _, _ in parse_design_skills():
                     raw_specs.append(spec)
             except Exception:
                 pass
