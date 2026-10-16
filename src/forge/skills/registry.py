@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from typing import Any
 
 from forge.skills.models import ModelTier, OperationType, RepoSignals, SkillSpec
 from forge.skills.types import Skill, SkillCategory
@@ -1113,6 +1114,13 @@ class AutonomousSkillRouter:
 
     def list_all_specs(self) -> list[SkillSpec]:
         return list(self._specs.values())
+
+    def decide_with_jev(self, signal: Any) -> Any:
+        """Run Jev System 1 fast decision pass over registered skill specifications."""
+        from forge.decision.engine import JevDecisionEngine
+
+        engine = JevDecisionEngine(SkillRegistry.with_anthropic())
+        return engine.route_skills(signal)
 
     def select_skills(self, signals: RepoSignals, op_type: OperationType) -> list[SkillSpec]:
         """Deterministically match repository signals and operation phase to active skills."""

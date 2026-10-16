@@ -54,6 +54,8 @@ class AgentRouter:
         workspace = getattr(runtime.env, "workspace", None)
         ws_root = getattr(workspace, "root", None) if workspace is not None else None
         self.memory = EpisodicRepoMemory(ws_root)
+        from forge.decision import JevDecisionEngine
+        self.jev = JevDecisionEngine(self.skills.registry)
 
     async def route(self, decision: Decision, state: WorkflowState) -> WorkflowState:
         """Execute the action specified by decision and record results in state."""
@@ -61,6 +63,22 @@ class AgentRouter:
         self.executor.workflow_id = state.workflow_id
         self.qa.workflow_id = state.workflow_id
         action = decision.action
+
+        # Jev System 1 Decision Pass: fast risk assessment
+        risk = self.jev.assess_risk(SkillSignal(user_request=state.user_request))
+        if self.events is not None:
+            await self.events.publish(
+                Event(
+                    type=EventType.DECISION_MADE,
+                    workflow_id=state.workflow_id,
+                    source="router.jev",
+                    payload={
+                        "risk_tier": risk.tier,
+                        "risk_score": risk.raw_score,
+                        "action": action.value,
+                    },
+                )
+            )
 
         planning_actions = {
             OrchestratorAction.PLAN,
