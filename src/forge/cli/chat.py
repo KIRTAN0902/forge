@@ -274,16 +274,103 @@ def print_banner(console: Console, root: Path) -> None:
     )
 
 
+def position_cursor_at_bottom() -> None:
+    """Ensure cursor is anchored at the bottom rows of the viewport without scrolling out content."""
+    try:
+        import sys
+
+        if sys.stdout.isatty():
+            # \033[999B moves cursor to bottom line without scrolling; \033[2A leaves room for 3-line box
+            sys.stdout.write("\033[999B\033[2A\r")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def _get_prompt_tokens(state: ChatSessionState) -> list[tuple[str, str]]:
-    """Generate dynamic prompt_toolkit formatted text tokens reflecting the active agent."""
+    """Generate dynamic prompt_toolkit formatted text tokens reflecting the active agent in a framed box."""
+    import shutil
+
     agent = state.active_agent
     meta = AGENT_METADATA.get(agent, AGENT_METADATA["orchestrator"])
+    width = max(40, shutil.get_terminal_size((80, 24)).columns)
+
+    header_left = f"╭─ {meta['icon']} {meta['title']} (Tab to switch) "
+    header_right = " [Esc: clear] ─╮"
+    fill_len = max(0, width - len(header_left) - len(header_right))
+
     return [
-        ("class:prompt_brand", "forge"),
-        ("class:prompt_bracket", " ["),
+        ("class:box_border", "╭─ "),
         (f"class:prompt_agent_{agent}", f"{meta['icon']} {meta['title']}"),
-        ("class:prompt_bracket", "] > "),
+        ("class:box_dim", " (Tab to switch) "),
+        ("class:box_border", "─" * fill_len),
+        ("class:box_dim", " [Esc: clear]"),
+        ("class:box_border", " ─╮\n"),
+        ("class:box_border", "│ "),
+        ("class:prompt_arrow", "> "),
     ]
+
+
+def _get_prompt_continuation(
+    width: int, line_number: int, is_soft_wrap: bool
+) -> list[tuple[str, str]]:
+    """Line prefix for multiline continuation inside the box."""
+    return [
+        ("class:box_border", "│ "),
+        ("class:box_dim", "· "),
+    ]
+
+
+def _get_bottom_toolbar(state: ChatSessionState) -> list[tuple[str, str]]:
+    """Bottom status bar framing the bottom of the sticky prompt box."""
+    import shutil
+
+    width = max(40, shutil.get_terminal_size((80, 24)).columns)
+
+    if width >= 85:
+        left = "╰─ [Enter] Send  [Shift+Enter] Multiline  [Tab] Agent  [Ctrl+V] Paste "
+        right = " [/help] ─╯"
+        fill_len = max(0, width - len(left) - len(right))
+        return [
+            ("class:box_border", "╰─ "),
+            ("class:box_key", "[Enter] Send"),
+            ("class:box_dim", "  "),
+            ("class:box_key", "[Shift+Enter] Multiline"),
+            ("class:box_dim", "  "),
+            ("class:box_key", "[Tab] Agent"),
+            ("class:box_dim", "  "),
+            ("class:box_key", "[Ctrl+V] Paste"),
+            ("class:box_border", "  " + ("─" * fill_len)),
+            ("class:box_key", " [/help]"),
+            ("class:box_border", " ─╯"),
+        ]
+    elif width >= 65:
+        left = "╰─ [Enter] Send  [Tab] Agent  [Ctrl+V] Paste "
+        right = " [/help] ─╯"
+        fill_len = max(0, width - len(left) - len(right))
+        return [
+            ("class:box_border", "╰─ "),
+            ("class:box_key", "[Enter] Send"),
+            ("class:box_dim", "  "),
+            ("class:box_key", "[Tab] Agent"),
+            ("class:box_dim", "  "),
+            ("class:box_key", "[Ctrl+V] Paste"),
+            ("class:box_border", "  " + ("─" * fill_len)),
+            ("class:box_key", " [/help]"),
+            ("class:box_border", " ─╯"),
+        ]
+    else:
+        left = "╰─ [Enter] Send  [Tab] Agent "
+        right = " ─╯"
+        fill_len = max(0, width - len(left) - len(right))
+        return [
+            ("class:box_border", "╰─ "),
+            ("class:box_key", "[Enter] Send"),
+            ("class:box_dim", "  "),
+            ("class:box_key", "[Tab] Agent"),
+            ("class:box_border", "  " + ("─" * fill_len)),
+            ("class:box_border", " ─╯"),
+        ]
 
 
 def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
@@ -336,6 +423,33 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
             current_state.cycle_agent_reverse()
             event.app.invalidate()
 
+        @kb.add("c-j")
+        @kb.add("escape", "enter")
+        def _handle_newline(event: KeyPressEvent) -> None:
+            """Shift+Enter / Ctrl+J / Alt+Enter inserts a clean newline for multiline drafting."""
+            event.app.current_buffer.insert_text("\n")
+
+        @kb.add("enter")
+        def _handle_enter(event: KeyPressEvent) -> None:
+            """Enter submits the input prompt or commits active completion."""
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.complete_state = None
+            else:
+                buf.validate_and_handle()
+
+        @kb.add("escape")
+        def _handle_escape(event: KeyPressEvent) -> None:
+            """Escape acts as an escape hatch to dismiss completions or clear drafted input."""
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.cancel_completion()
+                return
+            if buf.text:
+                buf.text = ""
+                buf.cursor_position = 0
+                event.app.invalidate()
+
         @kb.add("c-v")
         def _handle_ctrl_v(event: KeyPressEvent) -> None:
             buf = event.app.current_buffer
@@ -379,27 +493,54 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
                 "prompt_agent_planner": "#d946ef bold",
                 "prompt_agent_executor": "#eab308 bold",
                 "prompt_agent_qa": "#10b981 bold",
+                "box_border": "#475569",
+                "box_dim": "#64748b",
+                "box_key": "#94a3b8",
+                "prompt_arrow": "#00e5ff bold",
+                "placeholder": "#64748b italic",
+                "bottom-toolbar": "noinherit",
+                "bottom-toolbar.text": "noinherit",
             }
         )
+
+        try:
+            from prompt_toolkit.output.defaults import create_output
+
+            pt_output = create_output()
+        except Exception:
+            from prompt_toolkit.output import DummyOutput
+
+            pt_output = DummyOutput()
 
         return PromptSession(
             history=FileHistory(str(history_file)),
             completer=completer,
             key_bindings=kb,
             style=prompt_style,
+            multiline=True,
+            erase_when_done=True,
+            prompt_continuation=_get_prompt_continuation,
+            placeholder="Type your message, /help for commands, or paste code/images...",
+            output=pt_output,
         )
     except Exception:
         return None
 
 
 def read_user_input(session: Any, console: Console, state: ChatSessionState | None = None) -> str:
-    """Read a line of input from the user with dynamic agent prompt badge."""
+    """Read a line of input from the user in a bottom-anchored text box."""
     current_state = state or ChatSessionState()
     meta = AGENT_METADATA.get(current_state.active_agent, AGENT_METADATA["orchestrator"])
 
     if session is not None:
         try:
-            return str(session.prompt(lambda: _get_prompt_tokens(current_state))).strip()
+            position_cursor_at_bottom()
+            return str(
+                session.prompt(
+                    message=lambda: _get_prompt_tokens(current_state),
+                    bottom_toolbar=lambda: _get_bottom_toolbar(current_state),
+                )
+            ).strip()
         except (KeyboardInterrupt, EOFError):
             raise
         except Exception:
@@ -755,6 +896,9 @@ def run_chat_session(path: Path = Path(".")) -> None:
         if lower_input in {"/exit", "/quit", "exit", "quit"}:
             console.print("[dim]Goodbye![/dim]")
             break
+
+        # Display the user's prompt in the chat history stream above the bottom input box
+        console.print(f"[bold #38bdf8]👤 You:[/bold #38bdf8] {user_input}\n")
 
         if lower_input == "/help":
             print_help(console)
