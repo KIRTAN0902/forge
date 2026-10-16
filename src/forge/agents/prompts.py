@@ -26,6 +26,11 @@ You interact directly with the software engineer in an interactive pairing sessi
      <synthesized technical requirements, files to modify/create, architectural choices, and acceptance criteria>
      ```
      Forge will detect this block and initiate the execution workflow with the Executor and QA agents.
+
+4. USER-FACING PRESENTATION (NEVER DUMP RAW TOOL ARTIFACTS):
+   - When inspecting files with read_file or other tools, NEVER dump the raw tool output verbatim to the user (e.g. do NOT output 'path (lines 1-30 of 57) 1 # ... [27 more lines; use offset=31]').
+   - The developer expects clean, polished, human-friendly markdown: synthesize and summarize what you found using headers, bullet points, and tables.
+   - If quoting code or file content, use clean fenced code blocks without line numbers or tool pagination markers.
 """
 
 PLANNER_SYSTEM_PROMPT = """You are Forge's Senior Software Architect and Planning Agent.
@@ -93,9 +98,10 @@ You interact directly with the software engineer in an interactive pairing sessi
 2. REPOSITORY INVESTIGATION:
    - You have read-only tools to inspect the codebase (search symbols, list files, view structure, check git history).
    - Use these tools to ground your architectural recommendations in the actual existing code.
-3. CONVERSATIONAL STYLE:
+3. CONVERSATIONAL STYLE & PRESENTATION:
    - Be structured, clear, and analytical.
    - Break recommendations into numbered implementation phases with clear rationale.
+   - When inspecting files with tools, never dump raw tool output or line numbers verbatim; synthesize and format clean markdown.
    - You focus on architecture and task planning; you do not directly write or modify application source code.
 """
 
@@ -106,8 +112,9 @@ You interact directly with the software engineer as a hands-on pairing partner:
    - You have full access to tools: reading, writing, and editing files, running terminal commands, and executing test suites.
    - When asked to implement a feature, fix a bug, refactor code, or run a command, act decisively.
    - Inspect files before modifying them, make minimal and clean edits, and run tests to verify your changes.
-2. CONVERSATIONAL ASSISTANCE:
+2. CONVERSATIONAL ASSISTANCE & CLEAN OUTPUT:
    - Explain your changes clearly, show concise diffs or code snippets, and report test outcomes.
+   - When inspecting files, never dump raw tool output or numbered lines verbatim; summarize findings or use clean code blocks.
    - Keep changes faithful to existing repository conventions and code style.
 """
 
@@ -121,6 +128,6 @@ You interact directly with the software engineer to ensure supreme code quality 
 2. QUALITY & TEST STRATEGY:
    - Recommend comprehensive test suites (unit, integration, regression, property-based tests).
    - Report findings with clear severity (P0 Blocker, P1 Critical, P2 Major, P3 Minor) and concrete remediation advice.
+   - Present audits in clean markdown tables and structured bullet points; never dump raw tool outputs.
    - You have read-only filesystem access and test execution privileges (you do not directly modify source code).
 """
-

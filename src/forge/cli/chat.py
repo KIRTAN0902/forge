@@ -90,12 +90,20 @@ class ChatSessionState:
         self.active_agent: str = default_agent
 
     def cycle_agent(self) -> str:
-        idx = AVAILABLE_AGENTS.index(self.active_agent) if self.active_agent in AVAILABLE_AGENTS else 0
+        idx = (
+            AVAILABLE_AGENTS.index(self.active_agent)
+            if self.active_agent in AVAILABLE_AGENTS
+            else 0
+        )
         self.active_agent = AVAILABLE_AGENTS[(idx + 1) % len(AVAILABLE_AGENTS)]
         return self.active_agent
 
     def cycle_agent_reverse(self) -> str:
-        idx = AVAILABLE_AGENTS.index(self.active_agent) if self.active_agent in AVAILABLE_AGENTS else 0
+        idx = (
+            AVAILABLE_AGENTS.index(self.active_agent)
+            if self.active_agent in AVAILABLE_AGENTS
+            else 0
+        )
         self.active_agent = AVAILABLE_AGENTS[(idx - 1) % len(AVAILABLE_AGENTS)]
         return self.active_agent
 
@@ -167,7 +175,9 @@ def print_skills_table(console: Console) -> None:
 
     console.print()
     console.print(table)
-    console.print("[dim]These skills are autonomously evaluated and activated by ANVIL on matching signals.[/dim]\n")
+    console.print(
+        "[dim]These skills are autonomously evaluated and activated by ANVIL on matching signals.[/dim]\n"
+    )
 
 
 def _get_git_info(root: Path) -> str:
@@ -361,14 +371,16 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
         def _handle_alt_v(event: KeyPressEvent) -> None:
             _handle_ctrl_v(event)
 
-        prompt_style = Style.from_dict({
-            "prompt_brand": "#00e5ff bold",
-            "prompt_bracket": "#64748b",
-            "prompt_agent_orchestrator": "#00e5ff bold",
-            "prompt_agent_planner": "#d946ef bold",
-            "prompt_agent_executor": "#eab308 bold",
-            "prompt_agent_qa": "#10b981 bold",
-        })
+        prompt_style = Style.from_dict(
+            {
+                "prompt_brand": "#00e5ff bold",
+                "prompt_bracket": "#64748b",
+                "prompt_agent_orchestrator": "#00e5ff bold",
+                "prompt_agent_planner": "#d946ef bold",
+                "prompt_agent_executor": "#eab308 bold",
+                "prompt_agent_qa": "#10b981 bold",
+            }
+        )
 
         return PromptSession(
             history=FileHistory(str(history_file)),
@@ -380,9 +392,7 @@ def _create_prompt_session(state: ChatSessionState | None = None) -> Any:
         return None
 
 
-def read_user_input(
-    session: Any, console: Console, state: ChatSessionState | None = None
-) -> str:
+def read_user_input(session: Any, console: Console, state: ChatSessionState | None = None) -> str:
     """Read a line of input from the user with dynamic agent prompt badge."""
     current_state = state or ChatSessionState()
     meta = AGENT_METADATA.get(current_state.active_agent, AGENT_METADATA["orchestrator"])
@@ -556,6 +566,25 @@ async def _run_workflow_turn(
         await harness.aclose()
 
 
+def sanitize_response_for_display(text: str) -> str:
+    """Clean raw internal tool artifacts (line numbers, pagination tags) if regurgitated by LLMs."""
+    if not text:
+        return ""
+    import re
+
+    # 1. Clean raw tool line numbering: e.g. '   1\t# Title' -> '# Title'
+    cleaned = re.sub(r"^[ \t]*\d+\t", "", text, flags=re.MULTILINE)
+    # 2. Clean pagination marker: '[X more lines; use offset=Y]' -> '*(X more lines in file)*'
+    cleaned = re.sub(r"\[(\d+) more lines; use offset=\d+\]", r"*(\1 more lines in file)*", cleaned)
+    # 3. Clean raw read_file header: 'path/file.ext (lines X-Y of Z)' -> '**`path/file.ext`** *(lines X-Y of Z)*'
+    cleaned = re.sub(
+        r"(?m)^([a-zA-Z0-9_\-./\\]+) \(lines (\d+-\d+ of \d+)\)$",
+        r"**`\1`** *(lines \2)*\n",
+        cleaned,
+    )
+    return cleaned
+
+
 async def _run_agent_chat_turn(
     agent_role: str,
     user_input: str | list[ContentPart],
@@ -622,10 +651,13 @@ async def _run_agent_chat_turn(
         )
 
         console.print()
-        console.print(f"[{meta['status_color']}]{meta['icon']} {meta['title']}:[/{meta['status_color']}]")
+        console.print(
+            f"[{meta['status_color']}]{meta['icon']} {meta['title']}:[/{meta['status_color']}]"
+        )
         from rich.markdown import Markdown
 
-        console.print(Markdown(turn.response_text))
+        display_text = sanitize_response_for_display(turn.response_text)
+        console.print(Markdown(display_text))
         console.print()
 
         updated_history = list(turn.messages)
@@ -745,31 +777,41 @@ def run_chat_session(path: Path = Path(".")) -> None:
         if lower_input in {"/anvil", "/orchestrator", "/orch", "/planner", "/plan"}:
             session_state.set_agent("orchestrator")
             meta = AGENT_METADATA["orchestrator"]
-            console.print(f"[bold cyan]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold cyan] [dim]({meta['description']})[/dim]\n")
+            console.print(
+                f"[bold cyan]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold cyan] [dim]({meta['description']})[/dim]\n"
+            )
             continue
 
         if lower_input in {"/hammer", "/executor", "/exec"}:
             session_state.set_agent("executor")
             meta = AGENT_METADATA["executor"]
-            console.print(f"[bold yellow]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold yellow] [dim]({meta['description']})[/dim]\n")
+            console.print(
+                f"[bold yellow]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold yellow] [dim]({meta['description']})[/dim]\n"
+            )
             continue
 
         if lower_input in {"/temper", "/qa", "/audit"}:
             session_state.set_agent("qa")
             meta = AGENT_METADATA["qa"]
-            console.print(f"[bold green]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold green] [dim]({meta['description']})[/dim]\n")
+            console.print(
+                f"[bold green]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold green] [dim]({meta['description']})[/dim]\n"
+            )
             continue
 
         if lower_input.startswith("/search"):
             query_part = user_input[7:].strip()
             if query_part:
                 from forge.tools.web_search import WebSearch, WebSearchInput
+
                 search_tool = WebSearch()
                 env = create_environment(load_config(path), root=path)
-                with console.status(f"[bold cyan]🔍 Searching the web for '{query_part}'...[/bold cyan]"):
+                with console.status(
+                    f"[bold cyan]🔍 Searching the web for '{query_part}'...[/bold cyan]"
+                ):
                     search_res = _run_async(search_tool.run(WebSearchInput(query=query_part), env))
                 console.print()
                 from rich.markdown import Markdown
+
                 console.print(Markdown(search_res.render()))
                 console.print()
             else:
@@ -794,16 +836,24 @@ def run_chat_session(path: Path = Path(".")) -> None:
             parts = user_input.split()
             if len(parts) > 1 and session_state.set_agent(parts[1]):
                 meta = AGENT_METADATA[session_state.active_agent]
-                console.print(f"[bold {meta['color']}]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold {meta['color']}] [dim]({meta['description']})[/dim]\n")
+                console.print(
+                    f"[bold {meta['color']}]✔ Switched active agent to: {meta['icon']} {meta['title']}[/bold {meta['color']}] [dim]({meta['description']})[/dim]\n"
+                )
             else:
                 curr_meta = AGENT_METADATA[session_state.active_agent]
-                console.print(f"\n[bold]Current Active Agent:[/bold] [bold {curr_meta['color']}]{curr_meta['icon']} {curr_meta['title']}[/bold {curr_meta['color']}] [dim]({curr_meta['description']})[/dim]")
-                console.print("[dim]Tip: Press [bold cyan]Tab[/bold cyan] at the prompt to cycle agents, or use:[/dim]")
+                console.print(
+                    f"\n[bold]Current Active Agent:[/bold] [bold {curr_meta['color']}]{curr_meta['icon']} {curr_meta['title']}[/bold {curr_meta['color']}] [dim]({curr_meta['description']})[/dim]"
+                )
+                console.print(
+                    "[dim]Tip: Press [bold cyan]Tab[/bold cyan] at the prompt to cycle agents, or use:[/dim]"
+                )
                 for a_name in AVAILABLE_AGENTS:
                     m = AGENT_METADATA[a_name]
                     prefix = "●" if a_name == session_state.active_agent else "•"
                     cmd_name = f"/{m['title'].lower()}"
-                    console.print(f"  {prefix} [bold {m['color']}]{cmd_name:<10}[/bold {m['color']}] - {m['description']}")
+                    console.print(
+                        f"  {prefix} [bold {m['color']}]{cmd_name:<10}[/bold {m['color']}] - {m['description']}"
+                    )
                 console.print()
             continue
 
@@ -928,7 +978,10 @@ def run_chat_session(path: Path = Path(".")) -> None:
                 console.print()
                 for cf in c_files:
                     console.print(cf.render_panel())
-                query = query_arg or f"Please analyze the attached files: {', '.join(f.path.name for f in c_files)}."
+                query = (
+                    query_arg
+                    or f"Please analyze the attached files: {', '.join(f.path.name for f in c_files)}."
+                )
                 turn_content, _ = build_turn_content(query, c_files)
                 try:
                     conversation_history, wid = _run_async(
@@ -979,7 +1032,10 @@ def run_chat_session(path: Path = Path(".")) -> None:
             if att is not None and att.is_image:
                 console.print()
                 console.print(att.render_panel())
-                query = query_arg or "Please inspect this image and diagnose any problems or key features."
+                query = (
+                    query_arg
+                    or "Please inspect this image and diagnose any problems or key features."
+                )
                 turn_content, _ = build_turn_content(query, [att])
                 try:
                     conversation_history, wid = _run_async(
@@ -1054,7 +1110,9 @@ def run_chat_session(path: Path = Path(".")) -> None:
             target_file = parts[0] if parts else ""
             query_arg = parts[1] if len(parts) > 1 else ""
 
-            target_path = Path(target_file) if Path(target_file).is_absolute() else path / target_file
+            target_path = (
+                Path(target_file) if Path(target_file).is_absolute() else path / target_file
+            )
             if target_file and target_path.is_file():
                 att = create_attachment_from_file(target_path)
                 if att is not None:
