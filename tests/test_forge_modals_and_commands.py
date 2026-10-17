@@ -289,3 +289,83 @@ def test_usage_dashboard_aggregation_by_provider_and_model(tmp_path: Path) -> No
     assert "ollama" in dashboard
     assert "qwen2.5-coder:7b" in dashboard
     assert "$0.0000" in dashboard
+
+
+def test_models_menu_search_filtering_and_navigation(tmp_path: Path) -> None:
+    """7. Verify search option in models menu filters models in real-time, supports keyboard navigation, and binds correctly."""
+    config_file = tmp_path / "config.json"
+    manager = ForgeConfigManager(config_path=config_file, probe_ollama=False)
+    state = ForgeTUIState()
+    controller = ForgeCycleController(state=state, config_manager=manager)
+    app = ForgeSplitPaneApp(state=state, controller=controller)
+    mm = app.modal_manager
+
+    # Connect Gemini and OpenRouter
+    manager.set_api_key(ProviderName.GEMINI, "AIzaSyTestKey")
+    manager.set_api_key(ProviderName.OPENROUTER, "sk-or-test-key")
+
+    # Open models modal
+    mm.open_models_modal()
+    assert mm.is_open is True
+    assert mm.current_modal.value == "models"
+    assert len(mm.cached_aggregated_models) > 0
+
+    # Initial unfiltered view
+    initial_count = len(mm.cached_aggregated_models)
+    assert len(mm.filtered_models) == initial_count
+
+    # Activate search input mode
+    mm.input_mode = "model_search"
+    mm.input_buffer.text = "claude"
+    assert mm.model_search_query == "claude"
+
+    # Filtered models must contain only models matching "claude"
+    filtered = mm.filtered_models
+    assert len(filtered) > 0
+    assert len(filtered) < initial_count
+    for prov, model_name in filtered:
+        target = f"{prov.value}/{model_name}".lower()
+        assert "claude" in target
+
+    # Rendered output must show search indicator and match count
+    frags = mm._render_models_modal()
+    rendered_text = "".join(t for _, t in frags)
+    assert "🔍 SEARCHING" in rendered_text
+    assert 'Query: "claude"' in rendered_text
+    assert "claude" in rendered_text.lower()
+    assert "gemini-2.5-pro" not in rendered_text  # Non-matching model must not appear
+
+    # Up/Down navigation within filtered models
+    mm.model_index = 0
+    count = len(mm.filtered_models)
+    mm.model_index = (mm.model_index + 1) % count
+    assert mm.model_index == (1 % count)
+
+    # Enter binds the filtered model to active stage (Anvil)
+    expected_prov, expected_model = mm.filtered_models[mm.model_index]
+    expected_spec = f"{expected_prov.value}/{expected_model}"
+    mm._handle_input_enter()
+
+    assert mm.input_mode is None
+    assert manager.binding_for("anvil").spec_string == expected_spec  # type: ignore[union-attr]
+    assert f"Bound ANVIL ➔ {expected_spec}" in mm.status_message
+
+    # Clear search filter resets back to full list
+    mm.model_search_query = "claude"
+    mm._setup_keybindings()
+    # Simulate pressing 'c' to clear search
+    mm.model_search_query = ""
+    mm.input_buffer.text = ""
+    assert len(mm.filtered_models) == initial_count
+
+    # Test opening models modal with initial search query
+    mm.open_models_modal(initial_search="flash")
+    assert mm.model_search_query == "flash"
+    assert mm.input_mode == "model_search"
+    assert all("flash" in f"{p.value}/{m}".lower() for p, m in mm.filtered_models)
+
+    # Test closing modal
+    mm.close_modal()
+    assert mm.is_open is False
+    assert mm.model_search_query == ""
+

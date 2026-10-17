@@ -109,6 +109,7 @@ class ForgeModalManager:
         self.target_role_index: int = 0  # 0: Anvil, 1: Hammer, 2: Temper, 3: All
         self.model_index: int = 0
         self.cached_aggregated_models: list[tuple[ProviderName, str]] = []
+        self.model_search_query: str = ""
 
         # Resume modal state
         self.resume_index: int = 0
@@ -120,6 +121,7 @@ class ForgeModalManager:
 
         # Text input buffer for modal forms
         self.input_buffer = Buffer(multiline=False)
+        self.input_buffer.on_text_changed += self._on_input_text_changed
 
         # Build prompt_toolkit controls and windows
         self.modal_kb = KeyBindings()
@@ -224,9 +226,15 @@ class ForgeModalManager:
             self._config_manager = ForgeConfigManager()
         return self._config_manager
 
-    def _create_task(self, coro: Any) -> asyncio.Task[Any]:
+    def _create_task(self, coro: Any) -> asyncio.Task[Any] | None:
         """Spawn background task and keep strong reference to prevent GC."""
-        task = asyncio.create_task(coro)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if hasattr(coro, "close"):
+                coro.close()
+            return None
+        task = loop.create_task(coro)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return task
@@ -243,13 +251,29 @@ class ForgeModalManager:
         self._focus_body()
         self._invalidate()
 
-    def open_models_modal(self) -> None:
+    def _on_input_text_changed(self, buf: Buffer) -> None:
+        """Handle real-time search typing inside the input buffer."""
+        if self.current_modal == ModalType.MODELS and self.input_mode == "model_search":
+            self.model_search_query = buf.text
+            self.model_index = 0
+            self._invalidate()
+
+    def open_models_modal(self, initial_search: str = "") -> None:
         """Open the interactive Multi-Provider Stage Model Selector Matrix."""
         self.current_modal = ModalType.MODELS
         self.model_index = 0
+        self.model_search_query = initial_search.strip()
         self.status_message = ""
         self.refresh_aggregated_models()
-        self._focus_body()
+        if initial_search:
+            self.input_mode = "model_search"
+            self.input_buffer.text = self.model_search_query
+            self.input_buffer.cursor_position = len(self.input_buffer.text)
+            self._focus_input()
+        else:
+            self.input_mode = None
+            self.input_buffer.text = ""
+            self._focus_body()
         self._invalidate()
         # Query live endpoints asynchronously to discover models
         self._create_task(self._query_live_models_async())
@@ -276,6 +300,7 @@ class ForgeModalManager:
         self.input_mode = None
         self.status_message = ""
         self.input_buffer.text = ""
+        self.model_search_query = ""
         with contextlib.suppress(Exception):
             self.app.application.layout.focus(self.app.input_window)
         self._invalidate()
@@ -292,7 +317,22 @@ class ForgeModalManager:
         with contextlib.suppress(Exception):
             self.app.application.invalidate()
 
-    # -- model aggregation --------------------------------------------------------------
+    # -- model aggregation & search -----------------------------------------------------
+
+    @property
+    def filtered_models(self) -> list[tuple[ProviderName, str]]:
+        """Return cached aggregated models filtered by model_search_query."""
+        if not self.model_search_query:
+            return self.cached_aggregated_models
+        terms = [t for t in self.model_search_query.lower().split() if t]
+        if not terms:
+            return self.cached_aggregated_models
+        results: list[tuple[ProviderName, str]] = []
+        for prov, name in self.cached_aggregated_models:
+            target = f"{prov.value}/{name}".lower()
+            if all(t in target for t in terms):
+                results.append((prov, name))
+        return results
 
     def refresh_aggregated_models(self) -> None:
         """Combine all models from every connected provider."""
@@ -305,8 +345,9 @@ class ForgeModalManager:
                 for m in cfg.available_models:
                     aggregated.append((p, m))
         self.cached_aggregated_models = aggregated
-        if self.model_index >= len(self.cached_aggregated_models):
-            self.model_index = max(0, len(self.cached_aggregated_models) - 1)
+        models = self.filtered_models
+        if self.model_index >= len(models):
+            self.model_index = max(0, len(models) - 1)
 
     async def _query_live_models_async(self) -> None:
         """Asynchronously query live endpoints of connected providers."""
@@ -343,7 +384,7 @@ class ForgeModalManager:
             if self.current_modal == ModalType.PROVIDER:
                 self.provider_index = (self.provider_index - 1) % len(self.provider_order)
             elif self.current_modal == ModalType.MODELS:
-                count = max(1, len(self.cached_aggregated_models))
+                count = max(1, len(self.filtered_models))
                 self.model_index = (self.model_index - 1) % count
             elif self.current_modal == ModalType.RESUME:
                 count = max(1, len(self.cached_sessions))
@@ -355,7 +396,7 @@ class ForgeModalManager:
             if self.current_modal == ModalType.PROVIDER:
                 self.provider_index = (self.provider_index + 1) % len(self.provider_order)
             elif self.current_modal == ModalType.MODELS:
-                count = max(1, len(self.cached_aggregated_models))
+                count = max(1, len(self.filtered_models))
                 self.model_index = (self.model_index + 1) % count
             elif self.current_modal == ModalType.RESUME:
                 count = max(1, len(self.cached_sessions))
@@ -403,6 +444,26 @@ class ForgeModalManager:
 
             _bind_num()
 
+        @kb.add("/")
+        @kb.add("s")
+        @kb.add("c-f")
+        def _start_search(event: KeyPressEvent) -> None:
+            if self.current_modal == ModalType.MODELS:
+                self.input_mode = "model_search"
+                self.input_buffer.text = self.model_search_query
+                self.input_buffer.cursor_position = len(self.input_buffer.text)
+                self._focus_input()
+                self._invalidate()
+
+        @kb.add("c")
+        def _clear_search(event: KeyPressEvent) -> None:
+            if self.current_modal == ModalType.MODELS and self.model_search_query:
+                self.model_search_query = ""
+                self.input_buffer.text = ""
+                self.model_index = 0
+                self.status_message = "Search filter cleared."
+                self._invalidate()
+
         @kb.add("enter")
         def _enter(event: KeyPressEvent) -> None:
             self._handle_enter()
@@ -417,13 +478,46 @@ class ForgeModalManager:
                 if self.app.controller:
                     self._create_task(self.app.controller.refresh_models())
                 self._invalidate()
+            elif self.current_modal == ModalType.MODELS and self.model_search_query:
+                self.model_search_query = ""
+                self.input_buffer.text = ""
+                self.model_index = 0
+                self.status_message = "Search filter cleared."
+                self._invalidate()
 
         @kb.add("escape")
         def _esc(event: KeyPressEvent) -> None:
-            self.close_modal()
+            if self.current_modal == ModalType.MODELS and self.model_search_query:
+                self.model_search_query = ""
+                self.input_buffer.text = ""
+                self.model_index = 0
+                self.status_message = "Search filter cleared."
+                self._invalidate()
+            else:
+                self.close_modal()
 
         # Keybindings for input field
         in_kb = self.input_kb
+
+        @in_kb.add("up")
+        def _in_up(event: KeyPressEvent) -> None:
+            if self.current_modal == ModalType.MODELS:
+                count = max(1, len(self.filtered_models))
+                self.model_index = (self.model_index - 1) % count
+                self._invalidate()
+
+        @in_kb.add("down")
+        def _in_down(event: KeyPressEvent) -> None:
+            if self.current_modal == ModalType.MODELS:
+                count = max(1, len(self.filtered_models))
+                self.model_index = (self.model_index + 1) % count
+                self._invalidate()
+
+        @in_kb.add("tab")
+        def _in_tab(event: KeyPressEvent) -> None:
+            if self.current_modal == ModalType.MODELS:
+                self.target_role_index = (self.target_role_index + 1) % len(STAGE_ROLES)
+                self._invalidate()
 
         @in_kb.add("enter")
         def _in_enter(event: KeyPressEvent) -> None:
@@ -432,7 +526,6 @@ class ForgeModalManager:
         @in_kb.add("escape")
         def _in_esc(event: KeyPressEvent) -> None:
             self.input_mode = None
-            self.input_buffer.text = ""
             self._focus_body()
             self._invalidate()
 
@@ -454,9 +547,12 @@ class ForgeModalManager:
             self._invalidate()
 
         elif self.current_modal == ModalType.MODELS:
-            if not self.cached_aggregated_models:
+            models = self.filtered_models
+            if not models:
                 return
-            prov, model_name = self.cached_aggregated_models[self.model_index]
+            if self.model_index >= len(models):
+                self.model_index = max(0, len(models) - 1)
+            prov, model_name = models[self.model_index]
             role_target, _ = STAGE_ROLES[self.target_role_index]
             spec = f"{prov.value}/{model_name}"
 
@@ -490,13 +586,32 @@ class ForgeModalManager:
 
     def _handle_input_enter(self) -> None:
         """Handle Enter key pressed inside the modal text input field."""
-        text = self.input_buffer.text.strip()
-        prov = self.active_provider_target
+        if self.input_mode == "model_search":
+            models = self.filtered_models
+            if models:
+                if self.model_index >= len(models):
+                    self.model_index = max(0, len(models) - 1)
+                prov, model_name = models[self.model_index]
+                role_target, _ = STAGE_ROLES[self.target_role_index]
+                spec = f"{prov.value}/{model_name}"
 
-        if self.input_mode == "api_key" and prov is not None:
+                self.config_manager.set_stage_model(role_target, spec)
+                self.status_message = f"✔ Bound {role_target.upper()} ➔ {spec} (Live Active)"
+
+                if self.app.controller:
+                    self._create_task(self._activate_model_live(role_target, prov.value, model_name))
+            self.input_mode = None
+            self._focus_body()
+            self._invalidate()
+            return
+
+        text = self.input_buffer.text.strip()
+        target_prov = self.active_provider_target
+
+        if self.input_mode == "api_key" and target_prov is not None:
             if text:
-                self.config_manager.set_api_key(prov, text)
-                self.status_message = f"✔ Saved API key for {PROVIDER_DISPLAY_NAMES[prov]}."
+                self.config_manager.set_api_key(target_prov, text)
+                self.status_message = f"✔ Saved API key for {PROVIDER_DISPLAY_NAMES[target_prov]}."
                 if self.app.controller:
                     self._create_task(self.app.controller.refresh_models())
             self.input_mode = None
@@ -504,19 +619,19 @@ class ForgeModalManager:
             self._focus_body()
             self._invalidate()
 
-        elif self.input_mode == "custom_url" and prov is not None:
+        elif self.input_mode == "custom_url" and target_prov is not None:
             if text:
-                self.config_manager.set_base_url(prov, text)
+                self.config_manager.set_base_url(target_prov, text)
             # Switch to prompting for custom API key
             self.input_mode = "custom_key"
-            self.input_buffer.text = self.config_manager.api_key_for(prov) or ""
+            self.input_buffer.text = self.config_manager.api_key_for(target_prov) or ""
             self._focus_input()
             self._invalidate()
 
-        elif self.input_mode == "custom_key" and prov is not None:
+        elif self.input_mode == "custom_key" and target_prov is not None:
             if text:
-                self.config_manager.set_api_key(prov, text)
-            self.status_message = f"✔ Custom provider configured at {self.config_manager.provider(prov).base_url}."
+                self.config_manager.set_api_key(target_prov, text)
+            self.status_message = f"✔ Custom provider configured at {self.config_manager.provider(target_prov).base_url}."
             if self.app.controller:
                 self._create_task(self.app.controller.refresh_models())
             self.input_mode = None
@@ -524,9 +639,9 @@ class ForgeModalManager:
             self._focus_body()
             self._invalidate()
 
-        elif self.input_mode == "ollama_url" and prov is not None:
+        elif self.input_mode == "ollama_url" and target_prov is not None:
             if text:
-                self.config_manager.set_base_url(prov, text)
+                self.config_manager.set_base_url(target_prov, text)
             self.status_message = f"✔ Ollama endpoint updated to {text}."
             if self.app.controller:
                 self._create_task(self.app.controller.refresh_models())
@@ -559,6 +674,8 @@ class ForgeModalManager:
             return [("class:modal_prompt", " API Key (optional for local): ")]
         if self.input_mode == "ollama_url":
             return [("class:modal_prompt", " Ollama Base URL: ")]
+        if self.input_mode == "model_search":
+            return [("class:modal_prompt", " 🔍 Search / Filter models: ")]
         return [("class:modal_prompt", " Input: ")]
 
     def _render_body(self) -> StyleAndTextTuples:
@@ -650,13 +767,43 @@ class ForgeModalManager:
         frags.append(("", "\n"))
         frags.append(("class:border", "─" * 82 + "\n"))
 
-        frags.append(("class:modal_hint", " Aggregated Models from Connected Providers:\n"))
-        models = self.cached_aggregated_models
-        if not models:
-            frags.append(("class:modal_hint", "   (No connected providers or models found)\n"))
+        # Search Bar Display
+        total_count = len(self.cached_aggregated_models)
+        models = self.filtered_models
+        filtered_count = len(models)
+
+        if self.input_mode == "model_search":
+            search_badge = " [🔍 SEARCHING] "
+            search_text = f"Query: \"{self.model_search_query}\" ({filtered_count}/{total_count} models) - type query below"
+            frags.append(("class:modal_tab_active", search_badge))
+            frags.append(("class:modal_prompt", f" {search_text}\n"))
+        elif self.model_search_query:
+            search_badge = " [🔍 FILTERED] "
+            search_text = f"Query: \"{self.model_search_query}\" ({filtered_count}/{total_count} models) - [/] to edit, [c] to clear"
+            frags.append(("class:modal_tab_active", search_badge))
+            frags.append(("class:modal_prompt", f" {search_text}\n"))
         else:
-            visible_window = 7
-            start = max(0, min(self.model_index - 3, len(models) - visible_window))
+            frags.append(
+                (
+                    "class:modal_hint",
+                    f" Models ({total_count} available)  │  Press [/] or [s] to search & filter models\n",
+                )
+            )
+        frags.append(("class:border", "─" * 82 + "\n"))
+
+        if not models:
+            if self.model_search_query:
+                frags.append(
+                    (
+                        "class:modal_hint",
+                        f"   (No models matching '{self.model_search_query}'. Press [c] or [Esc] to clear search)\n",
+                    )
+                )
+            else:
+                frags.append(("class:modal_hint", "   (No connected providers or models found)\n"))
+        else:
+            visible_window = 6
+            start = max(0, min(self.model_index - 2, len(models) - visible_window))
             end = min(len(models), start + visible_window)
 
             for idx in range(start, end):
@@ -665,7 +812,11 @@ class ForgeModalManager:
                 marker = ">" if is_sel else " "
                 badge = f"[{prov.value}]"
                 line_style = "class:modal_item_selected" if is_sel else "class:modal_item"
-                badge_style = f"class:{prov.value}" if prov.value in {"anvil", "hammer", "temper"} else "class:modal_badge"
+                badge_style = (
+                    f"class:{prov.value}"
+                    if prov.value in {"anvil", "hammer", "temper"}
+                    else "class:modal_badge"
+                )
 
                 frags.append((line_style, f" {marker} "))
                 frags.append((badge_style, f"{badge:<14} "))
@@ -677,12 +828,14 @@ class ForgeModalManager:
         else:
             frags.append(("class:border", "─" * 82 + "\n"))
 
-        frags.append(
-            (
-                "class:modal_footer",
-                " [←/→/Tab/1-4] Target Role │ [↑/↓] Select Model │ [Enter] Bind │ [Esc] Done\n",
-            )
-        )
+        if self.input_mode == "model_search":
+            footer = " [Type] Filter Query │ [↑/↓] Select │ [Tab] Target Role │ [Enter] Bind │ [Esc] Finish Search\n"
+        elif self.model_search_query:
+            footer = " [←/→/Tab/1-4] Role │ [↑/↓] Select │ [/] Edit Search │ [c] Clear │ [Enter] Bind │ [Esc] Done\n"
+        else:
+            footer = " [←/→/Tab/1-4] Role │ [↑/↓] Select │ [/] Search Models │ [Enter] Bind │ [Esc] Done\n"
+
+        frags.append(("class:modal_footer", footer))
         return frags
 
     def _render_resume_modal(self) -> StyleAndTextTuples:

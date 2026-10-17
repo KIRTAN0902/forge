@@ -477,6 +477,8 @@ class ForgeSplitPaneApp:
                 "modal_prompt": "#00e5ff bold",
                 "modal_input_field": "bg:#1e293b #ffffff bold",
                 "modal_footer": "#64748b italic",
+                "modal_search_active": "#38bdf8 bold",
+                "modal_search_hint": "#64748b italic",
             }
         )
 
@@ -516,7 +518,21 @@ class ForgeSplitPaneApp:
         return "Opened Provider Connection Manager modal."
 
     async def _choose_model_wizard(self, _stage: str | None = None) -> str:
-        self.modal_manager.open_models_modal()
+        search_query = ""
+        if _stage:
+            stage_clean = _stage.lower().strip()
+            role_indices = {
+                "anvil": 0, "orchestrator": 0, "1": 0,
+                "hammer": 1, "executor": 1, "2": 1,
+                "temper": 2, "qa": 2, "3": 2,
+                "all": 3, "4": 3,
+            }
+            if stage_clean in role_indices:
+                self.modal_manager.open_models_modal()
+                self.modal_manager.target_role_index = role_indices[stage_clean]
+                return "Opened Multi-Provider Stage Model Matrix modal."
+            search_query = _stage
+        self.modal_manager.open_models_modal(initial_search=search_query)
         return "Opened Multi-Provider Stage Model Matrix modal."
 
     async def _resume_session_wizard(self) -> str:
