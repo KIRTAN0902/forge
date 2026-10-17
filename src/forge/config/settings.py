@@ -375,11 +375,14 @@ class ForgeConfigManager:
         for name, key in (data.get("api_keys") or {}).items():
             if name in ProviderName._value2member_map_ and isinstance(key, str):
                 provider = ProviderName(name)
-                self.providers[provider].api_key = key
-                self._api_keys[name] = key
+                clean_key = key.strip()
+                if provider is ProviderName.NVIDIA and clean_key.startswith("vapi-"):
+                    clean_key = "n" + clean_key
+                self.providers[provider].api_key = clean_key
+                self._api_keys[name] = clean_key
                 env_var = self.providers[provider].api_key_env
-                if env_var and key:
-                    os.environ[env_var] = key
+                if env_var and clean_key:
+                    os.environ[env_var] = clean_key
 
         for name, override in (data.get("provider_overrides") or {}).items():
             if name not in ProviderName._value2member_map_ or not isinstance(override, dict):
@@ -448,12 +451,15 @@ class ForgeConfigManager:
         is pointed at this provider's default model so the user immediately has a live model.
         """
         name = ProviderName(provider)
+        clean_key = api_key.strip()
+        if name is ProviderName.NVIDIA and clean_key.startswith("vapi-"):
+            clean_key = "n" + clean_key
         cfg = self.providers[name]
-        cfg.api_key = api_key
-        self._api_keys[name.value] = api_key
+        cfg.api_key = clean_key
+        self._api_keys[name.value] = clean_key
         if cfg.api_key_env:
-            os.environ[cfg.api_key_env] = api_key
-            self._base_env[cfg.api_key_env] = api_key
+            os.environ[cfg.api_key_env] = clean_key
+            self._base_env[cfg.api_key_env] = clean_key
         for stage in STAGES:
             current = self.bindings.get(stage)
             if current is None or not self._usable(current):

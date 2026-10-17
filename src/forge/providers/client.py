@@ -100,21 +100,26 @@ class UnifiedLLMClient:
     # -- resolution helpers --------------------------------------------------------------
 
     def api_key(self, provider: ProviderName) -> str | None:
+        key: str | None = None
         if self._api_key_resolver is not None:
             key = self._api_key_resolver(provider)
-            if key:
-                return key
-        env_var = DEFAULT_PROVIDERS[provider].api_key_env
-        if env_var:
-            key = os.environ.get(env_var) or self._env.get(env_var)
-            if key:
-                return key
-        try:
-            from forge.config.settings import ForgeConfigManager
+        if not key:
+            env_var = DEFAULT_PROVIDERS[provider].api_key_env
+            if env_var:
+                key = os.environ.get(env_var) or self._env.get(env_var)
+        if not key:
+            try:
+                from forge.config.settings import ForgeConfigManager
 
-            return ForgeConfigManager().api_key_for(provider)
-        except Exception:
-            return None
+                key = ForgeConfigManager().api_key_for(provider)
+            except Exception:
+                key = None
+        if key and provider is ProviderName.NVIDIA:
+            clean = key.strip()
+            if clean.startswith("vapi-"):
+                clean = "n" + clean
+            return clean
+        return key.strip() if key else None
 
     def base_url(self, provider: ProviderName) -> str:
         if self._base_url_resolver is not None:
@@ -255,14 +260,17 @@ class UnifiedLLMClient:
     ) -> LLMResponse:
         provider = binding.provider
         url = self.base_url(provider) + "/chat/completions"
+        model_name = binding.model
+        if provider is ProviderName.NVIDIA and "/" not in model_name:
+            model_name = f"nvidia/{model_name}"
         wire = _openai_messages(messages, system_prompt)
         body: dict[str, Any] = {
-            "model": binding.model,
+            "model": model_name,
             "messages": wire,
             "temperature": binding.temperature,
             "max_tokens": binding.max_tokens,
         }
-        result = LLMResponse(model=binding.model, provider=provider.value)
+        result = LLMResponse(model=model_name, provider=provider.value)
         async with self._client() as client:
             if on_token is None:
                 resp = await client.post(
@@ -279,7 +287,7 @@ class UnifiedLLMClient:
                 stream.raise_for_status()
                 async for payload in _iter_sse(stream):
                     _consume_openai_chunk(payload, result, on_token)
-        return result.finish(binding.model, provider)
+        return result.finish(model_name, provider)
 
     async def _gemini(
         self,
