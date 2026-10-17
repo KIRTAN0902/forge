@@ -49,6 +49,7 @@ class ModelRegistry:
             for k, v in (roles or {}).items()
         }
         self.tracker = tracker or UsageTracker()
+        self._custom_env = env is not None
         self._env = os.environ if env is None else env
         self._factories: dict[str, ProviderFactory] = {"openai_compatible": _openai_compatible}
         self._providers: dict[str, ModelProvider] = {}
@@ -112,7 +113,7 @@ class ModelRegistry:
         api_key = config.api_key
         if not api_key and config.api_key_env:
             api_key = self._env.get(config.api_key_env)
-        if not api_key:
+        if not api_key and not self._custom_env:
             try:
                 from forge.config.settings import ForgeConfigManager, ProviderName
 

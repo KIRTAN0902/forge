@@ -590,7 +590,7 @@ class ForgeSplitPaneApp:
         return [
             (
                 "class:hint",
-                "Type a task, question, /provider, /models, /usage, /help, or !shell (Alt+Enter for newline, paste supported)...",
+                "Type a task, question, /provider, /models, /usage, /resume, /restart, /help, or !shell (Alt+Enter for newline, paste supported)...",
             )
         ]
 
