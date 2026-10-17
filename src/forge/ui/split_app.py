@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit.application import Application
+from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
@@ -35,6 +35,7 @@ from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.output import DummyOutput, Output
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
+from rich.console import Console
 
 from forge.ui.state import ForgeStage, ForgeTUIState, format_tokens
 
@@ -62,6 +63,8 @@ _STAGE_DOT: dict[ForgeStage, str] = {
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show the command reference",
     "/status": "Provider/model, connection & token diagnostics",
+    "/provider": "Add/connect a provider (API key + base URL)",
+    "/models": "Choose a model from a connected provider",
     "/model": "List or switch a stage's model",
     "/mode": "Set execution mode: auto | chat | cycle",
     "/cycle": "Force a full Anvil -> Hammer -> Temper cycle",
@@ -245,11 +248,14 @@ class ForgeSplitPaneApp:
         controller: Any = None,
         path: Path | None = None,
         output: Output | None = None,
+        console: Console | None = None,
     ) -> None:
         self.state = state or ForgeTUIState()
         self.path = (path or Path(".")).resolve()
+        self._controller: Any = None
         self.controller = controller
         self.output = create_safe_output(output)
+        self.console = console or Console(legacy_windows=False)
         self._background_task: asyncio.Task[Any] | None = None
         self._spinner_task: asyncio.Task[Any] | None = None
         self._spinner_index = 0
@@ -439,6 +445,47 @@ class ForgeSplitPaneApp:
         # Register state redraw notification
         self.state._on_redraw = self._handle_state_redraw
 
+    @property
+    def controller(self) -> Any:
+        return self._controller
+
+    @controller.setter
+    def controller(self, value: Any) -> None:
+        """Assign the controller and expose the interactive provider/model wizards to it."""
+        self._controller = value
+        if value is not None:
+            value.provider_configurer = self._configure_provider_wizard
+            value.model_picker = self._choose_model_wizard
+
+    # -- interactive provider / model wizards -------------------------------------------
+
+    async def _run_wizard_in_terminal(self, fn: Callable[[], Any]) -> Any:
+        """Temporarily release the full-screen app and run a synchronous CLI wizard."""
+        try:
+            return await run_in_terminal(fn)
+        except Exception as exc:  # pragma: no cover - terminal/permission dependent
+            return f"Wizard unavailable: {exc}"
+
+    async def _configure_provider_wizard(self) -> str:
+        from forge.cli.roles_wizard import run_provider_modal
+
+        result = await self._run_wizard_in_terminal(
+            lambda: run_provider_modal(self.path, self.console)
+        )
+        if isinstance(result, list) and result:
+            return "✔ " + "; ".join(str(change) for change in result)
+        return "Provider configuration cancelled."
+
+    async def _choose_model_wizard(self, _stage: str | None = None) -> str:
+        from forge.cli.roles_wizard import run_models_modal
+
+        result = await self._run_wizard_in_terminal(
+            lambda: run_models_modal(self.path, self.console)
+        )
+        if isinstance(result, list) and result:
+            return "✔ " + "; ".join(str(change) for change in result)
+        return "Model selection cancelled."
+
     # -- helpers ------------------------------------------------------------------------
 
     def _handle_state_redraw(self) -> None:
@@ -479,8 +526,8 @@ class ForgeSplitPaneApp:
         return [
             (
                 "class:hint",
-                f" [{stage} →] Type a message, /command (/help, /model, /cycle, "
-                f"/research), or !shell...",
+                f" [{stage} →] Type a message, /command (/help, /provider, /models, "
+                f"/cycle, /research), or !shell...",
             )
         ]
 

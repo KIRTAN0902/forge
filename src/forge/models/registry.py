@@ -67,6 +67,12 @@ class ModelRegistry:
         self.profiles[name] = profile
         self._capabilities.pop(name, None)
 
+    def configure_providers(self, providers: Mapping[str, ProviderConfig]) -> None:
+        """Merge provider configs (e.g. after a live wizard) and drop stale instances."""
+        self.provider_configs.update(providers)
+        for name in providers:
+            self._providers.pop(name, None)
+
     def bind_role(self, role: str, binding: RoleBinding | str) -> None:
         self.roles[role] = (
             binding if isinstance(binding, RoleBinding) else RoleBinding(model=binding)

@@ -330,8 +330,10 @@ def model_diagnostic(reason: str = "No live LLM model is attached to this sessio
         "(default http://localhost:11434)"
     )
     lines.append("")
-    lines.append("Or switch models live at any time: /model <stage> <provider>/<model>")
-    lines.append("Example: /model anvil openrouter/google/gemini-2.5-flash")
+    lines.append("Or add & choose live at any time:")
+    lines.append("  /provider   add/connect a provider (paste its API key + base URL)")
+    lines.append("  /models     choose a model from a connected provider")
+    lines.append("  /model <stage> <provider>/<model>   e.g. /model anvil openrouter/x/y")
     return "\n".join(lines)
 
 
@@ -367,6 +369,8 @@ class ForgeCycleController:
         research_runner: Callable[[str], Awaitable[str]] | None = None,
         intent_classifier: Callable[[str], ExecutionMode] | None = None,
         max_tool_steps: int = 12,
+        provider_configurer: Callable[[], Awaitable[str]] | None = None,
+        model_picker: Callable[[str | None], Awaitable[str]] | None = None,
     ) -> None:
         self.state = state
         self.router = router
@@ -386,6 +390,9 @@ class ForgeCycleController:
         self.research_runner = research_runner
         self.intent_classifier = intent_classifier
         self.max_tool_steps = max_tool_steps
+        # UI-injected hooks for the interactive provider/model wizards (set by the split-pane app).
+        self.provider_configurer = provider_configurer
+        self.model_picker = model_picker
 
         self.skill_router = AutonomousSkillRouter()
         self.qa_gatekeeper = AdversarialQAGatekeeper()
@@ -1077,9 +1084,13 @@ class ForgeCycleController:
             return self._emit_command_output("/help", self._help_text())
         if command == "/shortcuts":
             return self._emit_command_output("/shortcuts", self._shortcuts_text())
-        if command in {"/status", "/models"} and not argument:
+        if command in {"/status"} and not argument:
             return self._emit_command_output(command, self._status_text())
-        if command in {"/model", "/models"}:
+        if command == "/provider":
+            return await self._handle_provider_command(argument)
+        if command == "/models":
+            return await self._handle_models_command(argument)
+        if command == "/model":
             text = await self._handle_model_command(argument)
             return self._emit_command_output(command, text)
         if command == "/mode":
@@ -1128,6 +1139,84 @@ class ForgeCycleController:
             "  /mode chat   always stay conversational in the active stage\n"
             "  /mode cycle  always force Anvil -> Hammer -> Temper"
         )
+
+    async def _handle_provider_command(self, _argument: str = "") -> str:
+        """Interactively add/connect a provider (reusing the CLI modal wizard)."""
+        if self.provider_configurer is None:
+            return self._emit_command_output(
+                "/provider",
+                "The interactive provider wizard is only available inside the full-screen "
+                "workspace. Run `forge provider` from your terminal to add one, or use "
+                "`/model <stage> <provider>/<model>` for a non-interactive switch.",
+                status="failed",
+            )
+
+        summary = await self.provider_configurer()
+        refresh = await self.refresh_models()
+        return self._emit_command_output("/provider", f"{summary}\n\n{refresh}")
+
+    async def _handle_models_command(self, argument: str) -> str:
+        """Interactively choose a model from a connected provider (reusing the CLI wizard)."""
+        stage_token = argument.strip().lower() or None
+        stage: ForgeStage | None = None
+        if stage_token:
+            stage = _STAGE_ALIASES.get(stage_token)
+            if stage is None:
+                return self._emit_command_output(
+                    "/models",
+                    f"Unknown stage {stage_token!r}. Use one of: anvil | hammer | temper "
+                    "(aliases: orchestrator | executor | qa).",
+                    status="failed",
+                )
+
+        if self.model_picker is None:
+            return self._emit_command_output(
+                "/models",
+                "The interactive model picker is only available inside the full-screen "
+                "workspace. Run `forge models config` from your terminal, or use "
+                "`/model <stage> <provider>/<model>` for a non-interactive switch.",
+                status="failed",
+            )
+
+        summary = await self.model_picker(stage.value if stage else None)
+        refresh = await self.refresh_models()
+        return self._emit_command_output("/models", f"{summary}\n\n{refresh}")
+
+    async def refresh_models(self) -> str:
+        """Reload ``forge.yaml`` and rebuild every stage's adapter in place (no restart)."""
+        if self.registry is None or self.root is None:
+            return "Model configuration saved. Restart Forge to activate the changes."
+
+        from forge.cli.credentials import init_credentials_env
+        from forge.config.loader import load_config
+
+        init_credentials_env()
+        try:
+            config = load_config(self.root)
+        except Exception as exc:
+            return f"Saved, but could not reload the configuration: {exc}"
+
+        self.registry.configure_providers(config.providers)
+        for name, profile in config.models.items():
+            self.registry.add_profile(name, profile)
+        for role, binding in config.roles.items():
+            self.registry.bind_role(role, binding.model)
+
+        lines = ["Live model bindings refreshed:"]
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            agent = self._agent_for(stage)
+            if agent is None:
+                continue
+            try:
+                adapter = await self.registry.adapter(
+                    _STAGE_ROLES[stage], events=getattr(agent, "events", None)
+                )
+            except Exception as exc:
+                lines.append(f"  • {stage.value}: could not rebind ({exc})")
+                continue
+            agent.adapter = adapter
+            lines.append(f"  • {stage.value}: {adapter.describe()}")
+        return "\n".join(lines)
 
     async def _handle_model_command(self, argument: str) -> str:
         """List model bindings, or live-swap a stage's model (``/model <stage> <prov>/<model>``)."""
@@ -1233,6 +1322,8 @@ class ForgeCycleController:
         rows = [
             ("/help", "Show this command reference"),
             ("/status", "Provider/model, connection status, cycle & token telemetry"),
+            ("/provider", "Add/connect a provider (key + base URL) and refresh live"),
+            ("/models [stage]", "Interactively choose a model from a connected provider"),
             ("/model [stage] [prov/model]", "List bindings or live-swap a stage's model"),
             ("/mode [auto|chat|cycle]", "Switch adaptive execution mode"),
             ("/cycle <task> | /forge <task>", "Force a full Anvil -> Hammer -> Temper cycle"),

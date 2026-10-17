@@ -70,6 +70,9 @@ class _FakeRegistry:
     def add_profile(self, name: str, profile: Any) -> None:
         self.profiles[name] = profile
 
+    def configure_providers(self, providers: Any) -> None:
+        self.provider_configs.update(providers)
+
     def bind_role(self, role: str, name: str) -> None:
         self.roles[role] = name
 
@@ -278,6 +281,7 @@ def test_completer_offers_slash_commands() -> None:
         c.text for c in completer.get_completions(Document("/"), CompleteEvent())
     }
     assert set(SLASH_COMMANDS) <= all_completions
+    assert {"/provider", "/models"} <= all_completions
 
 
 def test_completer_stays_quiet_for_plain_text() -> None:
@@ -318,3 +322,106 @@ def test_builtin_providers_expose_api_key_env() -> None:
     for required in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
                      "ANTHROPIC_API_KEY"):
         assert required in envs
+
+
+# -- interactive provider / model wizards ------------------------------------------------
+
+
+async def test_provider_command_invokes_wizard_and_refreshes() -> None:
+    calls: list[str] = []
+
+    async def provider_configurer() -> str:
+        calls.append("provider")
+        return "OpenRouter connected."
+
+    controller = ForgeCycleController(
+        state=ForgeTUIState(),
+        provider_configurer=provider_configurer,
+    )
+
+    result = await controller.handle_slash_command("/provider")
+
+    assert calls == ["provider"]
+    assert "OpenRouter connected." in result
+    # Without a live registry/root the refresh degrades to a restart hint (never fabricated).
+    assert "Restart Forge" in result
+    assert controller.state.stage_buffers[ForgeStage.ANVIL].status == "passed"
+
+
+async def test_models_command_passes_stage_to_picker() -> None:
+    picked: list[str | None] = []
+
+    async def model_picker(stage: str | None) -> str:
+        picked.append(stage)
+        return f"Selected a model for {stage}."
+
+    controller = ForgeCycleController(state=ForgeTUIState(), model_picker=model_picker)
+
+    await controller.handle_slash_command("/models hammer")
+    await controller.handle_slash_command("/models")
+
+    assert picked == ["Hammer", None]
+
+
+async def test_models_command_rejects_unknown_stage() -> None:
+    async def model_picker(_stage: str | None) -> str:  # pragma: no cover - must not run
+        raise AssertionError("picker should not be called for an unknown stage")
+
+    controller = ForgeCycleController(state=ForgeTUIState(), model_picker=model_picker)
+
+    result = await controller.handle_slash_command("/models frobnicate")
+
+    assert "Unknown stage" in result
+    assert controller.state.stage_buffers[ForgeStage.ANVIL].status == "failed"
+
+
+async def test_wizard_commands_guide_without_ui_hooks() -> None:
+    controller = ForgeCycleController(state=ForgeTUIState())
+
+    provider_result = await controller.handle_slash_command("/provider")
+    models_result = await controller.handle_slash_command("/models")
+
+    assert "forge provider" in provider_result
+    assert "forge models config" in models_result
+
+
+async def test_refresh_models_rebinds_every_stage(tmp_path: Any) -> None:
+    import types
+
+    (tmp_path / "forge.yaml").write_text(
+        "version: 1\n"
+        "models:\n"
+        "  shared:\n"
+        "    provider: openai\n"
+        "    model: gpt-4o\n"
+        "    detect_capabilities: false\n"
+        "roles:\n"
+        "  default: {model: shared}\n"
+        "  orchestrator: {model: shared}\n"
+        "  executor: {model: shared}\n"
+        "  qa: {model: shared}\n",
+        encoding="utf-8",
+    )
+
+    agents = {
+        stage: types.SimpleNamespace(adapter=_FakeAdapter("stale"), events=None)
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER)
+    }
+    controller = ForgeCycleController(
+        state=ForgeTUIState(), registry=_FakeRegistry(), root=tmp_path, agents=agents
+    )
+
+    summary = await controller.refresh_models()
+
+    assert "refreshed" in summary.lower()
+    for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+        assert agents[stage].adapter.describe() == "fake://shared"
+
+
+def test_split_app_wires_wizard_hooks() -> None:
+    controller = ForgeCycleController(state=ForgeTUIState())
+    app = ForgeSplitPaneApp(controller=controller)
+
+    assert controller.provider_configurer is not None
+    assert controller.model_picker is not None
+    assert app.console is not None
