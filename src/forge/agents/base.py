@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,9 +10,11 @@ from forge.context.history import compact_history
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
 from forge.models.adapter import ModelAdapter
-from forge.models.types import ContentPart, Message
+from forge.models.types import ContentPart, Message, Usage
 from forge.tools.base import ToolResult
 from forge.tools.runtime import ToolRuntime
+
+ToolResultHandler = Callable[[ToolResult], None]
 
 
 @dataclass
@@ -23,6 +25,12 @@ class AgentLoopOutcome:
     steps: int
     results: list[ToolResult] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    tool_names: list[str] = field(default_factory=list)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.usage.total_tokens
 
 
 @dataclass
@@ -32,6 +40,12 @@ class AgentChatTurn:
     response_text: str
     handoff_requirements: str | None = None
     messages: list[Message] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    tool_names: list[str] = field(default_factory=list)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.usage.total_tokens
 
 
 class BaseAgent:
@@ -70,8 +84,14 @@ class BaseAgent:
         allowed_tools: Sequence[str],
         max_steps: int = 15,
         compact_budget: int | None = None,
+        on_tool_result: ToolResultHandler | None = None,
     ) -> AgentLoopOutcome:
-        """Execute turns using the model and tool runtime until conclusion or max_steps."""
+        """Execute turns using the model and tool runtime until conclusion or max_steps.
+
+        Token usage is accumulated from the real provider ``usage`` metadata returned by
+        every model turn; ``on_tool_result`` is invoked as each real tool finishes so a UI
+        can stream live tool output into its viewport.
+        """
         if self.runtime is None:
             raise RuntimeError(f"Agent {self.role!r} requires a ToolRuntime to execute tools.")
 
@@ -88,6 +108,7 @@ class BaseAgent:
                 conversation = compact_history(conversation, budget)
 
             response = await self.adapter.generate(conversation, tools=definitions)
+            outcome.usage = outcome.usage + response.usage
             conversation.append(response.message)
 
             if not response.tool_calls:
@@ -95,10 +116,14 @@ class BaseAgent:
                 outcome.messages = conversation
                 break
 
+            outcome.tool_names.extend(call.name for call in response.tool_calls)
             results = await self.runtime.execute_many(
                 response.tool_calls, actor=self.role, allowed=allowed
             )
             outcome.results.extend(results)
+            if on_tool_result is not None:
+                for result in results:
+                    on_tool_result(result)
             conversation.extend(ToolRuntime.to_messages(response.tool_calls, results))
             outcome.messages = conversation
         else:
@@ -113,6 +138,8 @@ class BaseAgent:
         *,
         project_context: str = "",
         max_tool_steps: int = 5,
+        allowed_tools: Sequence[str] | None = None,
+        on_tool_result: ToolResultHandler | None = None,
     ) -> AgentChatTurn:
         """Chat with the developer in this agent's specialization."""
         from forge.agents.prompts import (
@@ -141,22 +168,29 @@ class BaseAgent:
                     conversation.append(m)
         conversation.append(Message.user(user_message))
 
-        allowed = ROLE_TOOLSETS.get(self.role, ())
+        allowed = allowed_tools if allowed_tools is not None else ROLE_TOOLSETS.get(self.role, ())
         if self.runtime is not None and allowed:
             active_allowed = [t for t in allowed if t in self.runtime.tools]
             outcome = await self._run_tool_loop(
                 conversation,
                 allowed_tools=active_allowed,
                 max_steps=max_tool_steps,
+                on_tool_result=on_tool_result,
             )
             raw_text = outcome.final_text
             updated_messages = outcome.messages
+            usage = outcome.usage
+            tool_names = outcome.tool_names
         else:
             resp = await self.adapter.generate(conversation)
             raw_text = resp.text
             updated_messages = [*list(conversation), resp.message]
+            usage = resp.usage
+            tool_names = []
 
         return AgentChatTurn(
             response_text=raw_text,
             messages=updated_messages,
+            usage=usage,
+            tool_names=tool_names,
         )

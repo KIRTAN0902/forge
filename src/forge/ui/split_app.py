@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +175,8 @@ class ForgeSplitPaneApp:
         self.controller = controller
         self.output = create_safe_output(output)
         self._background_task: asyncio.Task[Any] | None = None
+        self.bootstrap: Callable[[], Awaitable[None]] | None = None
+        self.close_session: Callable[[], Awaitable[None]] | None = None
 
         # Input buffer
         self.input_buffer = Buffer(multiline=False)
@@ -433,7 +435,7 @@ class ForgeSplitPaneApp:
                 event.app.exit()
                 return
 
-            # Slash commands for dynamic cycle mode
+            # Local mode commands keep the legacy F5/Mode shortcuts working
             if stripped.lower() in {"/single", "/step", "/1"}:
                 self.state.set_cycle_mode(CycleMode.SINGLE_CYCLE)
                 if self.controller and hasattr(self.controller, "set_cycle_mode"):
@@ -452,14 +454,11 @@ class ForgeSplitPaneApp:
                     self.controller.set_cycle_mode(new_m)
                 return
 
-            # Submit prompt to background cycle controller
-            if self.controller is not None:
-                self._background_task = self.application.create_background_task(
-                    self.controller.run_cycle_loop(stripped)
-                )
-            else:
-                # Standalone simulation or test invocation
-                self.state.append_thought(ForgeStage.ANVIL, f"User Goal: {stripped}")
+            # Submit to the adaptive controller with the pinned stage (if any)
+            async def _run_submission() -> None:
+                await self.submit_text(stripped)
+
+            self._background_task = self.application.create_background_task(_run_submission())
 
         @self.kb.add("c-c")
         def _handle_ctrl_c(event: KeyPressEvent) -> None:
@@ -479,13 +478,40 @@ class ForgeSplitPaneApp:
             else:
                 event.app.exit()
 
-        @self.kb.add("c-q")
-        def _handle_ctrl_q(event: KeyPressEvent) -> None:
-            event.app.exit()
+    async def submit_text(self, user_text: str) -> str:
+        """Route a submitted input to the adaptive controller, resolving the pinned stage.
+
+        When the developer has manually pinned a stage in the sidebar (auto-follow off), the
+        turn is routed directly to that stage's agent (e.g. talking to Temper). Otherwise the
+        controller classifies the intent itself.
+        """
+        stage: ForgeStage | None = None
+        if not self.state.auto_follow:
+            stage = self.state.selected_view_stage
+
+        if self.controller is not None:
+            result = await self.controller.run_cycle_loop(user_text, target_stage=stage)
+            if isinstance(result, str):
+                return result
+            return ""
+        # Standalone simulation or test invocation without a controller
+        self.state.append_thought(ForgeStage.ANVIL, f"User Goal: {user_text}")
+        return ""
 
     async def run_async(self) -> None:
-        """Run the full-screen TUI application asynchronously."""
-        await self.application.run_async()
+        """Run the full-screen TUI application asynchronously.
+
+        The optional ``bootstrap`` coroutine builds the live multi-agent session inside this
+        same event loop (so database/browser resources are not bound to a foreign loop), and
+        ``close_session`` tears it down once the UI exits.
+        """
+        if self.bootstrap is not None:
+            await self.bootstrap()
+        try:
+            await self.application.run_async()
+        finally:
+            if self.close_session is not None:
+                await self.close_session()
 
     def run(self) -> None:
         """Run the full-screen TUI application synchronously."""

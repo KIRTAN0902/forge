@@ -105,6 +105,23 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     "ask_user_question",
 )
 
+# Interactive per-agent chat toolset (Claude Code / Codex style ReAct loop).
+# Lets the agent the developer is talking to inspect the repo *and* run safe read/inspect/
+# run commands directly, without spinning up the full Anvil -> Hammer -> Temper cycle.
+INTERACTIVE_SAFE_TOOLS: tuple[str, ...] = (
+    *READ_ONLY_TOOLS,
+    "run_command",
+    "run_tests",
+    "start_process",
+    "process_output",
+    "stop_process",
+    "list_processes",
+)
+
+# The executor is the hands-on pairing agent: it may edit files as well.
+INTERACTIVE_EXECUTOR_TOOLS: tuple[str, ...] = tuple(t.name for t in default_tools())
+
+
 ROLE_TOOLSETS: dict[str, tuple[str, ...]] = {
     # The orchestrator investigates to answer brainstorming questions.
     "orchestrator": READ_ONLY_TOOLS,

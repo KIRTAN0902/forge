@@ -76,14 +76,7 @@ def main_callback(
             run_chat_session(path=path)
             return
 
-        from forge.ui.cycle_controller import ForgeCycleController
-        from forge.ui.split_app import ForgeSplitPaneApp
-        from forge.ui.state import ForgeTUIState
-
-        state = ForgeTUIState()
-        controller = ForgeCycleController(state=state)
-        app_instance = ForgeSplitPaneApp(state=state, controller=controller, path=path)
-        app_instance.run()
+        _launch_split_workspace(path)
 
 
 @app.command("split")
@@ -92,14 +85,163 @@ def split_command(
     path: Annotated[Path, typer.Option(help="Project directory.")] = Path("."),
 ) -> None:
     """Start the persistent full-screen split-pane blacksmithing workspace."""
+    _launch_split_workspace(path)
+
+
+def _launch_split_workspace(path: Path) -> None:
+    """Run the full-screen split-pane workspace with a live session built in its event loop."""
     from forge.ui.cycle_controller import ForgeCycleController
     from forge.ui.split_app import ForgeSplitPaneApp
     from forge.ui.state import ForgeTUIState
 
+    path = path.resolve()
     state = ForgeTUIState()
-    controller = ForgeCycleController(state=state)
+    controller = ForgeCycleController(state=state, root=path)
     app_instance = ForgeSplitPaneApp(state=state, controller=controller, path=path)
+    session: dict[str, Any] = {}
+
+    async def bootstrap() -> None:
+        try:
+            config = _load(path)
+            if not (path / "forge.yaml").is_file() and not (path / ".forge").is_dir():
+                init_project(path)
+                config = _load(path)
+            harness = await _build_tui_harness(config)
+            session["harness"] = harness
+            app_instance.controller = await _build_tui_controller(state, harness, path)
+        except Exception as exc:
+            err_console.print(
+                f"[yellow]Live model session unavailable ({exc}); starting in offline mode.[/yellow]"
+            )
+
+    async def close_session() -> None:
+        harness = session.get("harness")
+        if harness is not None:
+            await harness.aclose()
+
+    app_instance.bootstrap = bootstrap
+    app_instance.close_session = close_session
     app_instance.run()
+
+
+async def _build_tui_harness(config: ForgeConfig) -> Any:
+    """Construct the workflow harness wired for autonomous interactive execution."""
+    from forge.cli.interactive import AutoApprover
+
+    event_bus = EventBus()
+    return await build_workflow_harness(
+        config, approver=AutoApprover(silent=True), event_bus=event_bus
+    )
+
+
+async def _build_tui_controller(state: Any, harness: Any, path: Path) -> Any:
+    """Wire real per-stage agents, live event streaming, and the workflow runner."""
+    from forge.agents import ExecutorAgent, OrchestratorAgent, QAAgent
+    from forge.ui.cycle_controller import ForgeCycleController
+    from forge.ui.state import ForgeStage
+
+    events = harness.events
+    registry = harness.registry
+    runtime = harness.runtime
+
+    anvil = OrchestratorAgent(
+        await registry.adapter("orchestrator", events=events), runtime=runtime, events=events
+    )
+    hammer = ExecutorAgent(
+        await registry.adapter("executor", events=events), runtime=runtime, events=events
+    )
+    temper = QAAgent(await registry.adapter("qa", events=events), runtime=runtime, events=events)
+    agents = {ForgeStage.ANVIL: anvil, ForgeStage.HAMMER: hammer, ForgeStage.TEMPER: temper}
+
+    _install_tui_event_bridge(events, state)
+
+    async def workflow_runner(prompt: str) -> Any:
+        wf_state = WorkflowState(user_request=prompt)
+        return await harness.orchestrator.run(wf_state, auto_mode=True)
+
+    async def research_runner(topic: str) -> str:
+        return await _run_research_pipeline(path, topic)
+
+    project_context = f"Project: {path.name}\nPath: {path.resolve()}"
+    return ForgeCycleController(
+        state=state,
+        runtime=runtime,
+        root=path,
+        project_context=project_context,
+        agents=agents,
+        workflow_runner=workflow_runner,
+        research_runner=research_runner,
+    )
+
+
+def _install_tui_event_bridge(bus: EventBus, state: Any) -> None:
+    """Stream live workflow events into the matching stage viewport buffers."""
+    from forge.ui.state import ForgeStage
+
+    mapping: dict[EventType, Any] = {
+        EventType.REQUIREMENTS_DEFINED: ForgeStage.ANVIL,
+        EventType.PLAN_CREATED: ForgeStage.ANVIL,
+        EventType.PLAN_REVISED: ForgeStage.ANVIL,
+        EventType.DECISION_MADE: ForgeStage.ANVIL,
+        EventType.SKILL_ACTIVATED: ForgeStage.ANVIL,
+        EventType.TASK_STARTED: ForgeStage.HAMMER,
+        EventType.TASK_COMPLETED: ForgeStage.HAMMER,
+        EventType.TASK_FAILED: ForgeStage.HAMMER,
+        EventType.TOOL_COMPLETED: ForgeStage.HAMMER,
+        EventType.FILE_MODIFIED: ForgeStage.HAMMER,
+        EventType.TEST_COMPLETED: ForgeStage.HAMMER,
+        EventType.QA_STARTED: ForgeStage.TEMPER,
+        EventType.QA_FINDING_CREATED: ForgeStage.TEMPER,
+        EventType.QA_COMPLETED: ForgeStage.TEMPER,
+        EventType.REWORK_REQUESTED: ForgeStage.TEMPER,
+    }
+
+    def handler(event: Event) -> None:
+        stage = mapping.get(event.type)
+        if stage is None:
+            return
+        payload = event.payload or {}
+        if event.type == EventType.TOOL_COMPLETED:
+            text = f"Tool: {payload.get('tool')} (ok={payload.get('ok')})"
+        elif event.type == EventType.FILE_MODIFIED:
+            text = f"Modified: {payload.get('path')}"
+        elif event.type == EventType.QA_FINDING_CREATED:
+            text = f"[{payload.get('severity')}] {payload.get('description')}"
+        elif event.type in {EventType.TASK_STARTED, EventType.TASK_COMPLETED, EventType.TASK_FAILED}:
+            text = f"Task {payload.get('task_id')}: {payload.get('status', event.type.value)}"
+        else:
+            text = event.type.value
+        state.append_tool_event(stage, text)
+
+    bus.subscribe(handler)
+
+
+async def _run_research_pipeline(path: Path, topic: str) -> str:
+    """Run the deep research pipeline and return a human-readable artifact summary."""
+    from forge.research.compiler import ManuscriptCompiler
+    from forge.research.harvester import AcademicHarvester, STORMInquiryEngine
+    from forge.research.models import ResearchLedger
+    from forge.research.verifier import ContradictionAnalyzer
+
+    config = load_config(path)
+    harvester = AcademicHarvester()
+    storm = STORMInquiryEngine(harvester)
+    personas = storm.generate_orthogonal_personas(topic)
+    evidence_map, _ = await storm.execute_inquiry_waves(topic, personas, max_waves=2)
+
+    ledger = ResearchLedger(topic=topic, perspectives=personas, evidence_map=evidence_map)
+    ledger.contradictions.extend(ContradictionAnalyzer.analyze_contradictions(ledger))
+
+    compiler = ManuscriptCompiler(config.root)
+    artifacts = compiler.export_artifacts(ledger)
+
+    lines = [
+        f"Deep Research complete for: {topic}",
+        f"Evidence nodes harvested: {len(evidence_map)}",
+        "Generated artifacts:",
+    ]
+    lines.extend(f"  • {name}: {loc}" for name, loc in artifacts.items())
+    return "\n".join(lines)
 
 
 @app.command("chat")

@@ -63,6 +63,7 @@ class StageBuffer:
     stage: ForgeStage
     thoughts: list[str] = field(default_factory=list)
     tool_events: list[str] = field(default_factory=list)
+    chat_history: list[tuple[str, str]] = field(default_factory=list)
     final_output: str = ""
     stage_tokens: int = 0
     scroll_line: int = 0
@@ -125,7 +126,27 @@ class StageBuffer:
             )
         )
 
-        # 2. Thought Process Section
+        # 2. Conversational Transcript (persistent multi-turn chat scrollback)
+        if self.chat_history:
+            console.print()
+            chat_text = Text()
+            for speaker, message in self.chat_history:
+                if speaker.lower() in {"you", "user", "developer"}:
+                    chat_text.append(f"👤 {speaker}: ", style="bold #38bdf8")
+                else:
+                    chat_text.append(f"{stage_icon} {speaker}: ", style=f"bold {stage_color}")
+                chat_text.append(f"{message.strip()}\n\n", style="white")
+
+            console.print(
+                Panel(
+                    chat_text,
+                    title=f"[bold {stage_color}]💬 Conversation[/bold {stage_color}]",
+                    border_style=stage_color,
+                    expand=True,
+                )
+            )
+
+        # 3. Thought Process Section
         if self.thoughts:
             console.print()
             thought_text = Text()
@@ -145,7 +166,7 @@ class StageBuffer:
                 )
             )
 
-        # 3. Tool & Sandbox Execution Section
+        # 4. Tool & Sandbox Execution Section
         if self.tool_events:
             console.print()
             events_text = Text()
@@ -161,7 +182,7 @@ class StageBuffer:
                 )
             )
 
-        # 4. Stage Output / Final Deliverable / Defect Report
+        # 5. Stage Output / Final Deliverable / Defect Report
         if self.final_output:
             console.print()
             if self.stage == ForgeStage.TEMPER and self.status == "passed":
@@ -202,7 +223,7 @@ class StageBuffer:
                     )
                 )
 
-        # 5. Interactive Question Card (when Orchestrator or stage asks user for input)
+        # 6. Interactive Question Card (when Orchestrator or stage asks user for input)
         if pending_question is not None and pending_question.stage == self.stage:
             console.print()
             q_text = Text()
@@ -259,19 +280,47 @@ class ForgeTUIState:
         self.cycle_history: dict[int, dict[ForgeStage, StageBuffer]] = {}
         self._on_redraw: Callable[[], None] | None = None
 
-    def set_active_stage(self, stage: ForgeStage | None) -> None:
-        """Set the stage actively executing work in the background."""
+    def set_active_stage(self, stage: ForgeStage | None, *, reset_tokens: bool = True) -> None:
+        """Set the stage actively executing work in the background.
+
+        ``reset_tokens`` zeroes the stage's turn counter when a new manufacturing stage
+        begins. Conversational / direct-tool turns pass ``reset_tokens=False`` so the
+        sidebar keeps accumulating the real tokens spent across the dialogue.
+        """
         self.active_worker_stage = stage
         if stage is not None:
-            # Reset current-cycle stage token counter to 0 for this stage
-            self.stage_buffers[stage].stage_tokens = 0
-            self.active_stage_tokens = 0
-            self.stage_buffers[stage].status = "running"
+            buffer = self.stage_buffers[stage]
+            if reset_tokens:
+                # Reset current-cycle stage token counter to 0 for this stage
+                buffer.stage_tokens = 0
+            self.active_stage_tokens = buffer.stage_tokens
+            buffer.status = "running"
             if self.auto_follow:
                 self.selected_view_stage = stage
         else:
             # Idle: active_stage_tokens reflects the selected view stage's tokens
             self.active_stage_tokens = self.stage_buffers[self.selected_view_stage].stage_tokens
+        self._notify_redraw()
+
+    def append_chat(self, stage: ForgeStage, speaker: str, text: str) -> None:
+        """Append a turn to a stage's persistent conversational transcript."""
+        self.stage_buffers[stage].chat_history.append((speaker, text))
+        self._notify_redraw()
+
+    def reset_view(self) -> None:
+        """Clear every stage buffer's transcript and reset the cycle view (``/clear``)."""
+        self.cycle_history.clear()
+        self.cycle_count = 1
+        self.viewing_history_cycle = None
+        self.active_worker_stage = None
+        self.active_stage_tokens = 0
+        self.selected_view_stage = ForgeStage.ANVIL
+        self.auto_follow = True
+        self.pending_question = None
+        self.stage_buffers = {
+            stage: StageBuffer(stage=stage)
+            for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER)
+        }
         self._notify_redraw()
 
     def select_view_stage(self, stage: ForgeStage) -> None:

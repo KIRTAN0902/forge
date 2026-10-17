@@ -12,7 +12,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from forge.agents.base import AgentChatTurn, BaseAgent
+from forge.agents.base import AgentChatTurn, BaseAgent, ToolResultHandler
 from forge.agents.prompts import ORCHESTRATOR_CHAT_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
 from forge.context.builder import BuiltContext
 from forge.context.render import render_plan, render_requirements
@@ -21,7 +21,7 @@ from forge.core.contracts.requirements import RequirementContract
 from forge.events.bus import EventBus
 from forge.events.types import EventType
 from forge.models.adapter import ModelAdapter
-from forge.models.types import ContentPart, Message
+from forge.models.types import ContentPart, Message, Usage
 from forge.tools.defaults import READ_ONLY_TOOLS, ROLE_TOOLSETS
 from forge.tools.runtime import ToolRuntime
 
@@ -99,6 +99,8 @@ class OrchestratorAgent(BaseAgent):
         *,
         project_context: str = "",
         max_tool_steps: int = 5,
+        allowed_tools: Sequence[str] | None = None,
+        on_tool_result: ToolResultHandler | None = None,
     ) -> OrchestratorChatTurn:
         """Chat with the developer to brainstorm or synthesize requirements for planning."""
         conversation: list[Message] = []
@@ -119,20 +121,28 @@ class OrchestratorAgent(BaseAgent):
         # 3. Append current user message
         conversation.append(Message.user(user_message))
 
+        usage = Usage()
+        tool_names: list[str] = []
+
         # 4. Run interactive tool loop (read-only tools available for inspecting repo)
         if self.runtime is not None:
-            allowed = [t for t in READ_ONLY_TOOLS if t in self.runtime.tools]
+            requested = allowed_tools if allowed_tools is not None else READ_ONLY_TOOLS
+            allowed = [t for t in requested if t in self.runtime.tools]
             outcome = await self._run_tool_loop(
                 conversation,
                 allowed_tools=allowed,
                 max_steps=max_tool_steps,
+                on_tool_result=on_tool_result,
             )
             raw_text = outcome.final_text
             updated_messages = outcome.messages
+            usage = outcome.usage
+            tool_names = outcome.tool_names
         else:
             resp = await self.adapter.generate(conversation)
             raw_text = resp.text
             updated_messages = [*list(conversation), resp.message]
+            usage = resp.usage
 
         # 5. Extract handoff block if present
         handoff_match = HANDOFF_PATTERN.search(raw_text)
@@ -172,6 +182,8 @@ class OrchestratorAgent(BaseAgent):
             response_text=clean_text,
             handoff_requirements=handoff_requirements,
             messages=updated_messages,
+            usage=usage,
+            tool_names=tool_names,
         )
 
     def _synthesize_from_history(self, history: Sequence[Message] | None, user_trigger: str) -> str:
