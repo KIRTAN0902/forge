@@ -274,7 +274,7 @@ def test_completer_offers_slash_commands() -> None:
     completer = SlashCommandCompleter()
     completions = list(completer.get_completions(Document("/mo"), CompleteEvent()))
     texts = {c.text for c in completions}
-    assert {"/model", "/mode"} <= texts
+    assert {"/models", "/mode"} <= texts
 
     # Every advertised slash command is completable.
     all_completions = {

@@ -194,7 +194,7 @@ async def test_cycle_loop_halts_on_temper_pass_and_loops_on_reject() -> None:
 
 
 def test_stage_buffer_render_to_ansi() -> None:
-    """Verify StageBuffer.render_to_ansi renders header, thoughts, tools, and deliverable."""
+    """Verify StageBuffer.render_to_ansi renders thoughts and tools without redundant header or stage output."""
     state = ForgeTUIState()
     buf = state.stage_buffers[ForgeStage.TEMPER]
     buf.thoughts.append("Performing AST mutation analysis")
@@ -203,11 +203,12 @@ def test_stage_buffer_render_to_ansi() -> None:
     buf.status = "passed"
 
     ansi_text = buf.render_to_ansi(width=80)
-    assert "TEMPER" in ansi_text
+    assert "FORGE // TEMPER" not in ansi_text
+    assert "Stage Output" not in ansi_text
+    assert "Verified Final Output Deliverable" not in ansi_text
     assert "Thought Process" in ansi_text
     assert "Performing AST mutation analysis" in ansi_text
     assert "Tool & Sandbox Execution" in ansi_text
-    assert "Verified Final Output Deliverable" in ansi_text
 
 
 def test_split_pane_app_keybindings_and_controls() -> None:

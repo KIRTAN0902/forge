@@ -20,6 +20,7 @@ import inspect
 import os
 import re
 import sys
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -402,6 +403,9 @@ class ForgeCycleController:
         # UI-injected hooks for the interactive provider/model wizards (set by the split-pane app).
         self.provider_configurer = provider_configurer
         self.model_picker = model_picker
+        self.session_resumer: Callable[[], Awaitable[Any]] | None = None
+        self.usage_viewer: Callable[[], Awaitable[Any]] | None = None
+        self.session_id: str = uuid.uuid4().hex[:12]
         # Persistent provider/model configuration engine + native streaming LLM client.
         self.config_manager = config_manager
         self.llm_client = llm_client
@@ -1115,7 +1119,19 @@ class ForgeCycleController:
         self.state.append_chat(stage, "You", command)
         self.state.append_chat(stage, "Forge", text)
         self.state.set_stage_output(stage, text, status=status)
+        self.auto_save_session()
         return text
+
+    def auto_save_session(self) -> None:
+        """Persist current conversation session globally to ~/.forge/sessions/."""
+        try:
+            from forge.config.session_store import get_session_store
+
+            get_session_store().save_session(
+                self.state, self.session_id, self.root or Path.cwd()
+            )
+        except Exception:
+            pass
 
     async def handle_slash_command(self, raw: str) -> str:
         """Deterministic dispatcher for explicit ``/command`` and ``!shell`` syntax.
@@ -1142,15 +1158,21 @@ class ForgeCycleController:
             return self._emit_command_output(command, self._status_text())
         if command == "/provider":
             return await self._handle_provider_command(argument)
-        if command == "/key":
-            return await self._handle_key_command(argument)
-        if command == "/config":
-            return await self._handle_config_command()
         if command == "/models":
             return await self._handle_models_command(argument)
+        if command == "/usage":
+            return await self._handle_usage_command(argument)
+        if command == "/resume":
+            return await self._handle_resume_command(argument)
+        if command == "/restart":
+            return await self._handle_restart_command()
+        if command == "/key":
+            return await self._handle_key_command(argument)
         if command == "/model":
             text = await self._handle_model_command(argument)
             return self._emit_command_output(command, text)
+        if command == "/config":
+            return await self._handle_config_command()
         if command == "/mode":
             text = (
                 self.set_execution_mode(argument)
@@ -1276,32 +1298,147 @@ class ForgeCycleController:
         manager = self._config_manager()
         return self._emit_command_output("/config", manager.describe())
 
-    async def _handle_models_command(self, argument: str) -> str:
-        """Interactively choose a model from a connected provider (reusing the CLI wizard)."""
-        stage_token = argument.strip().lower() or None
-        stage: ForgeStage | None = None
-        if stage_token:
-            stage = _STAGE_ALIASES.get(stage_token)
-            if stage is None:
+    async def _handle_models_command(self, argument: str = "") -> str:
+        """Interactively choose a model from connected providers, or assign via arguments."""
+        tokens = argument.split()
+        if not tokens:
+            if self.model_picker is None:
                 return self._emit_command_output(
                     "/models",
-                    f"Unknown stage {stage_token!r}. Use one of: anvil | hammer | temper "
-                    "(aliases: orchestrator | executor | qa).",
+                    "The interactive model picker is only available inside the full-screen "
+                    "workspace. Run `forge models config` from your terminal to configure "
+                    "roles, or use `/models <stage> <provider>/<model>` for a non-interactive switch.",
                     status="failed",
                 )
+            summary = await self.model_picker(None)
+            refresh = await self.refresh_models()
+            return self._emit_command_output("/models", f"{summary}\n\n{refresh}")
 
-        if self.model_picker is None:
+        head = tokens[0].lower()
+        if head == "list":
+            provider_token = tokens[1] if len(tokens) > 1 else None
+            text = await self._list_live_models(provider_token)
+            return self._emit_command_output("/models", text)
+        if head == "test":
+            text = await self._test_stage_models()
+            return self._emit_command_output("/models", text)
+
+        if len(tokens) == 1:
+            stage = _STAGE_ALIASES.get(head)
+            if stage is not None:
+                if self.model_picker is not None:
+                    summary = await self.model_picker(stage.value)
+                    refresh = await self.refresh_models()
+                    return self._emit_command_output("/models", f"{summary}\n\n{refresh}")
+                return self._emit_command_output(
+                    "/models",
+                    "The interactive model picker is only available inside the full-screen "
+                    "workspace. Run `forge models config` from your terminal to configure "
+                    "roles, or use `/models <stage> <provider>/<model>` for a non-interactive switch.",
+                    status="failed",
+                )
+            if "/" in tokens[0]:
+                text = await self._apply_model_spec("all", tokens[0])
+                return self._emit_command_output("/models", text)
             return self._emit_command_output(
                 "/models",
-                "The interactive model picker is only available inside the full-screen "
-                "workspace. Run `forge models config` from your terminal, or use "
-                "`/model <stage> <provider>/<model>` for a non-interactive switch.",
+                f"Unknown stage {head!r}. Use one of: anvil | hammer | temper "
+                "(aliases: orchestrator | executor | qa).",
                 status="failed",
             )
 
-        summary = await self.model_picker(stage.value if stage else None)
-        refresh = await self.refresh_models()
-        return self._emit_command_output("/models", f"{summary}\n\n{refresh}")
+        stage = _STAGE_ALIASES.get(head)
+        target = stage.value.lower() if stage else head
+        text = await self._apply_model_spec(target, tokens[1])
+        return self._emit_command_output("/models", text)
+
+    async def _handle_usage_command(self, argument: str = "") -> str:
+        """Display provider-grade API usage and cost telemetry dashboard (``/usage``)."""
+        arg = argument.strip().lower() or "all"
+        if self.usage_viewer is not None and not argument.strip():
+            await self.usage_viewer()
+            return "Opened API Usage & Telemetry Dashboard."
+
+        from forge.config.usage_tracker import get_usage_tracker
+
+        tracker = get_usage_tracker()
+        openrouter_key = None
+        if self.config_manager:
+            openrouter_key = self.config_manager.api_key_for("openrouter")
+        live_credits = None
+        if openrouter_key:
+            from forge.config.usage_tracker import fetch_openrouter_credits
+
+            credits = await fetch_openrouter_credits(openrouter_key)
+            if credits:
+                live_credits = {"openrouter": credits}
+
+        text = tracker.render_dashboard_text(
+            session_id=self.session_id,
+            time_window=arg,
+            live_credits=live_credits,
+        )
+        return self._emit_command_output("/usage", text)
+
+    async def _handle_resume_command(self, argument: str = "") -> str:
+        """Resume conversation from global ~/.forge/sessions/ store (``/resume``)."""
+        arg = argument.strip()
+        from forge.config.session_store import get_session_store
+
+        store = get_session_store()
+        if not arg:
+            if self.session_resumer is not None:
+                await self.session_resumer()
+                return "Opened Global Session Picker modal."
+            sessions = store.list_sessions()
+            if not sessions:
+                return self._emit_command_output(
+                    "/resume", "No past sessions found in global session store (~/.forge/sessions/)."
+                )
+            lines = ["Global Conversation Sessions (~/.forge/sessions/):", ""]
+            lines.append(
+                f"{'SESSION ID':<14} {'LAST ACTIVE':<18} {'TITLE':<32} {'TOKENS':>8} {'CYCLES':>6}"
+            )
+            lines.append("─" * 84)
+            for s in sessions[:15]:
+                ts = s.updated_at[:16].replace("T", " ") if s.updated_at else ""
+                lines.append(
+                    f"{s.session_id:<14} {ts:<18} {s.title[:30]:<32} {s.total_tokens:>8,} {s.cycle_count:>6}"
+                )
+            lines.append("")
+            lines.append("To resume a session, run: /resume <session_id>")
+            return self._emit_command_output("/resume", "\n".join(lines))
+
+        ok = store.restore_session(arg, self.state)
+        if ok:
+            self.session_id = arg
+            text = f"✔ Restored session [{arg}] into live Forge workspace."
+            return self._emit_command_output("/resume", text)
+        return self._emit_command_output(
+            "/resume", f"Session [{arg}] not found in ~/.forge/sessions/.", status="failed"
+        )
+
+    async def _handle_restart_command(self) -> str:
+        """Cleanly flush state, save configuration, and restart Forge workspace (``/restart``)."""
+        from forge.config.session_store import get_session_store
+        from forge.config.usage_tracker import get_usage_tracker
+
+        get_session_store().save_session(self.state, self.session_id, self.root or Path.cwd())
+        get_usage_tracker()._save()
+        if self.config_manager is not None:
+            self.config_manager.save()
+
+        self.state.reset_view()
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return self._emit_command_output("/restart", "Restarting Forge workspace fresh from scratch.")
+
+        try:
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+        except Exception as exc:
+            return self._emit_command_output(
+                "/restart", f"Restart execution failed: {exc}", status="failed"
+            )
+        return "Restarting Forge workspace..."
 
     async def refresh_models(self) -> str:
         """Reload ``forge.yaml`` and rebuild every stage's adapter in place (no restart)."""
@@ -1600,11 +1737,11 @@ class ForgeCycleController:
         rows = [
             ("/help", "Show this command reference"),
             ("/status", "Provider/model, connection status, cycle & token telemetry"),
-            ("/key [prov] [key]", "Show provider auth status, or save an API key"),
-            ("/provider", "Add/connect a provider (key + base URL) and refresh live"),
-            ("/models [stage]", "Interactively choose a model from a connected provider"),
-            ("/model [stage|all] [prov/model]", "List, test or live-swap stage models"),
-            ("/model list|test [prov]", "List a provider's live models or ping every stage"),
+            ("/provider", "Connect, configure or disconnect model providers"),
+            ("/models [stage]", "Assign connected models to Anvil, Hammer, Temper"),
+            ("/usage [all|today|session]", "Provider API usage & cost telemetry dashboard"),
+            ("/resume [session_id]", "Resume past conversation from global session store"),
+            ("/restart", "Cleanly flush state and restart Forge workspace"),
             ("/config", "Show the persistent ~/.forge/config.json (keys masked)"),
             ("/mode [auto|chat|cycle]", "Switch adaptive execution mode"),
             ("/cycle <task> | /forge <task>", "Force a full Anvil -> Hammer -> Temper cycle"),
@@ -1623,9 +1760,9 @@ class ForgeCycleController:
 
     def _shortcuts_text(self) -> str:
         return (
-            "Shortcuts: Alt+1 Anvil | Alt+2 Hammer | Alt+3 Temper | Alt+0 Auto-follow\n"
-            "           F5 Toggle mode | PgUp/PgDn Scroll | Tab Complete | Ctrl+C Cancel "
-            "| Ctrl+Q Exit"
+            "Shortcuts: Alt+1/F1 Anvil | Alt+2/F2 Hammer | Alt+3/F3 Temper | Alt+0/F4 Auto-follow\n"
+            "           F5 Toggle mode | Alt+Left/Right History | PgUp/PgDn Scroll | Tab Complete\n"
+            "           Ctrl+C Cancel Task | Ctrl+Q Exit"
         )
 
     def _provider_key_status(self, provider_name: str) -> tuple[str, str | None]:

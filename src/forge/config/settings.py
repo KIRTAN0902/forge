@@ -46,6 +46,7 @@ class ProviderName(StrEnum):
     NVIDIA = "nvidia"
     DEEPSEEK = "deepseek"
     GROQ = "groq"
+    CUSTOM = "custom"
 
 
 class ModelTier(StrEnum):
@@ -181,6 +182,7 @@ _CURATED_MODELS: dict[ProviderName, list[str]] = {
     ],
     ProviderName.DEEPSEEK: ["deepseek-chat", "deepseek-reasoner"],
     ProviderName.GROQ: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+    ProviderName.CUSTOM: ["custom-model"],
 }
 
 DEFAULT_PROVIDERS: dict[ProviderName, ProviderConfig] = {
@@ -239,6 +241,13 @@ DEFAULT_PROVIDERS: dict[ProviderName, ProviderConfig] = {
         default_model="llama-3.3-70b-versatile",
         api_key_env="GROQ_API_KEY",
         available_models=list(_CURATED_MODELS[ProviderName.GROQ]),
+    ),
+    ProviderName.CUSTOM: ProviderConfig(
+        provider=ProviderName.CUSTOM,
+        base_url="http://localhost:8000/v1",
+        default_model="custom-model",
+        api_key_env="CUSTOM_API_KEY",
+        available_models=list(_CURATED_MODELS[ProviderName.CUSTOM]),
     ),
 }
 
@@ -468,6 +477,42 @@ class ForgeConfigManager:
 
     def binding_for(self, stage: str) -> StageModelBinding | None:
         return self.bindings.get(stage)
+
+    def is_connected(self, provider: ProviderName | str) -> bool:
+        """Check if a provider is connected (has API key or is local Ollama / custom)."""
+        name = ProviderName(provider)
+        cfg = self.providers[name]
+        if name is ProviderName.OLLAMA:
+            return True
+        return bool(cfg.api_key)
+
+    def disconnect_provider(self, provider: ProviderName | str) -> None:
+        """Disconnect a provider, wiping its saved credentials and environment variable."""
+        name = ProviderName(provider)
+        cfg = self.providers[name]
+        cfg.api_key = None
+        if name.value in self._api_keys:
+            del self._api_keys[name.value]
+        if cfg.api_key_env:
+            os.environ.pop(cfg.api_key_env, None)
+            self._base_env.pop(cfg.api_key_env, None)
+        self.save()
+
+    def get_connected_providers(self) -> list[ProviderName]:
+        """Return a list of all currently connected providers."""
+        return [name for name in self.providers if self.is_connected(name)]
+
+    def get_aggregated_models(self) -> list[tuple[ProviderName, str]]:
+        """Return (provider, model) pairs aggregated from all connected providers."""
+        aggregated: list[tuple[ProviderName, str]] = []
+        for name in self.get_connected_providers():
+            cfg = self.providers[name]
+            models = list(cfg.available_models)
+            if cfg.default_model and cfg.default_model not in models:
+                models.insert(0, cfg.default_model)
+            for m in models:
+                aggregated.append((name, m))
+        return aggregated
 
     # -- auto-attachment -----------------------------------------------------------------
 

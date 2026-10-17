@@ -247,15 +247,14 @@ def test_serious_tui_typography_and_no_redundant_stage_box() -> None:
 
     rendered = state.stage_buffers[ForgeStage.TEMPER].render_to_ansi(width=80)
 
-    assert "FORGE // TEMPER" in rendered
+    assert "FORGE // TEMPER" not in rendered
+    assert "── Verified Final Output Deliverable ──" not in rendered
     assert "❯ user" in rendered
     assert "● temper" in rendered
     assert "── Thought Process ──" in rendered
     assert "│ ├─ thought:" in rendered
     assert "── Tool & Sandbox Execution ──" in rendered
     assert "[WARN] coverage below target" in rendered
-    assert "── Verified Final Output Deliverable ──" in rendered
-    assert "Verified deliverable: parser is correct." in rendered
 
     # The heavy redundant panels are gone (no chat panel title) and no arcade emoji remain.
     assert "Conversation" not in rendered
@@ -289,19 +288,26 @@ def test_completer_offers_context_aware_arguments() -> None:
     completer: Any = app.input_buffer.completer
 
     command_texts = {
-        c.text for c in completer.get_completions(Document("/k"), CompleteEvent())
+        c.text for c in completer.get_completions(Document("/p"), CompleteEvent())
     }
-    assert "/key" in command_texts
+    assert "/provider" in command_texts
+    assert "/key" not in command_texts
 
-    model_args = {
-        c.text for c in completer.get_completions(Document("/key "), CompleteEvent())
+    model_command_texts = {
+        c.text for c in completer.get_completions(Document("/m"), CompleteEvent())
     }
-    assert "gemini" in model_args
-    assert "openrouter" in model_args
+    assert "/models" in model_command_texts
+    assert "/model" not in model_command_texts
+
+    provider_args = {
+        c.text for c in completer.get_completions(Document("/provider "), CompleteEvent())
+    }
+    assert "gemini" in provider_args
+    assert "openrouter" in provider_args
+    assert "custom" in provider_args
 
     stage_args = {
-        c.text for c in completer.get_completions(Document("/model "), CompleteEvent())
+        c.text for c in completer.get_completions(Document("/models "), CompleteEvent())
     }
     assert "all" in stage_args
     assert "anvil" in stage_args
-    assert "gemini/gemini-2.5-flash" in stage_args

@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit.application import Application, run_in_terminal
+from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
@@ -33,12 +33,12 @@ from prompt_toolkit.layout.containers import (
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.output import DummyOutput, Output
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 from rich.console import Console
 
+from forge.ui.modals import ForgeModalManager
 from forge.ui.state import ForgeStage, ForgeTUIState, format_tokens
 
 # Animated braille spinner frames shown next to the actively running stage.
@@ -58,10 +58,11 @@ _FORGE_ART: tuple[str, ...] = (
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show the command reference",
     "/status": "Provider/model, connection & token diagnostics",
-    "/key": "Show provider auth status, or save an API key",
-    "/provider": "List / add / switch providers (key + base URL)",
-    "/models": "Choose a model from a connected provider",
-    "/model": "List, test or switch a stage's model",
+    "/provider": "Connect, configure or disconnect model providers",
+    "/models": "Assign connected models to Anvil, Hammer, Temper",
+    "/usage": "Provider API usage & cost telemetry dashboard",
+    "/resume": "Resume past conversation from global session store",
+    "/restart": "Cleanly flush state and restart Forge workspace",
     "/config": "Show persistent ~/.forge/config.json (keys masked)",
     "/mode": "Set execution mode: auto | chat | cycle",
     "/cycle": "Force a full Anvil -> Hammer -> Temper cycle",
@@ -71,7 +72,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/exit": "Exit the Forge workspace",
 }
 
-# Vocabulary for context-aware argument completion (``/model `, ``/key `, ``/provider ``).
+# Vocabulary for context-aware argument completion
 _STAGE_TARGETS: tuple[str, ...] = ("all", "anvil", "hammer", "temper")
 _PROVIDER_NAMES: tuple[str, ...] = (
     "gemini",
@@ -82,16 +83,10 @@ _PROVIDER_NAMES: tuple[str, ...] = (
     "nvidia",
     "deepseek",
     "groq",
+    "custom",
 )
-_POPULAR_MODELS: tuple[str, ...] = (
-    "gemini/gemini-2.5-flash",
-    "gemini/gemini-2.5-pro",
-    "openrouter/google/gemini-2.5-flash",
-    "openrouter/anthropic/claude-3.5-sonnet",
-    "ollama/qwen2.5-coder:7b",
-    "openai/gpt-4o",
-    "deepseek/deepseek-chat",
-)
+_USAGE_WINDOWS: tuple[str, ...] = ("all", "today", "session")
+_MODE_TARGETS: tuple[str, ...] = ("auto", "chat", "cycle")
 
 
 class SlashCommandCompleter(Completer):
@@ -132,12 +127,14 @@ class SlashCommandCompleter(Completer):
     @staticmethod
     def _argument_candidates(command: str, remainder: str) -> tuple[str, ...]:
         """Vocabulary to offer as the next argument for a slash command."""
-        if command in {"/key", "/provider"}:
+        if command == "/provider":
             return _PROVIDER_NAMES
-        if command == "/model":
-            if " " not in remainder.strip():
-                return (*_STAGE_TARGETS, "list", "test", *_POPULAR_MODELS)
-            return (*_POPULAR_MODELS, *_PROVIDER_NAMES)
+        if command == "/models":
+            return _STAGE_TARGETS
+        if command == "/usage":
+            return _USAGE_WINDOWS
+        if command == "/mode":
+            return _MODE_TARGETS
         return ()
 
 
@@ -164,14 +161,7 @@ def render_sidebar_formatted_text(
     # Stages: Anvil, Hammer, Temper
     stages = [ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER]
 
-    def make_click_handler(stg: ForgeStage) -> Callable[[MouseEvent], None]:
-        def _handler(mouse_event: MouseEvent) -> None:
-            state.select_view_stage(stg)
-
-        return _handler
-
     for stg in stages:
-        click_fn = make_click_handler(stg)
         stage_name = stg.value
         style_name = f"class:{stg.name.lower()}"
 
@@ -180,23 +170,23 @@ def render_sidebar_formatted_text(
         marker = "●" if (is_active_worker or is_viewed) else "○"
 
         if is_active_worker:
-            fragments.append(("class:active_box", "╭──────────────╮\n", click_fn))
-            fragments.append(("class:active_box", "│ ", click_fn))
-            fragments.append((style_name, f"{marker} {stage_name:<9}", click_fn))
-            fragments.append(("class:active_box", "│", click_fn))
+            fragments.append(("class:active_box", "╭──────────────╮\n"))
+            fragments.append(("class:active_box", "│ "))
+            fragments.append((style_name, f"{marker} {stage_name:<9}"))
+            fragments.append(("class:active_box", "│"))
             if is_viewed and not state.auto_follow:
-                fragments.append(("class:viewing_badge", " [VIEW]", click_fn))
+                fragments.append(("class:viewing_badge", " [VIEW]"))
             elif spinner_frame:
-                fragments.append(("class:spinner", f" {spinner_frame}", click_fn))
-            fragments.append(("", " <--\n", click_fn))
-            fragments.append(("class:active_box", "╰──────────────╯\n", click_fn))
+                fragments.append(("class:spinner", f" {spinner_frame}"))
+            fragments.append(("", " <--\n"))
+            fragments.append(("class:active_box", "╰──────────────╯\n"))
         else:
-            fragments.append(("", f"  {marker} ", click_fn))
-            fragments.append((style_name, f"{stage_name:<8}", click_fn))
+            fragments.append(("", f"  {marker} "))
+            fragments.append((style_name, f"{stage_name:<8}"))
             if is_viewed:
-                fragments.append(("class:viewing_badge", " [VIEW]\n", click_fn))
+                fragments.append(("class:viewing_badge", " [VIEW]\n"))
             else:
-                fragments.append(("", "\n", click_fn))
+                fragments.append(("", "\n"))
 
         fragments.append(("", "\n"))
 
@@ -238,10 +228,10 @@ def render_sidebar_formatted_text(
     # Shortcuts Legend
     fragments.append(("class:border", "────────────────────────────\n"))
     fragments.append(("class:hint_title", "Shortcuts:\n"))
-    fragments.append(("class:hint", " [Alt+1] Anvil (Orch)\n"))
-    fragments.append(("class:hint", " [Alt+2] Hammer (Exec)\n"))
-    fragments.append(("class:hint", " [Alt+3] Temper (QA)\n"))
-    fragments.append(("class:hint", " [Alt+0] Auto-Follow\n"))
+    fragments.append(("class:hint", " [Alt+1/F1] Anvil (Orch)\n"))
+    fragments.append(("class:hint", " [Alt+2/F2] Hammer (Exec)\n"))
+    fragments.append(("class:hint", " [Alt+3/F3] Temper (QA)\n"))
+    fragments.append(("class:hint", " [Alt+0/F4] Auto-Follow\n"))
     fragments.append(("class:hint", " [F5] Toggle Mode\n"))
     fragments.append(("class:hint", " [Alt+←/→] History\n"))
     fragments.append(("class:hint", " [PgUp/Dn] Scroll View\n"))
@@ -421,7 +411,8 @@ class ForgeSplitPaneApp:
             ]
         )
 
-        # Floating completion menu (pops above the input bar on `/`)
+        # Floating completion menu and modal dialogs
+        self.modal_manager = ForgeModalManager(self, controller=self.controller)
         self.layout = Layout(
             FloatContainer(
                 content=self.root_container,
@@ -430,7 +421,8 @@ class ForgeSplitPaneApp:
                         xcursor=True,
                         ycursor=True,
                         content=CompletionsMenu(max_height=8, scroll_offset=1),
-                    )
+                    ),
+                    self.modal_manager.modal_float,
                 ],
             ),
             focused_element=self.input_window,
@@ -470,16 +462,31 @@ class ForgeSplitPaneApp:
                 "completion-menu.completion.current": "bg:#38bdf8 #0f172a bold",
                 "completion-menu.meta.completion": "bg:#0f172a #64748b",
                 "completion-menu.meta.completion.current": "bg:#38bdf8 #0f172a",
+                "modal_frame": "bg:#0f172a #e2e8f0",
+                "modal_dialog": "bg:#0f172a #e2e8f0",
+                "modal_title": "#38bdf8 bold",
+                "modal_subtitle": "#94a3b8 bold",
+                "modal_item": "#e2e8f0",
+                "modal_item_selected": "bg:#1e293b #38bdf8 bold",
+                "modal_check_on": "#10b981 bold",
+                "modal_check_off": "#64748b",
+                "modal_badge": "#38bdf8",
+                "modal_tab_active": "bg:#38bdf8 #0f172a bold",
+                "modal_tab_inactive": "bg:#1e293b #94a3b8",
+                "modal_success": "#10b981 bold",
+                "modal_prompt": "#00e5ff bold",
+                "modal_input_field": "bg:#1e293b #ffffff bold",
+                "modal_footer": "#64748b italic",
             }
         )
 
-        # Application instance
+        # Application instance with mouse_support=False for native text selection
         self.application: Application[None] = Application(
             layout=self.layout,
             key_bindings=self.kb,
             style=self.style,
             full_screen=True,
-            mouse_support=True,
+            mouse_support=False,
             output=self.output,
         )
 
@@ -497,35 +504,28 @@ class ForgeSplitPaneApp:
         if value is not None:
             value.provider_configurer = self._configure_provider_wizard
             value.model_picker = self._choose_model_wizard
+            value.session_resumer = self._resume_session_wizard
+            value.usage_viewer = self._usage_wizard
+            if hasattr(self, "modal_manager") and self.modal_manager is not None:
+                self.modal_manager._controller = value
 
-    # -- interactive provider / model wizards -------------------------------------------
-
-    async def _run_wizard_in_terminal(self, fn: Callable[[], Any]) -> Any:
-        """Temporarily release the full-screen app and run a synchronous CLI wizard."""
-        try:
-            return await run_in_terminal(fn)
-        except Exception as exc:  # pragma: no cover - terminal/permission dependent
-            return f"Wizard unavailable: {exc}"
+    # -- interactive provider / model / session / usage modal wizards ------------------
 
     async def _configure_provider_wizard(self) -> str:
-        from forge.cli.roles_wizard import run_provider_modal
-
-        result = await self._run_wizard_in_terminal(
-            lambda: run_provider_modal(self.path, self.console)
-        )
-        if isinstance(result, list) and result:
-            return "✔ " + "; ".join(str(change) for change in result)
-        return "Provider configuration cancelled."
+        self.modal_manager.open_provider_modal()
+        return "Opened Provider Connection Manager modal."
 
     async def _choose_model_wizard(self, _stage: str | None = None) -> str:
-        from forge.cli.roles_wizard import run_models_modal
+        self.modal_manager.open_models_modal()
+        return "Opened Multi-Provider Stage Model Matrix modal."
 
-        result = await self._run_wizard_in_terminal(
-            lambda: run_models_modal(self.path, self.console)
-        )
-        if isinstance(result, list) and result:
-            return "✔ " + "; ".join(str(change) for change in result)
-        return "Model selection cancelled."
+    async def _resume_session_wizard(self) -> str:
+        self.modal_manager.open_resume_modal()
+        return "Opened Global Session Picker modal."
+
+    async def _usage_wizard(self) -> str:
+        self.modal_manager.open_usage_modal()
+        return "Opened API Usage & Telemetry Dashboard modal."
 
     # -- helpers ------------------------------------------------------------------------
 
@@ -564,7 +564,7 @@ class ForgeSplitPaneApp:
         return [
             (
                 "class:hint",
-                "Type a task, question, /model, /key, /help, or !shell...",
+                "Type a task, question, /provider, /models, /usage, /resume, /restart, /help, or !shell...",
             )
         ]
 

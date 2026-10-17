@@ -94,37 +94,13 @@ class StageBuffer:
             highlight=False,
         )
 
-        stage_color = {
-            ForgeStage.ANVIL: "#3b82f6",
-            ForgeStage.HAMMER: "#ef4444",
-            ForgeStage.TEMPER: "#10b981",
-        }.get(self.stage, "#3b82f6")
-
-        status_style = {
-            "idle": "dim #94a3b8",
-            "running": "bold #facc15",
-            "passed": "bold #10b981",
-            "failed": "bold #ef4444",
-        }.get(self.status, "#94a3b8")
-
         def rule() -> str:
             return "─" * (effective_width - 1)
 
         def print_rule() -> None:
             console.print(Text(rule(), style="#334155"))
 
-        # 1. Flat stage identity line (serious developer typography, no panel).
-        header = Text()
-        header.append(f"FORGE // {self.stage.value.upper()}", style=f"bold {stage_color}")
-        header.append(f"   {self.status.upper()}", style=status_style)
-        header.append(
-            f"   tokens {format_tokens(self.stage_tokens)} ({self.stage_tokens:,})",
-            style="#f97316",
-        )
-        console.print(header)
-        print_rule()
-
-        # 2. Conversational transcript, edge-to-edge with a subtle rule between turns.
+        # 1. Conversational transcript, edge-to-edge with a subtle rule between turns.
         for speaker, message in self.chat_history:
             label, style = _turn_marker(speaker)
             console.print(Text(label, style=style))
@@ -134,7 +110,7 @@ class StageBuffer:
                     console.print(Text(f"  {para}", style="#e2e8f0"))
             print_rule()
 
-        # 3. Thought process.
+        # 2. Thought process.
         if self.thoughts:
             console.print(Text("── Thought Process ──", style="bold #64748b"))
             for thought in self.thoughts:
@@ -143,7 +119,7 @@ class StageBuffer:
                 row.append(thought.strip(), style="#cbd5e1")
                 console.print(row)
 
-        # 4. Tool & sandbox execution.
+        # 3. Tool & sandbox execution.
         if self.tool_events:
             console.print(Text("── Tool & Sandbox Execution ──", style="bold #64748b"))
             for event in self.tool_events:
@@ -159,17 +135,6 @@ class StageBuffer:
                     row.append("│ ├─ exec: ", style="#64748b")
                     row.append(stripped, style="#cbd5e1")
                 console.print(row)
-
-        # 5. Stage output / deliverable / defect report (flat, typographic heading).
-        if self.final_output:
-            if self.stage == ForgeStage.TEMPER and self.status == "passed":
-                heading, color = "Verified Final Output Deliverable", "#10b981"
-            elif self.status == "failed":
-                heading, color = "Rejection & Defect Report", "#ef4444"
-            else:
-                heading, color = "Stage Output", stage_color
-            console.print(Text(f"── {heading} ──", style=f"bold {color}"))
-            console.print(Text(self.final_output.strip(), style="#e2e8f0"))
 
         # 6. Interactive question card (flat).
         if pending_question is not None and pending_question.stage == self.stage:

@@ -36,6 +36,7 @@ _OPENAI_COMPATIBLE: frozenset[ProviderName] = frozenset(
         ProviderName.NVIDIA,
         ProviderName.DEEPSEEK,
         ProviderName.GROQ,
+        ProviderName.CUSTOM,
     }
 )
 
@@ -122,16 +123,35 @@ class UnifiedLLMClient:
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None = None,
         on_token: TokenHandler | None = None,
+        stage: str = "anvil",
     ) -> LLMResponse:
         """Run one real completion, streaming token deltas to ``on_token`` when provided."""
+        start = time.perf_counter()
         provider = binding.provider
         if provider is ProviderName.GEMINI:
-            return await self._gemini(binding, messages, system_prompt, on_token)
-        if provider is ProviderName.ANTHROPIC:
-            return await self._anthropic(binding, messages, system_prompt, on_token)
-        if provider is ProviderName.OLLAMA:
-            return await self._ollama(binding, messages, system_prompt, on_token)
-        return await self._openai_compatible(binding, messages, system_prompt, on_token)
+            resp = await self._gemini(binding, messages, system_prompt, on_token)
+        elif provider is ProviderName.ANTHROPIC:
+            resp = await self._anthropic(binding, messages, system_prompt, on_token)
+        elif provider is ProviderName.OLLAMA:
+            resp = await self._ollama(binding, messages, system_prompt, on_token)
+        else:
+            resp = await self._openai_compatible(binding, messages, system_prompt, on_token)
+
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        try:
+            from forge.config.usage_tracker import get_usage_tracker
+
+            get_usage_tracker().record_call(
+                provider=binding.provider.value,
+                model=binding.model,
+                stage=stage,
+                prompt_tokens=resp.prompt_tokens,
+                completion_tokens=resp.completion_tokens,
+                latency_ms=latency_ms,
+            )
+        except Exception:
+            pass
+        return resp
 
     # Alias used by the TUI / spec.
     async def stream_chat(
@@ -140,8 +160,11 @@ class UnifiedLLMClient:
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None = None,
         on_token: TokenHandler | None = None,
+        stage: str = "anvil",
     ) -> LLMResponse:
-        return await self.complete_or_stream(binding, messages, system_prompt, on_token)
+        return await self.complete_or_stream(
+            binding, messages, system_prompt, on_token, stage=stage
+        )
 
     async def list_live_models(self, provider: ProviderName) -> list[str]:
         """Query the provider's live model catalog (Ollama ``/api/tags``, else ``/models``)."""
