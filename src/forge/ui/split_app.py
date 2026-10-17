@@ -13,6 +13,7 @@ from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import (
     ANSI,
     AnyFormattedText,
@@ -22,6 +23,7 @@ from prompt_toolkit.formatted_text import (
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.layout.containers import (
+    ConditionalContainer,
     Float,
     FloatContainer,
     HSplit,
@@ -52,20 +54,15 @@ _FORGE_ART: tuple[str, ...] = (
     " ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
 )
 
-_STAGE_DOT: dict[ForgeStage, str] = {
-    ForgeStage.ANVIL: "🟦",
-    ForgeStage.HAMMER: "🟥",
-    ForgeStage.TEMPER: "🟩",
-}
-
-
 # Slash command catalogue used for both the popup completion menu and `/help`.
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show the command reference",
     "/status": "Provider/model, connection & token diagnostics",
-    "/provider": "Add/connect a provider (API key + base URL)",
+    "/key": "Show provider auth status, or save an API key",
+    "/provider": "List / add / switch providers (key + base URL)",
     "/models": "Choose a model from a connected provider",
-    "/model": "List or switch a stage's model",
+    "/model": "List, test or switch a stage's model",
+    "/config": "Show persistent ~/.forge/config.json (keys masked)",
     "/mode": "Set execution mode: auto | chat | cycle",
     "/cycle": "Force a full Anvil -> Hammer -> Temper cycle",
     "/research": "Run the STORM deep research pipeline",
@@ -74,9 +71,31 @@ SLASH_COMMANDS: dict[str, str] = {
     "/exit": "Exit the Forge workspace",
 }
 
+# Vocabulary for context-aware argument completion (``/model `, ``/key `, ``/provider ``).
+_STAGE_TARGETS: tuple[str, ...] = ("all", "anvil", "hammer", "temper")
+_PROVIDER_NAMES: tuple[str, ...] = (
+    "gemini",
+    "openrouter",
+    "openai",
+    "anthropic",
+    "ollama",
+    "nvidia",
+    "deepseek",
+    "groq",
+)
+_POPULAR_MODELS: tuple[str, ...] = (
+    "gemini/gemini-2.5-flash",
+    "gemini/gemini-2.5-pro",
+    "openrouter/google/gemini-2.5-flash",
+    "openrouter/anthropic/claude-3.5-sonnet",
+    "ollama/qwen2.5-coder:7b",
+    "openai/gpt-4o",
+    "deepseek/deepseek-chat",
+)
+
 
 class SlashCommandCompleter(Completer):
-    """Pops a command menu whenever the input buffer starts with ``/``."""
+    """Pops a command menu on ``/`` and context-aware argument completion afterwards."""
 
     def __init__(self, commands: dict[str, str] | None = None) -> None:
         self.commands = commands or SLASH_COMMANDS
@@ -85,16 +104,41 @@ class SlashCommandCompleter(Completer):
         self, document: Document, complete_event: CompleteEvent
     ) -> Iterable[Completion]:
         text = document.text_before_cursor
-        if not text.startswith("/") or " " in text:
+        if text.startswith("/") and " " not in text:
+            for name, description in self.commands.items():
+                if name.startswith(text):
+                    yield Completion(
+                        name,
+                        start_position=-len(text),
+                        display=name,
+                        display_meta=description,
+                    )
             return
-        for name, description in self.commands.items():
-            if name.startswith(text):
+
+        if not text.startswith("/"):
+            return
+
+        command, _, remainder = text.partition(" ")
+        word = remainder.split(" ")[-1]
+        candidates = self._argument_candidates(command, remainder)
+        for candidate in candidates:
+            if candidate.startswith(word) and candidate != word:
                 yield Completion(
-                    name,
-                    start_position=-len(text),
-                    display=name,
-                    display_meta=description,
+                    candidate,
+                    start_position=-len(word),
+                    display=candidate,
                 )
+
+    @staticmethod
+    def _argument_candidates(command: str, remainder: str) -> tuple[str, ...]:
+        """Vocabulary to offer as the next argument for a slash command."""
+        if command in {"/key", "/provider"}:
+            return _PROVIDER_NAMES
+        if command == "/model":
+            if " " not in remainder.strip():
+                return (*_STAGE_TARGETS, "list", "test", *_POPULAR_MODELS)
+            return (*_POPULAR_MODELS, *_PROVIDER_NAMES)
+        return ()
 
 
 def create_safe_output(output: Output | None = None) -> Output:
@@ -114,8 +158,8 @@ def render_sidebar_formatted_text(
     fragments: StyleAndTextTuples = []
 
     # Title
-    fragments.append(("class:sidebar_header", "     FORGE BLACKSMITH     \n"))
-    fragments.append(("class:border", "────────────────────────────\n\n"))
+    fragments.append(("class:sidebar_header", " FORGE // WORKSPACE\n"))
+    fragments.append(("class:border", "────────────────────────\n\n"))
 
     # Stages: Anvil, Hammer, Temper
     stages = [ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER]
@@ -130,35 +174,27 @@ def render_sidebar_formatted_text(
         click_fn = make_click_handler(stg)
         stage_name = stg.value
         style_name = f"class:{stg.name.lower()}"
-        dot = _STAGE_DOT.get(stg, "⬜")
 
         is_active_worker = state.active_worker_stage == stg
         is_viewed = state.selected_view_stage == stg
+        marker = "●" if (is_active_worker or is_viewed) else "○"
 
         if is_active_worker:
-            # Rounded box with a running indicator; the middle line keeps the classic
-            # `|  Stage  | <--` shape while gaining a live spinner when work is in flight.
-            pad_left = (10 - len(stage_name)) // 2
-            pad_right = 10 - len(stage_name) - pad_left
-            padded = f"{' ' * pad_left}{stage_name}{' ' * pad_right}"
-
-            fragments.append(("class:active_box", "╭──────────╮\n", click_fn))
-            fragments.append(("class:active_box", "|", click_fn))
-            fragments.append((style_name, padded, click_fn))
-            fragments.append(("class:active_box", "| <--", click_fn))
-
+            fragments.append(("class:active_box", "╭──────────────╮\n", click_fn))
+            fragments.append(("class:active_box", "│ ", click_fn))
+            fragments.append((style_name, f"{marker} {stage_name:<9}", click_fn))
+            fragments.append(("class:active_box", "│", click_fn))
             if is_viewed and not state.auto_follow:
-                fragments.append(("class:viewing_badge", " [👁 VIEWING]", click_fn))
+                fragments.append(("class:viewing_badge", " [VIEW]", click_fn))
             elif spinner_frame:
                 fragments.append(("class:spinner", f" {spinner_frame}", click_fn))
-            fragments.append(("", "\n", click_fn))
-
-            fragments.append(("class:active_box", "╰──────────╯\n", click_fn))
+            fragments.append(("", " <--\n", click_fn))
+            fragments.append(("class:active_box", "╰──────────────╯\n", click_fn))
         else:
-            fragments.append(("", f" {dot} ", click_fn))
+            fragments.append(("", f"  {marker} ", click_fn))
             fragments.append((style_name, f"{stage_name:<8}", click_fn))
             if is_viewed:
-                fragments.append(("class:viewing_badge", " [👁 VIEWING]\n", click_fn))
+                fragments.append(("class:viewing_badge", " [VIEW]\n", click_fn))
             else:
                 fragments.append(("", "\n", click_fn))
 
@@ -352,11 +388,16 @@ class ForgeSplitPaneApp:
             height=1,
             style="class:hint",
         )
+        # The placeholder line only occupies space while the input is empty.
+        self.input_placeholder = ConditionalContainer(
+            content=self.input_hint_window,
+            filter=Condition(lambda: not self.input_buffer.text),
+        )
         self.input_area = HSplit(
             [
                 self.input_top_border,
                 self.input_box_row,
-                self.input_hint_window,
+                self.input_placeholder,
             ]
         )
 
@@ -510,55 +551,51 @@ class ForgeSplitPaneApp:
         return "(no model)"
 
     def _render_input_prompt(self) -> AnyFormattedText:
-        """Render dynamic prompt: switches to question option indicator when question is pending."""
+        """Render the single input-line prefix, or a [?] question indicator."""
         if self.state.pending_question is not None:
             num = len(self.state.pending_question.options)
             prefix = f"[1-{num}]" if num > 0 else "[?]"
             return [("class:question_prompt", f"? {prefix} > ")]
-        stage = self.state.selected_view_stage.value
-        return [
-            ("class:prompt", "> "),
-            ("class:input_stage", f"[{stage} →] "),
-        ]
+        stage = self.state.selected_view_stage.value.lower()
+        return [("class:prompt", f"{stage} ❯ ")]
 
     def _render_input_hint(self) -> AnyFormattedText:
-        stage = self.state.selected_view_stage.value
+        """Dim placeholder shown only while the input is empty (vanishes once typing starts)."""
         return [
             (
                 "class:hint",
-                f" [{stage} →] Type a message, /command (/help, /provider, /models, "
-                f"/cycle, /research), or !shell...",
+                "Type a task, question, /model, /key, /help, or !shell...",
             )
         ]
 
     def _render_header(self) -> AnyFormattedText:
         """Render the top header: ASCII FORGE art + live telemetry (or a compact fallback)."""
         worker_str = (
-            self.state.active_worker_stage.value if self.state.active_worker_stage else "IDLE"
+            self.state.active_worker_stage.value.lower()
+            if self.state.active_worker_stage
+            else "idle"
         )
-        viewport_str = self.state.selected_view_stage.value
-        follow_str = "AUTO-FOLLOW" if self.state.auto_follow else "PINNED"
-        cycle_str = f"Cycle #{self.state.cycle_count} [{self.state.cycle_mode.value}]"
+        viewport_str = self.state.selected_view_stage.value.lower()
+        follow_str = "follow" if self.state.auto_follow else "pinned"
+        cycle_str = f"#{self.state.cycle_count} [{self.state.cycle_mode.value.lower()}]"
         if self.state.viewing_history_cycle is not None:
-            cycle_str += f" [HIST:{self.state.viewing_history_cycle}]"
+            cycle_str += f" [hist:{self.state.viewing_history_cycle}]"
 
-        row_harness = "⚡ Autonomous Cybernetic Coding Harness"
-        row_status = (
-            f"{cycle_str} │ Worker: {worker_str} │ View: {viewport_str} [{follow_str}]"
-        )
+        row_harness = "FORGE // AUTONOMOUS ENGINEERING HARNESS"
+        row_status = f"cycle: {cycle_str}  │  worker: {worker_str}  │  view: {viewport_str} [{follow_str}]"
         row_tokens = (
-            f"Stage Tokens: {self.state.active_stage_tokens:,} │ "
-            f"Session Total: {self.state.total_session_tokens:,} │ "
-            f"Model: {self._model_label()}"
+            f"stage_tokens: {self.state.active_stage_tokens}  │  "
+            f"session_tokens: {self.state.total_session_tokens}  │  "
+            f"model: {self._model_label()}"
         )
 
         if _is_compact_terminal():
             return [
-                ("class:header_art", " FORGE ⚡ Cybernetic Coding Harness\n"),
+                ("class:header_art", " FORGE // AUTONOMOUS ENGINEERING HARNESS\n"),
                 ("class:header_telemetry", f" {row_status}"),
             ]
 
-        telemetry_by_row = {1: row_harness, 2: row_status, 3: row_tokens}
+        telemetry_by_row = {0: row_harness, 2: row_status, 3: row_tokens}
         fragments: StyleAndTextTuples = []
         for index, art_line in enumerate(_FORGE_ART):
             fragments.append(("class:header_art", art_line))

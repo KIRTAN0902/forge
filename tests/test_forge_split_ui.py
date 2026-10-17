@@ -60,8 +60,9 @@ def test_default_split_pane_and_sidebar_rendering() -> None:
     assert "Hammer" in plain
     assert "Temper" in plain
 
-    # 2. Active worker stage enclosed in box with arrow
-    assert "|  Temper  | <--" in plain or "[ Temper ] <--" in plain
+    # 2. Active worker stage enclosed in a clean box with a trailing arrow
+    assert "│ ● Temper" in plain
+    assert "<--" in plain
 
     # 3. Cycle counter in Purple
     assert "Cycle :- 1" in plain
@@ -113,10 +114,10 @@ def test_live_stage_switch_while_hammer_working() -> None:
     assert state.get_active_view_buffer().stage == ForgeStage.ANVIL
     assert "Writing patch to src/core/engine.py" not in state.get_active_view_buffer().thoughts
 
-    # Sidebar displays [👁 VIEWING] badge next to Anvil while keeping boxed Hammer <--
+    # Sidebar displays [VIEW] badge next to Anvil while keeping a boxed Hammer <--
     sidebar_text = render_sidebar_plain_text(state)
-    assert "[👁 VIEWING]" in sidebar_text
-    assert "|  Hammer  | <--" in sidebar_text or "[ Hammer ] <--" in sidebar_text
+    assert "[VIEW]" in sidebar_text
+    assert "│ ● Hammer" in sidebar_text
 
     # Resume auto-follow
     state.resume_auto_follow()
@@ -406,9 +407,9 @@ def test_question_rendering_and_input_prompt_dynamics() -> None:
     state = ForgeTUIState()
     app = ForgeSplitPaneApp(state=state)
 
-    # Initial prompt is standard
+    # Initial prompt is the stage-aware single-line prefix
     initial_prompt = app._render_input_prompt()
-    assert initial_prompt[0][1] == "> "
+    assert initial_prompt[0][1] == "anvil ❯ "
 
     # Pose a question on Anvil
     q = UserQuestion(
@@ -438,7 +439,7 @@ def test_question_rendering_and_input_prompt_dynamics() -> None:
 
     # Prompt returns to normal
     restored_prompt = app._render_input_prompt()
-    assert restored_prompt[0][1] == "> "
+    assert restored_prompt[0][1] == "anvil ❯ "
 
 
 @pytest.mark.asyncio

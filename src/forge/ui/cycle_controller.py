@@ -24,7 +24,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from forge.harness.adversarial_qa import AdversarialQAGatekeeper, detect_secrets_in_text
 from forge.harness.memory import EpisodicRepoMemory
@@ -32,6 +32,10 @@ from forge.models import Message
 from forge.models.profile import ModelProfile
 from forge.skills import AutonomousSkillRouter
 from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, UserQuestion
+
+if TYPE_CHECKING:  # pragma: no cover
+    from forge.config.settings import ForgeConfigManager, StageModelBinding
+    from forge.providers.client import UnifiedLLMClient
 
 
 class ExecutionMode(StrEnum):
@@ -61,6 +65,8 @@ _STAGE_ROLES: dict[ForgeStage, str] = {
     ForgeStage.HAMMER: "executor",
     ForgeStage.TEMPER: "qa",
 }
+
+_STAGE_BY_NAME: dict[str, ForgeStage] = {stage.value.lower(): stage for stage in ForgeStage}
 
 
 def _mode_label(mode: ExecutionMode | None) -> str:
@@ -319,7 +325,7 @@ _API_KEY_ENV_VARS: tuple[tuple[str, str], ...] = (
 def model_diagnostic(reason: str = "No live LLM model is attached to this session.") -> str:
     """Actionable diagnostic shown instead of a fabricated reply when no model is reachable."""
     lines = [
-        f"⚠ {reason}",
+        f"[WARN] {reason}",
         "",
         "Forge does not fake model output — every conversational turn must reach a real LLM.",
         "Configure a provider API key, then restart Forge (or run `forge login`):",
@@ -330,10 +336,11 @@ def model_diagnostic(reason: str = "No live LLM model is attached to this sessio
         "(default http://localhost:11434)"
     )
     lines.append("")
-    lines.append("Or add & choose live at any time:")
-    lines.append("  /provider   add/connect a provider (paste its API key + base URL)")
-    lines.append("  /models     choose a model from a connected provider")
-    lines.append("  /model <stage> <provider>/<model>   e.g. /model anvil openrouter/x/y")
+    lines.append("Or add, key & choose a live model at any time:")
+    lines.append("  /key <provider> <api_key>   save a key (e.g. /key gemini AIzaSy...)")
+    lines.append("  /provider [name] [base_url] add/switch a provider live")
+    lines.append("  /model list|test|all        choose, list or ping models")
+    lines.append("  /config                     show ~/.forge/config.json (keys masked)")
     return "\n".join(lines)
 
 
@@ -371,6 +378,8 @@ class ForgeCycleController:
         max_tool_steps: int = 12,
         provider_configurer: Callable[[], Awaitable[str]] | None = None,
         model_picker: Callable[[str | None], Awaitable[str]] | None = None,
+        config_manager: ForgeConfigManager | None = None,
+        llm_client: UnifiedLLMClient | None = None,
     ) -> None:
         self.state = state
         self.router = router
@@ -393,6 +402,9 @@ class ForgeCycleController:
         # UI-injected hooks for the interactive provider/model wizards (set by the split-pane app).
         self.provider_configurer = provider_configurer
         self.model_picker = model_picker
+        # Persistent provider/model configuration engine + native streaming LLM client.
+        self.config_manager = config_manager
+        self.llm_client = llm_client
 
         self.skill_router = AutonomousSkillRouter()
         self.qa_gatekeeper = AdversarialQAGatekeeper()
@@ -652,6 +664,9 @@ class ForgeCycleController:
 
         agent = self._agent_for(stage)
         if agent is None:
+            binding = self._config_binding(stage)
+            if binding is not None:
+                return await self._run_llm_turn(prompt, stage, binding)
             reply = model_diagnostic()
             self.state.append_chat(stage, self._speaker(stage), reply)
             self.state.set_stage_output(stage, reply, status="failed")
@@ -683,6 +698,45 @@ class ForgeCycleController:
 
         if handoff:
             return await self.escalate_to_forge_cycle(handoff)
+        return reply
+
+    async def _run_llm_turn(
+        self, prompt: str, stage: ForgeStage, binding: StageModelBinding
+    ) -> str:
+        """Stream a real reply from the native unified client when no agent adapter is attached.
+
+        The user turn is already recorded by :meth:`_run_agent_turn`; this issues a real
+        streaming HTTP request through :class:`UnifiedLLMClient`, streams deltas into the
+        viewport, records the real token usage, and appends the assistant turn to history.
+        """
+        client = self._llm_client()
+        messages = [
+            {"role": turn["role"], "content": turn["content"]}
+            for turn in self.conversation_history[stage]
+        ]
+
+        def _on_token(delta: str) -> None:
+            self.state.append_stream(stage, delta)
+
+        self.state.start_stream(stage, self._speaker(stage))
+        try:
+            response = await client.complete_or_stream(
+                binding, messages, on_token=_on_token
+            )
+        except Exception as exc:  # pragma: no cover - network dependent
+            reply = model_diagnostic(f"Live model call failed ({binding.spec_string}): {exc}")
+            self.state.finalize_stream(stage, reply)
+            self.conversation_history[stage].append({"role": "assistant", "content": reply})
+            self.state.set_stage_output(stage, reply, status="failed")
+            self.state.set_active_stage(None)
+            return reply
+
+        reply = (response.content or "").strip() or "(no response)"
+        self.state.record_tokens(stage, response.total_tokens)
+        self.state.finalize_stream(stage, reply)
+        self.conversation_history[stage].append({"role": "assistant", "content": reply})
+        self.state.set_stage_output(stage, reply, status="passed")
+        self.state.set_active_stage(None)
         return reply
 
     # -- real subprocess execution (!shell) ----------------------------------------------
@@ -1088,6 +1142,10 @@ class ForgeCycleController:
             return self._emit_command_output(command, self._status_text())
         if command == "/provider":
             return await self._handle_provider_command(argument)
+        if command == "/key":
+            return await self._handle_key_command(argument)
+        if command == "/config":
+            return await self._handle_config_command()
         if command == "/models":
             return await self._handle_models_command(argument)
         if command == "/model":
@@ -1140,20 +1198,83 @@ class ForgeCycleController:
             "  /mode cycle  always force Anvil -> Hammer -> Temper"
         )
 
-    async def _handle_provider_command(self, _argument: str = "") -> str:
-        """Interactively add/connect a provider (reusing the CLI modal wizard)."""
-        if self.provider_configurer is None:
+    async def _handle_provider_command(self, argument: str = "") -> str:
+        """List / switch providers, or launch the interactive wizard when available.
+
+        * ``/provider``            - inside the full-screen app, opens the add-provider wizard;
+          otherwise prints the provider table (auth status, base URL, default model).
+        * ``/provider <name>``     - points all three stages at that provider's default model.
+        * ``/provider <name> <url>`` - same, plus a custom base URL (vLLM / LM Studio / proxy).
+        """
+        tokens = argument.split()
+        if not tokens:
+            if self.provider_configurer is not None:
+                summary = await self.provider_configurer()
+                refresh = await self.refresh_models()
+                return self._emit_command_output("/provider", f"{summary}\n\n{refresh}")
+            return self._emit_command_output("/provider", self._provider_table_text())
+
+        from forge.config.settings import ProviderName
+
+        try:
+            name = ProviderName(tokens[0].lower())
+        except ValueError:
             return self._emit_command_output(
                 "/provider",
-                "The interactive provider wizard is only available inside the full-screen "
-                "workspace. Run `forge provider` from your terminal to add one, or use "
-                "`/model <stage> <provider>/<model>` for a non-interactive switch.",
+                f"Unknown provider {tokens[0]!r}. Supported: {', '.join(p.value for p in ProviderName)}.",
                 status="failed",
             )
 
-        summary = await self.provider_configurer()
+        manager = self._config_manager()
+        if len(tokens) > 1 and tokens[1].strip():
+            manager.set_base_url(name, tokens[1].strip())
+
+        binding = manager.set_stage_model("all", f"{name.value}/{manager.provider(name).default_model}")
+        await self.refresh_models()
+        text = (
+            f"✔ All stages now target {binding.provider.value} "
+            f"({manager.provider(name).base_url}).\n"
+            f"  anvil | hammer | temper → {binding.spec_string} [{binding.model_tier.value}]"
+        )
+        return self._emit_command_output("/provider", text)
+
+    async def _handle_key_command(self, argument: str) -> str:
+        """``/key`` shows provider auth status; ``/key <provider> <api_key>`` stores a key."""
+        from forge.config.settings import ProviderName
+
+        manager = self._config_manager()
+        tokens = argument.split()
+        if not tokens:
+            return self._emit_command_output("/key", self._key_status_text(manager))
+        if len(tokens) < 2 or not tokens[1].strip():
+            return self._emit_command_output(
+                "/key",
+                "Usage: /key <provider> <api_key>   e.g. /key gemini AIzaSy... "
+                "or /key openrouter sk-or-v1-...",
+                status="failed",
+            )
+
+        try:
+            name = ProviderName(tokens[0].lower())
+        except ValueError:
+            return self._emit_command_output(
+                "/key",
+                f"Unknown provider {tokens[0]!r}. Supported: {', '.join(p.value for p in ProviderName)}.",
+                status="failed",
+            )
+
+        manager.set_api_key(name, tokens[1].strip())
         refresh = await self.refresh_models()
-        return self._emit_command_output("/provider", f"{summary}\n\n{refresh}")
+        text = (
+            f"✔ {name.value} API key saved ({manager.masked_key(name)}) to {manager.config_path}.\n"
+            f"  Attached default model: {manager.provider(name).default_model}\n\n{refresh}"
+        )
+        return self._emit_command_output("/key", text)
+
+    async def _handle_config_command(self) -> str:
+        """Render the full (masked) persistent configuration and its file path (``/config``)."""
+        manager = self._config_manager()
+        return self._emit_command_output("/config", manager.describe())
 
     async def _handle_models_command(self, argument: str) -> str:
         """Interactively choose a model from a connected provider (reusing the CLI wizard)."""
@@ -1219,29 +1340,103 @@ class ForgeCycleController:
         return "\n".join(lines)
 
     async def _handle_model_command(self, argument: str) -> str:
-        """List model bindings, or live-swap a stage's model (``/model <stage> <prov>/<model>``)."""
-        if not argument:
+        """List/choose models: ``/model``, ``/model <prov>/<model>``, ``/model <stage|all> ...``."""
+        arg = argument.strip()
+        if not arg:
             return self._model_list_text()
 
-        tokens = argument.split(None, 1)
-        stage_token = tokens[0].lower()
-        stage = _STAGE_ALIASES.get(stage_token)
+        tokens = arg.split()
+        head = tokens[0].lower()
+        if head == "list":
+            provider_token = tokens[1] if len(tokens) > 1 else None
+            return await self._list_live_models(provider_token)
+        if head == "test":
+            return await self._test_stage_models()
+
+        if len(tokens) == 1:
+            # ``/model gemini/gemini-2.5-flash`` -> switch ALL stages at once.
+            return await self._apply_model_spec("all", tokens[0])
+
+        if head == "all":
+            return await self._apply_model_spec("all", tokens[1])
+
+        stage = _STAGE_ALIASES.get(head)
         if stage is None:
             return (
-                f"Unknown stage {stage_token!r}. Use one of: anvil | hammer | temper "
+                f"Unknown stage {head!r}. Use one of: anvil | hammer | temper | all "
                 "(aliases: orchestrator | executor | qa)."
             )
-        if len(tokens) < 2 or not tokens[1].strip():
+        return await self._apply_model_spec(stage.value.lower(), tokens[1])
+
+    async def _apply_model_spec(self, target: str, spec: str) -> str:
+        """Persist a ``provider/model`` binding to a stage (or all) and rebind live adapters."""
+        from forge.config.settings import parse_provider_model
+
+        try:
+            provider_enum, model = parse_provider_model(spec)
+        except ValueError:
             return (
-                "Usage: /model <stage> <provider>/<model>  "
-                "e.g. /model anvil openrouter/google/gemini-2.5-flash"
+                "Usage: /model <stage|all> <provider>/<model>   "
+                "e.g. /model anvil gemini/gemini-2.5-pro or /model ollama/qwen2.5-coder:7b"
             )
 
-        target = tokens[1].strip()
-        provider, _, model = target.partition("/")
-        if not model:
-            provider, model = "", provider  # bare model name; keep current provider
-        return await self.swap_stage_model(stage, provider or None, model.strip())
+        provider_value = provider_enum.value
+        lines: list[str] = []
+        if self.config_manager is not None:
+            binding = self.config_manager.set_stage_model(target, spec)
+            lines.append(
+                f"✔ Persisted {binding.spec_string} [{binding.model_tier.value}] to "
+                f"{self.config_manager.config_path}"
+            )
+
+        if self.registry is not None:
+            stages = list(ForgeStage) if target == "all" else [_STAGE_BY_NAME[target]]
+            for stage in stages:
+                lines.append(await self.swap_stage_model(stage, provider_value, model))
+
+        if not lines:
+            lines.append(f"Selected {provider_value}/{model} for {target}.")
+        return "\n".join(lines)
+
+    async def _list_live_models(self, provider_token: str | None) -> str:
+        """Query and display a provider's live model catalog (``/model list [provider]``)."""
+        from forge.config.settings import ProviderName
+
+        if provider_token:
+            try:
+                provider = ProviderName(provider_token.lower())
+            except ValueError:
+                return f"Unknown provider {provider_token!r}. Supported: {', '.join(p.value for p in ProviderName)}."
+            targets = [provider]
+        else:
+            targets = [
+                name
+                for name in ProviderName
+                if name is ProviderName.OLLAMA
+                or (self.config_manager is not None and self.config_manager.api_key_for(name))
+            ]
+
+        client = self._llm_client()
+        lines = ["Live models:"]
+        for name in targets:
+            models = await client.list_live_models(name)
+            rendered = ", ".join(models) if models else "(none reachable)"
+            lines.append(f"  {name.value:<10}: {rendered}")
+        return "\n".join(lines)
+
+    async def _test_stage_models(self) -> str:
+        """Ping every configured stage model and report live latency (``/model test``)."""
+        client = self._llm_client()
+        lines = ["Connection tests:"]
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            binding = self._config_binding(stage)
+            if binding is None:
+                lines.append(f"  ○ {stage.value:<7}: (no model attached)")
+                continue
+            ok, detail = await client.test_connection(binding)
+            mark = "✔" if ok else "✖"
+            lines.append(f"  {mark} {stage.value:<7}: {binding.spec_string} — {detail}")
+        return "\n".join(lines)
 
     async def swap_stage_model(
         self, stage: ForgeStage, provider: str | None, model: str
@@ -1281,6 +1476,9 @@ class ForgeCycleController:
 
     def current_model_label(self) -> str:
         """Short model id for the currently viewed stage (falls back to any attached stage)."""
+        binding = self._config_binding(self.state.selected_view_stage)
+        if binding is not None:
+            return binding.spec_string
         for stage in (
             self.state.selected_view_stage,
             ForgeStage.ANVIL,
@@ -1290,21 +1488,56 @@ class ForgeCycleController:
             adapter = getattr(self._agent_for(stage), "adapter", None)
             if adapter is not None:
                 return str(getattr(adapter, "model", "unknown"))
-        return "(no model)"
+        return "(no live model attached)"
+
+    def _config_binding(self, stage: ForgeStage) -> StageModelBinding | None:
+        """The persistent ``provider/model`` binding for a stage, if a config engine is attached."""
+        if self.config_manager is None:
+            return None
+        return self.config_manager.binding_for(stage.value.lower())
+
+    def _config_manager(self) -> ForgeConfigManager:
+        """Return the attached config engine, lazily creating the user-level one if needed."""
+        if self.config_manager is None:
+            from forge.config.settings import ForgeConfigManager
+
+            self.config_manager = ForgeConfigManager()
+        return self.config_manager
+
+    def _llm_client(self) -> UnifiedLLMClient:
+        """Return the native streaming client, wiring it to the active config engine."""
+        if self.llm_client is None:
+            from forge.providers.client import UnifiedLLMClient
+
+            manager = self.config_manager
+            if manager is not None:
+                self.llm_client = UnifiedLLMClient(
+                    api_key_resolver=manager.api_key_for,
+                    base_url_resolver=lambda p: manager.provider(p).base_url,
+                )
+            else:
+                self.llm_client = UnifiedLLMClient()
+        return self.llm_client
 
     def _model_list_text(self) -> str:
         lines = ["Forge Model Bindings:"]
         for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            binding = self._config_binding(stage)
             agent = self._agent_for(stage)
             adapter = getattr(agent, "adapter", None)
-            if adapter is not None:
+            if binding is not None:
+                label = binding.spec_string
+                tier = f"  [{binding.model_tier.value}]"
+            elif adapter is not None:
                 try:
                     label = adapter.describe()
                 except Exception:
                     label = str(getattr(adapter, "model", "unknown"))
+                tier = ""
             else:
                 label = "(no live model attached)"
-            lines.append(f"  {stage.value:<7}: {label}")
+                tier = ""
+            lines.append(f"  {stage.value:<7}: {label}{tier}")
 
         providers: list[str] = []
         if self.registry is not None:
@@ -1315,16 +1548,64 @@ class ForgeCycleController:
             providers = sorted(BUILTIN_PROVIDERS)
         lines.append("")
         lines.append(f"Providers: {', '.join(providers)}")
-        lines.append("Swap example: /model hammer ollama/qwen2.5-coder:7b")
+        lines.append("Stages: anvil | hammer | temper | all")
+        lines.append("Examples:")
+        lines.append("  /model gemini/gemini-2.5-flash        (all stages)")
+        lines.append("  /model anvil gemini/gemini-2.5-pro    (one stage)")
+        lines.append("  /model hammer ollama/qwen2.5-coder:7b")
+        lines.append("  /model list openrouter   ·   /model test")
+        return "\n".join(lines)
+
+    def _provider_table_text(self) -> str:
+        """Provider table with auth status, base URL and default model (``/provider``)."""
+        from forge.config.settings import ProviderName
+
+        manager = self._config_manager()
+        width = max(len(name.value) for name in ProviderName)
+        lines = [
+            "Forge Providers  (add one with `forge provider`, or `/key <provider> <api_key>`):",
+            "",
+        ]
+        for name in ProviderName:
+            cfg = manager.provider(name)
+            status = cfg.masked_key() if cfg.key_configured else "NOT SET"
+            lines.append(
+                f"  {name.value:<{width}}  {status:<12}  {cfg.base_url}  (default: {cfg.default_model})"
+            )
+        lines.append("")
+        lines.append("Switch: /provider <name> [base_url]   ·   Key: /key <name> <api_key>")
+        return "\n".join(lines)
+
+    def _key_status_text(self, manager: ForgeConfigManager) -> str:
+        """Auth status of all providers, keys masked (``/key``)."""
+        from forge.config.settings import ProviderName
+
+        width = max(len(name.value) for name in ProviderName)
+        lines = ["Provider API keys:", ""]
+        for name in ProviderName:
+            cfg = manager.provider(name)
+            if name is ProviderName.OLLAMA:
+                state = "LOCAL (no key required)"
+            elif cfg.api_key:
+                state = f"CONFIGURED ({cfg.masked_key()})"
+            else:
+                state = "NOT SET"
+            lines.append(f"  {name.value:<{width}}  {state}")
+        lines.append("")
+        lines.append(f"Config file: {manager.config_path}")
+        lines.append("Set a key: /key <provider> <api_key>")
         return "\n".join(lines)
 
     def _help_text(self) -> str:
         rows = [
             ("/help", "Show this command reference"),
             ("/status", "Provider/model, connection status, cycle & token telemetry"),
+            ("/key [prov] [key]", "Show provider auth status, or save an API key"),
             ("/provider", "Add/connect a provider (key + base URL) and refresh live"),
             ("/models [stage]", "Interactively choose a model from a connected provider"),
-            ("/model [stage] [prov/model]", "List bindings or live-swap a stage's model"),
+            ("/model [stage|all] [prov/model]", "List, test or live-swap stage models"),
+            ("/model list|test [prov]", "List a provider's live models or ping every stage"),
+            ("/config", "Show the persistent ~/.forge/config.json (keys masked)"),
             ("/mode [auto|chat|cycle]", "Switch adaptive execution mode"),
             ("/cycle <task> | /forge <task>", "Force a full Anvil -> Hammer -> Temper cycle"),
             ("/research <topic>", "Run the STORM deep research pipeline"),
@@ -1388,7 +1669,7 @@ class ForgeCycleController:
                     suffix = f" [{status}]"
             else:
                 label = "(no live model attached)"
-                suffix = " [⚠ NO MODEL]"
+                suffix = " [WARN · NO MODEL]"
             tokens = self.state.stage_buffers[stage].stage_tokens
             lines.append(f"    {stage.value:<7}: {label}{suffix}  [tokens: {tokens:,}]")
         lines.append("")

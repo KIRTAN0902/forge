@@ -57,14 +57,16 @@ ignore = ["RUF012", "SIM905"]
 # Pattern tables read best one rule per line.
 "src/forge/tools/**" = ["E501"]
 "src/forge/cli/**" = ["E501", "ASYNC240", "RUF001"]
+# The TUI intentionally uses clean dev typography (❯ ● ○ │ ├─ ◆).
+"src/forge/ui/**" = ["E501", "RUF001"]
 "src/forge/skills/**" = ["E501"]
 "src/forge/harness/**" = ["E501", "ASYNC210", "ASYNC221"]
 "src/forge/policies/commands.py" = ["E501"]
 "src/forge/agents/**" = ["E501"]
 "src/forge/workflow/router.py" = ["E501"]
 "src/forge/research/**" = ["E501"]
-# Tests verify results with plain blocking subprocess calls.
-"tests/**" = ["ASYNC210", "ASYNC221", "ASYNC240", "E501"]
+# Tests verify results with plain blocking subprocess calls and assert TUI glyphs.
+"tests/**" = ["ASYNC210", "ASYNC221", "ASYNC240", "E501", "RUF001"]
 
 [tool.mypy]
 python_version = "3.11"

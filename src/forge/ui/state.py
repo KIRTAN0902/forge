@@ -12,7 +12,6 @@ from enum import StrEnum
 from typing import Literal
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.text import Text
 
 
@@ -56,6 +55,20 @@ def format_tokens(count: int) -> str:
     return f"{val:.2f}M"
 
 
+def _turn_marker(speaker: str) -> tuple[str, str]:
+    """Map a transcript speaker to a minimalist marker + style (no emoji)."""
+    low = speaker.strip().lower()
+    if low in {"you", "user", "developer"}:
+        return "❯ user", "bold #e2e8f0"
+    if low == "anvil":
+        return "● anvil", "bold #3b82f6"
+    if low == "hammer":
+        return "● hammer", "bold #ef4444"
+    if low == "temper":
+        return "● temper", "bold #10b981"
+    return "◆ forge", "bold #94a3b8"
+
+
 @dataclass
 class StageBuffer:
     """Isolated, async-safe buffer storing execution state and thoughts for a single stage."""
@@ -70,7 +83,7 @@ class StageBuffer:
     status: Literal["idle", "running", "passed", "failed"] = "idle"
 
     def render_to_ansi(self, width: int = 80, pending_question: UserQuestion | None = None) -> str:
-        """Render the stage buffer into an ANSI-formatted string using Rich."""
+        """Render the stage buffer into clean, flat ANSI-formatted text (no boxes, no emoji)."""
         effective_width = max(30, width)
         sio = io.StringIO()
         console = Console(
@@ -84,168 +97,95 @@ class StageBuffer:
         stage_color = {
             ForgeStage.ANVIL: "#3b82f6",
             ForgeStage.HAMMER: "#ef4444",
-            ForgeStage.TEMPER: "#22c55e",
+            ForgeStage.TEMPER: "#10b981",
         }.get(self.stage, "#3b82f6")
 
-        stage_icon = {
-            ForgeStage.ANVIL: "🎯",
-            ForgeStage.HAMMER: "⚡",
-            ForgeStage.TEMPER: "🔍",
-        }.get(self.stage, "🔨")
-
-        stage_subtitle = {
-            ForgeStage.ANVIL: "Orchestrator & Architecture Planning",
-            ForgeStage.HAMMER: "Code Synthesis, AST Mutation & Tool Execution",
-            ForgeStage.TEMPER: "Adversarial QA Gatekeeper & Verification",
-        }.get(self.stage, "")
-
         status_style = {
-            "idle": "dim white",
-            "running": "bold yellow",
-            "passed": "bold green",
-            "failed": "bold red",
-        }.get(self.status, "white")
+            "idle": "dim #94a3b8",
+            "running": "bold #facc15",
+            "passed": "bold #10b981",
+            "failed": "bold #ef4444",
+        }.get(self.status, "#94a3b8")
 
-        # 1. Header Banner
-        header_text = Text()
-        header_text.append(f"{stage_icon} {self.stage.value.upper()} ", style=f"bold {stage_color}")
-        header_text.append(f"— {stage_subtitle}\n", style="dim white")
-        header_text.append("Status: ", style="bold white")
-        header_text.append(f"[{self.status.upper()}]  ", style=status_style)
-        header_text.append("Tokens: ", style="bold white")
-        header_text.append(
-            f"{format_tokens(self.stage_tokens)} ({self.stage_tokens:,})\n", style="bold #f97316"
+        def rule() -> str:
+            return "─" * (effective_width - 1)
+
+        def print_rule() -> None:
+            console.print(Text(rule(), style="#334155"))
+
+        # 1. Flat stage identity line (serious developer typography, no panel).
+        header = Text()
+        header.append(f"FORGE // {self.stage.value.upper()}", style=f"bold {stage_color}")
+        header.append(f"   {self.status.upper()}", style=status_style)
+        header.append(
+            f"   tokens {format_tokens(self.stage_tokens)} ({self.stage_tokens:,})",
+            style="#f97316",
         )
+        console.print(header)
+        print_rule()
 
-        console.print(
-            Panel(
-                header_text,
-                title=f"[bold {stage_color}]{self.stage.value} Stage[/bold {stage_color}]",
-                border_style=stage_color,
-                expand=True,
-            )
-        )
+        # 2. Conversational transcript, edge-to-edge with a subtle rule between turns.
+        for speaker, message in self.chat_history:
+            label, style = _turn_marker(speaker)
+            console.print(Text(label, style=style))
+            body = message.strip("\n")
+            if body:
+                for para in body.splitlines():
+                    console.print(Text(f"  {para}", style="#e2e8f0"))
+            print_rule()
 
-        # 2. Conversational Transcript (persistent multi-turn chat scrollback)
-        if self.chat_history:
-            console.print()
-            chat_text = Text()
-            for speaker, message in self.chat_history:
-                if speaker.lower() in {"you", "user", "developer"}:
-                    chat_text.append(f"👤 {speaker}: ", style="bold #38bdf8")
-                else:
-                    chat_text.append(f"{stage_icon} {speaker}: ", style=f"bold {stage_color}")
-                chat_text.append(f"{message.strip()}\n\n", style="white")
-
-            console.print(
-                Panel(
-                    chat_text,
-                    title=f"[bold {stage_color}]💬 Conversation[/bold {stage_color}]",
-                    border_style=stage_color,
-                    expand=True,
-                )
-            )
-
-        # 3. Thought Process Section
+        # 3. Thought process.
         if self.thoughts:
-            console.print()
-            thought_text = Text()
-            for idx, t in enumerate(self.thoughts, start=1):
-                thought_text.append(f"  [{idx}] ", style=f"bold {stage_color}")
-                thought_text.append(f"{t.strip()}\n", style="white")
+            console.print(Text("── Thought Process ──", style="bold #64748b"))
+            for thought in self.thoughts:
+                row = Text()
+                row.append("│ ├─ thought: ", style="italic #64748b")
+                row.append(thought.strip(), style="#cbd5e1")
+                console.print(row)
 
-            console.print(
-                Panel(
-                    thought_text,
-                    title=(
-                        f"[bold {stage_color}]💭 Thought Process "
-                        f"({len(self.thoughts)} steps)[/bold {stage_color}]"
-                    ),
-                    border_style="dim cyan",
-                    expand=True,
-                )
-            )
-
-        # 4. Tool & Sandbox Execution Section
+        # 4. Tool & sandbox execution.
         if self.tool_events:
-            console.print()
-            events_text = Text()
-            for ev in self.tool_events:
-                events_text.append(f"  • {ev.strip()}\n", style="yellow")
+            console.print(Text("── Tool & Sandbox Execution ──", style="bold #64748b"))
+            for event in self.tool_events:
+                stripped = event.strip()
+                row = Text()
+                if stripped.startswith("[WARN]") or "error" in stripped.lower():
+                    row.append("│ ├─ ", style="#64748b")
+                    row.append(
+                        f"[WARN] {stripped.removeprefix('[WARN]').strip()}",
+                        style="bold #f59e0b",
+                    )
+                else:
+                    row.append("│ ├─ exec: ", style="#64748b")
+                    row.append(stripped, style="#cbd5e1")
+                console.print(row)
 
-            console.print(
-                Panel(
-                    events_text,
-                    title="[bold yellow]🛠 Tool & Sandbox Execution[/bold yellow]",
-                    border_style="yellow",
-                    expand=True,
-                )
-            )
-
-        # 5. Stage Output / Final Deliverable / Defect Report
+        # 5. Stage output / deliverable / defect report (flat, typographic heading).
         if self.final_output:
-            console.print()
             if self.stage == ForgeStage.TEMPER and self.status == "passed":
-                deliverable_text = Text()
-                deliverable_text.append(
-                    "✔ QA Verification Passed — All Requirements Satisfied!\n\n", style="bold green"
-                )
-                deliverable_text.append(self.final_output.strip(), style="white")
-                console.print(
-                    Panel(
-                        deliverable_text,
-                        title="[bold green]✅ Verified Final Output Deliverable[/bold green]",
-                        border_style="bold green",
-                        expand=True,
-                    )
-                )
+                heading, color = "Verified Final Output Deliverable", "#10b981"
             elif self.status == "failed":
-                defect_text = Text()
-                defect_text.append(
-                    "✖ Defects Identified — Triggering Automatic Next Cycle:\n\n", style="bold red"
-                )
-                defect_text.append(self.final_output.strip(), style="white")
-                console.print(
-                    Panel(
-                        defect_text,
-                        title="[bold red]❌ Rejection & Defect Report[/bold red]",
-                        border_style="bold red",
-                        expand=True,
-                    )
-                )
+                heading, color = "Rejection & Defect Report", "#ef4444"
             else:
-                console.print(
-                    Panel(
-                        Text(self.final_output.strip(), style="white"),
-                        title=f"[bold {stage_color}]Stage Output[/bold {stage_color}]",
-                        border_style=stage_color,
-                        expand=True,
-                    )
-                )
+                heading, color = "Stage Output", stage_color
+            console.print(Text(f"── {heading} ──", style=f"bold {color}"))
+            console.print(Text(self.final_output.strip(), style="#e2e8f0"))
 
-        # 6. Interactive Question Card (when Orchestrator or stage asks user for input)
+        # 6. Interactive question card (flat).
         if pending_question is not None and pending_question.stage == self.stage:
-            console.print()
-            q_text = Text()
-            q_text.append(f"{pending_question.question}\n\n", style="bold white")
+            console.print(Text("Question from Orchestrator", style="bold #00e5ff"))
+            console.print(Text(pending_question.question, style="bold #e2e8f0"))
             for idx, opt in enumerate(pending_question.options, start=1):
                 is_default = opt == pending_question.default_option
-                def_marker = " (Default)" if is_default else ""
-                q_text.append(f"  [{idx}] ", style="bold #00e5ff")
-                q_text.append(
-                    f"{opt}{def_marker}\n",
-                    style="bright_cyan bold" if is_default else "white",
-                )
-            q_text.append(
-                f"\nSelect [1-{len(pending_question.options)}] or type your answer below:",
-                style="italic #94a3b8",
-            )
+                suffix = " (Default)" if is_default else ""
+                row = Text()
+                row.append(f"  [{idx}] ", style="bold #00e5ff")
+                row.append(f"{opt}{suffix}", style="bold #67e8f9" if is_default else "#e2e8f0")
+                console.print(row)
             console.print(
-                Panel(
-                    q_text,
-                    title="[bold #00e5ff]❓ Question from Orchestrator[/bold #00e5ff]",
-                    border_style="#00e5ff",
-                    expand=True,
+                Text(
+                    f"Select [1-{len(pending_question.options)}] or type your answer below:",
+                    style="italic #94a3b8",
                 )
             )
 

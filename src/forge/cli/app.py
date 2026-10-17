@@ -163,6 +163,24 @@ async def _build_tui_controller(state: Any, harness: Any, path: Path) -> Any:
         return await _run_research_pipeline(path, topic)
 
     project_context = f"Project: {path.name}\nPath: {path.resolve()}"
+
+    from forge.config.settings import ForgeConfigManager
+    from forge.providers.client import UnifiedLLMClient
+
+    config_manager = ForgeConfigManager()
+    auto_binding = config_manager.auto_resolve_bindings()
+    llm_client = UnifiedLLMClient(
+        api_key_resolver=config_manager.api_key_for,
+        base_url_resolver=lambda provider: config_manager.provider(provider).base_url,
+    )
+    if auto_binding is not None:
+        state.append_chat(
+            ForgeStage.ANVIL,
+            "Forge",
+            f"Auto-attached {auto_binding.spec_string} [{auto_binding.model_tier.value}] "
+            "to every stage. Use /provider or /key to change it.",
+        )
+
     return ForgeCycleController(
         state=state,
         runtime=runtime,
@@ -172,6 +190,8 @@ async def _build_tui_controller(state: Any, harness: Any, path: Path) -> Any:
         agents=agents,
         workflow_runner=workflow_runner,
         research_runner=research_runner,
+        config_manager=config_manager,
+        llm_client=llm_client,
     )
 
 

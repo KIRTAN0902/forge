@@ -298,8 +298,8 @@ def test_split_app_wires_completer_and_input_bindings() -> None:
 
     assert app.input_buffer.completer is app.completer
     prompt_fragments = app._render_input_prompt()
-    assert prompt_fragments[0][1] == "> "
-    assert [f[1] for f in prompt_fragments[1:]] == ["[Anvil →] "]
+    assert prompt_fragments[0][1] == "anvil ❯ "
+    assert list(prompt_fragments[1:]) == []
 
 
 def test_forced_cycle_mode_overrides_classification() -> None:
