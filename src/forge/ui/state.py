@@ -80,9 +80,16 @@ class StageBuffer:
     final_output: str = ""
     stage_tokens: int = 0
     scroll_line: int = 0
+    scroll_offset: int = 0
+    total_rendered_lines: int = 0
     status: Literal["idle", "running", "passed", "failed"] = "idle"
 
-    def render_to_ansi(self, width: int = 80, pending_question: UserQuestion | None = None) -> str:
+    def render_to_ansi(
+        self,
+        width: int = 80,
+        pending_question: UserQuestion | None = None,
+        height: int | None = None,
+    ) -> str:
         """Render the stage buffer into clean, flat ANSI-formatted text (no boxes, no emoji)."""
         effective_width = max(30, width)
         sio = io.StringIO()
@@ -155,12 +162,33 @@ class StageBuffer:
             )
 
         full_output = sio.getvalue()
-
-        # Handle vertical scrolling
         lines = full_output.splitlines()
-        if self.scroll_line > 0 and self.scroll_line < len(lines):
-            return "\n".join(lines[self.scroll_line :])
-        return full_output
+        self.total_rendered_lines = len(lines)
+
+        # If no explicit height constraint is given (e.g. in test assertions),
+        # return full output unless scroll_offset / scroll_line was explicitly requested.
+        if height is None:
+            if self.scroll_offset > 0 and len(lines) > self.scroll_offset:
+                start = max(0, len(lines) - self.scroll_offset)
+                self.scroll_line = start
+                return "\n".join(lines[start:])
+            if self.scroll_line > 0 and self.scroll_line < len(lines):
+                return "\n".join(lines[self.scroll_line :])
+            return full_output
+
+        # Handle vertical scrolling with dynamic viewport height (auto-scroll to bottom by default)
+        total = len(lines)
+        if total <= height:
+            self.scroll_offset = 0
+            self.scroll_line = 0
+            return full_output
+
+        max_offset = total - height
+        self.scroll_offset = min(max_offset, max(0, self.scroll_offset))
+        start = total - height - self.scroll_offset
+        end = start + height
+        self.scroll_line = start
+        return "\n".join(lines[start:end])
 
 
 class ForgeTUIState:
@@ -247,6 +275,8 @@ class ForgeTUIState:
         buffer.final_output = ""
         buffer.stage_tokens = 0
         buffer.scroll_line = 0
+        buffer.scroll_offset = 0
+        buffer.total_rendered_lines = 0
         buffer.status = "idle"
         if self.selected_view_stage == stage and self.active_worker_stage is None:
             self.active_stage_tokens = 0
@@ -349,15 +379,27 @@ class ForgeTUIState:
         self._notify_redraw()
 
     def scroll_up(self, lines: int = 3) -> None:
-        """Scroll the viewed stage buffer up."""
+        """Scroll the viewed stage buffer up toward earlier output."""
         buf = self.get_active_view_buffer()
-        buf.scroll_line = max(0, buf.scroll_line - lines)
+        buf.scroll_offset += lines
         self._notify_redraw()
 
     def scroll_down(self, lines: int = 3) -> None:
-        """Scroll the viewed stage buffer down."""
+        """Scroll the viewed stage buffer down toward newer output."""
         buf = self.get_active_view_buffer()
-        buf.scroll_line += lines
+        buf.scroll_offset = max(0, buf.scroll_offset - lines)
+        self._notify_redraw()
+
+    def scroll_to_top(self) -> None:
+        """Scroll to the very top of the viewed stage buffer."""
+        buf = self.get_active_view_buffer()
+        buf.scroll_offset = 999999
+        self._notify_redraw()
+
+    def scroll_to_bottom(self) -> None:
+        """Scroll to the bottom of the viewed stage buffer (auto-scroll live view)."""
+        buf = self.get_active_view_buffer()
+        buf.scroll_offset = 0
         self._notify_redraw()
 
     def get_active_view_buffer(self) -> StageBuffer:

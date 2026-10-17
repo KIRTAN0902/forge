@@ -472,3 +472,72 @@ async def test_ask_user_question_tool() -> None:
     env.ask_question = custom_ask
     out2 = await tool.run(inp, env)
     assert out2.answer == "unittest"
+
+
+def test_viewport_height_scrolling_and_auto_scroll() -> None:
+    """Verify viewport scrolls dynamically as output grows, auto-follows at bottom, and supports scrolling up/down/top/bottom."""
+    state = ForgeTUIState()
+    buf = state.stage_buffers[ForgeStage.ANVIL]
+
+    # Add 40 turns of output
+    for i in range(40):
+        buf.chat_history.append(("You" if i % 2 == 0 else "Anvil", f"Message line {i:02d}"))
+
+    # Render with height = 15
+    rendered_bottom = buf.render_to_ansi(width=80, height=15)
+    lines_bottom = rendered_bottom.splitlines()
+
+    # Must display exactly 15 lines
+    assert len(lines_bottom) == 15
+    # Auto-scroll at bottom: must show latest lines (e.g. Message line 39)
+    assert any("Message line 39" in line for line in lines_bottom)
+    assert not any("Message line 00" in line for line in lines_bottom)
+    assert buf.scroll_offset == 0
+
+    # User scrolls up by 10 lines
+    state.scroll_up(10)
+    assert buf.scroll_offset == 10
+    rendered_up = buf.render_to_ansi(width=80, height=15)
+    lines_up = rendered_up.splitlines()
+    assert len(lines_up) == 15
+    # Should show earlier content and not the very last lines
+    assert not any("Message line 39" in line for line in lines_up)
+
+    # Scroll to top (Home)
+    state.scroll_to_top()
+    rendered_top = buf.render_to_ansi(width=80, height=15)
+    lines_top = rendered_top.splitlines()
+    assert len(lines_top) == 15
+    # Top must show the earliest lines
+    assert any("Message line 00" in line for line in lines_top)
+
+    # Scroll to bottom (End)
+    state.scroll_to_bottom()
+    assert buf.scroll_offset == 0
+    rendered_rebottom = buf.render_to_ansi(width=80, height=15)
+    assert any("Message line 39" in line for line in rendered_rebottom.splitlines())
+
+
+def test_bottom_divider_scroll_indicator() -> None:
+    """Verify bottom divider renders scroll status indicator when scrolled up or when long output exists."""
+    state = ForgeTUIState()
+    app = ForgeSplitPaneApp(state=state)
+    buf = state.stage_buffers[ForgeStage.ANVIL]
+
+    # Empty / short buffer: standard border line
+    divider_plain = "".join(t for _, t in app._render_bottom_divider())
+    assert "─" in divider_plain
+    assert "SCROLLED UP" not in divider_plain
+
+    # Long output at bottom: shows LIVE OUTPUT
+    buf.total_rendered_lines = 50
+    buf.scroll_offset = 0
+    divider_live = "".join(t for _, t in app._render_bottom_divider())
+    assert "LIVE OUTPUT (50 lines)" in divider_live
+
+    # Scrolled up: shows SCROLLED UP in amber
+    buf.scroll_offset = 12
+    frags = app._render_bottom_divider()
+    divider_up = "".join(t for _, t in frags)
+    assert "SCROLLED UP (+12 lines)" in divider_up
+    assert any(style == "class:scroll_indicator_up" for style, _ in frags)

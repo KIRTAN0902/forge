@@ -235,6 +235,7 @@ def render_sidebar_formatted_text(
     fragments.append(("class:hint", " [F5] Toggle Mode\n"))
     fragments.append(("class:hint", " [Alt+←/→] History\n"))
     fragments.append(("class:hint", " [PgUp/Dn] Scroll View\n"))
+    fragments.append(("class:hint", " [Home/End] Top/Bottom\n"))
     fragments.append(("class:hint", " [Tab] / Commands\n"))
     fragments.append(("class:hint", " [Ctrl+C] Cancel Task\n"))
     fragments.append(("class:hint", " [Ctrl+Q] Exit Forge\n"))
@@ -338,9 +339,13 @@ class ForgeSplitPaneApp:
             style="class:viewport",
         )
 
+        self.divider_bottom_control = FormattedTextControl(
+            text=self._render_bottom_divider,
+            show_cursor=False,
+        )
         self.divider_horizontal_bottom = Window(
+            content=self.divider_bottom_control,
             height=1,
-            char="─",
             style="class:border",
         )
 
@@ -479,6 +484,8 @@ class ForgeSplitPaneApp:
                 "modal_footer": "#64748b italic",
                 "modal_search_active": "#38bdf8 bold",
                 "modal_search_hint": "#64748b italic",
+                "scroll_indicator_up": "#f59e0b bold",
+                "scroll_indicator_down": "#64748b italic",
             }
         )
 
@@ -622,14 +629,45 @@ class ForgeSplitPaneApp:
         return fragments
 
     def _render_viewport(self) -> AnyFormattedText:
-        """Render the exclusive stage viewport buffer using ANSI conversion."""
-        cols = shutil.get_terminal_size((100, 30)).columns
+        """Render the exclusive stage viewport buffer using ANSI conversion with height-aware scrolling."""
+        cols, rows = shutil.get_terminal_size((100, 30))
         viewport_width = max(30, cols - 32)
+        header_h = self._header_height()
+        input_h = 3 if not self.input_buffer.text else 2
+        viewport_height = max(5, rows - header_h - input_h - 2)
         stage_buffer = self.state.get_active_view_buffer()
         ansi_output = stage_buffer.render_to_ansi(
-            width=viewport_width, pending_question=self.state.pending_question
+            width=viewport_width,
+            pending_question=self.state.pending_question,
+            height=viewport_height,
         )
         return ANSI(ansi_output)
+
+    def _render_bottom_divider(self) -> StyleAndTextTuples:
+        """Render the bottom horizontal divider with dynamic scroll position indicator."""
+        cols = shutil.get_terminal_size((100, 30)).columns
+        viewport_width = max(30, cols - 32)
+        buf = self.state.get_active_view_buffer()
+        total = buf.total_rendered_lines
+        offset = buf.scroll_offset
+
+        if offset > 0:
+            badge = f"▲ SCROLLED UP (+{offset} lines) │ [PgDn/End] to return "
+            rem = max(0, viewport_width - len(badge) - 4)
+            return [
+                ("class:border", "─── "),
+                ("class:scroll_indicator_up", badge),
+                ("class:border", "─" * rem),
+            ]
+        if total > 20:
+            badge = f"▼ LIVE OUTPUT ({total} lines) │ [PgUp] to scroll "
+            rem = max(0, viewport_width - len(badge) - 4)
+            return [
+                ("class:border", "─── "),
+                ("class:scroll_indicator_down", badge),
+                ("class:border", "─" * rem),
+            ]
+        return [("class:border", "─" * viewport_width)]
 
     def _setup_keybindings(self) -> None:
         """Wire all required keyboard shortcuts for non-blocking stage switching and navigation."""
@@ -677,6 +715,46 @@ class ForgeSplitPaneApp:
         def _scroll_down(event: KeyPressEvent) -> None:
             self.state.scroll_down(5)
 
+        @self.kb.add("home")
+        def _scroll_top(event: KeyPressEvent) -> None:
+            self.state.scroll_to_top()
+
+        @self.kb.add("end")
+        def _scroll_bottom(event: KeyPressEvent) -> None:
+            self.state.scroll_to_bottom()
+
+        @self.kb.add("escape", "up")
+        def _alt_up(event: KeyPressEvent) -> None:
+            self.state.scroll_up(3)
+
+        @self.kb.add("escape", "down")
+        def _alt_down(event: KeyPressEvent) -> None:
+            self.state.scroll_down(3)
+
+        @self.kb.add("c-u")
+        def _ctrl_u(event: KeyPressEvent) -> None:
+            self.state.scroll_up(10)
+
+        @self.kb.add(
+            "up",
+            filter=Condition(
+                lambda: not self.input_buffer.text
+                and (not hasattr(self, "modal_manager") or not self.modal_manager.is_open)
+            ),
+        )
+        def _up_scroll(event: KeyPressEvent) -> None:
+            self.state.scroll_up(2)
+
+        @self.kb.add(
+            "down",
+            filter=Condition(
+                lambda: not self.input_buffer.text
+                and (not hasattr(self, "modal_manager") or not self.modal_manager.is_open)
+            ),
+        )
+        def _down_scroll(event: KeyPressEvent) -> None:
+            self.state.scroll_down(2)
+
         @self.kb.add("tab")
         def _complete(event: KeyPressEvent) -> None:
             """Cycle through the `/` completion popup, opening it on first Tab."""
@@ -690,6 +768,9 @@ class ForgeSplitPaneApp:
         def _handle_enter(event: KeyPressEvent) -> None:
             user_text = self.input_buffer.text
             self.input_buffer.text = ""
+
+            # Snap scroll back to bottom to follow live execution stream
+            self.state.get_active_view_buffer().scroll_offset = 0
 
             # 1. Answer pending question if Orchestrator is awaiting user response
             if self.state.pending_question is not None:
