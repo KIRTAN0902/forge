@@ -692,6 +692,8 @@ class ForgeCycleController:
             if messages:
                 self._history[stage] = list(messages)
             handoff = getattr(turn, "handoff_requirements", None)
+            if not reply and hasattr(turn, "reasoning"):
+                reply = (getattr(turn, "reasoning", "") or "").strip()
             if not reply:
                 reply = "(no response)"
 
@@ -741,7 +743,7 @@ class ForgeCycleController:
             self.state.set_active_stage(None)
             return reply
 
-        reply = (response.content or "").strip() or "(no response)"
+        reply = (response.content or response.reasoning_content or "").strip() or "(no response)"
         self.state.record_tokens(stage, response.total_tokens)
         self.state.finalize_stream(stage, reply)
         self.conversation_history[stage].append({"role": "assistant", "content": reply})

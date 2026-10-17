@@ -135,11 +135,14 @@ class StageModelBinding(_Model):
     provider: ProviderName
     model: str
     temperature: float = 0.2
-    max_tokens: int = 4096
+    max_tokens: int = 8192
 
     @property
     def spec_string(self) -> str:
         """Canonical ``provider/model`` string (e.g. ``gemini/gemini-2.5-flash``)."""
+        prefix = f"{self.provider.value}/"
+        if self.model.startswith(prefix):
+            return self.model
         return f"{self.provider.value}/{self.model}"
 
     @property

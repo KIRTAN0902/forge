@@ -31,6 +31,7 @@ from prompt_toolkit.layout.containers import (
     Window,
 )
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.output import DummyOutput, Output
@@ -292,7 +293,7 @@ class ForgeSplitPaneApp:
         # Input buffer with live `/` command autocompletion
         self.completer = SlashCommandCompleter()
         self.input_buffer = Buffer(
-            multiline=False,
+            multiline=True,
             completer=self.completer,
             complete_while_typing=True,
         )
@@ -359,7 +360,8 @@ class ForgeSplitPaneApp:
         )
         self.input_window = Window(
             content=self.input_control,
-            height=1,
+            height=Dimension(min=1, max=6),
+            wrap_lines=True,
             style="class:input_box",
         )
         self.input_box_row = VSplit(
@@ -367,11 +369,12 @@ class ForgeSplitPaneApp:
                 Window(
                     content=self.input_prompt_control,
                     dont_extend_width=True,
+                    dont_extend_height=True,
                     style="class:input_box",
                 ),
                 self.input_window,
             ],
-            height=1,
+            height=Dimension(min=1, max=6),
         )
         self.input_top_border = Window(height=1, char="─", style="class:input_border")
         self.input_hint_control = FormattedTextControl(
@@ -587,7 +590,7 @@ class ForgeSplitPaneApp:
         return [
             (
                 "class:hint",
-                "Type a task, question, /provider, /models, /usage, /resume, /restart, /help, or !shell...",
+                "Type a task, question, /provider, /models, /usage, /help, or !shell (Alt+Enter for newline, paste supported)...",
             )
         ]
 
@@ -633,7 +636,12 @@ class ForgeSplitPaneApp:
         cols, rows = shutil.get_terminal_size((100, 30))
         viewport_width = max(30, cols - 32)
         header_h = self._header_height()
-        input_h = 3 if not self.input_buffer.text else 2
+        input_lines = (
+            min(6, max(1, len(self.input_buffer.text.splitlines())))
+            if self.input_buffer.text
+            else 1
+        )
+        input_h = input_lines + 1 + (1 if not self.input_buffer.text else 0)
         viewport_height = max(5, rows - header_h - input_h - 2)
         stage_buffer = self.state.get_active_view_buffer()
         ansi_output = stage_buffer.render_to_ansi(
@@ -763,6 +771,11 @@ class ForgeSplitPaneApp:
                 buffer.complete_next()
             else:
                 buffer.start_completion(select_first=True)
+
+        @self.kb.add("escape", "enter")
+        @self.kb.add("c-j")
+        def _handle_newline(event: KeyPressEvent) -> None:
+            self.input_buffer.insert_text("\n")
 
         @self.kb.add("enter")
         def _handle_enter(event: KeyPressEvent) -> None:

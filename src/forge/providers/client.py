@@ -59,6 +59,8 @@ class LLMResponse(BaseModel):
 
     def finish(self, model: str, provider: ProviderName) -> LLMResponse:
         """Backfill totals (and any missing halves) after streaming completes."""
+        if not self.content and self.reasoning_content:
+            self.content = self.reasoning_content
         if not self.prompt_tokens:
             self.prompt_tokens = _estimate_tokens(self.content)
         if not self.completion_tokens:
@@ -482,7 +484,11 @@ def _parse_openai_response(payload: dict[str, Any], result: LLMResponse) -> LLMR
     choices = payload.get("choices") or []
     message = (choices[0].get("message") if choices else {}) or {}
     result.content = str(message.get("content") or "")
-    result.reasoning_content = str(message.get("reasoning_content") or "")
+    result.reasoning_content = str(
+        message.get("reasoning_content") or message.get("reasoning") or message.get("thought") or ""
+    )
+    if not result.content and result.reasoning_content:
+        result.content = result.reasoning_content
     result.tool_calls = list(message.get("tool_calls") or [])
     usage = payload.get("usage") or {}
     result.prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -543,7 +549,11 @@ def _consume_openai_chunk(
         if content:
             result.content += content
             on_token(content)
-        reasoning = delta.get("reasoning_content")
+        reasoning = (
+            delta.get("reasoning_content")
+            or delta.get("reasoning")
+            or delta.get("thought")
+        )
         if reasoning:
             result.reasoning_content += reasoning
     usage = payload.get("usage")
