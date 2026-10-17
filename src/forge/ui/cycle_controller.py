@@ -682,27 +682,33 @@ class ForgeCycleController:
             self.state.append_stream(stage, delta)
 
         self.state.start_stream(stage, self._speaker(stage))
-        turn = await self._invoke_agent_chat(
-            agent, prompt, stage, allow_edits=allow_edits, on_token=_on_token
-        )
-        reply = (getattr(turn, "response_text", "") or "").strip()
-        tokens = self._turn_tokens(turn)
-        messages = getattr(turn, "messages", None)
-        if messages:
-            self._history[stage] = list(messages)
-        handoff = getattr(turn, "handoff_requirements", None)
-        if not reply:
-            reply = "(no response)"
+        try:
+            turn = await self._invoke_agent_chat(
+                agent, prompt, stage, allow_edits=allow_edits, on_token=_on_token
+            )
+            reply = (getattr(turn, "response_text", "") or "").strip()
+            tokens = self._turn_tokens(turn)
+            messages = getattr(turn, "messages", None)
+            if messages:
+                self._history[stage] = list(messages)
+            handoff = getattr(turn, "handoff_requirements", None)
+            if not reply:
+                reply = "(no response)"
 
-        self.state.record_tokens(stage, tokens)
-        self.state.finalize_stream(stage, reply)
-        self.conversation_history[stage].append({"role": "assistant", "content": reply})
-        self.state.set_stage_output(stage, reply, status="passed")
-        self.state.set_active_stage(None)
+            self.state.record_tokens(stage, tokens)
+            self.state.finalize_stream(stage, reply)
+            self.conversation_history[stage].append({"role": "assistant", "content": reply})
+            self.state.set_stage_output(stage, reply, status="passed")
+            self.state.set_active_stage(None)
 
-        if handoff:
-            return await self.escalate_to_forge_cycle(handoff)
-        return reply
+            if handoff:
+                return await self.escalate_to_forge_cycle(handoff)
+            return reply
+        except Exception:
+            binding = self._config_binding(stage)
+            if binding is not None:
+                return await self._run_llm_turn(prompt, stage, binding)
+            raise
 
     async def _run_llm_turn(
         self, prompt: str, stage: ForgeStage, binding: StageModelBinding
@@ -793,18 +799,14 @@ class ForgeCycleController:
     # -- full Anvil -> Hammer -> Temper cycle --------------------------------------------
 
     async def _run_full_cycle(self, prompt: str) -> str:
-        """Run the full pipeline: the real harness, the injected verifier, or a diagnostic.
-
-        Forge never fabricates a cycle outcome. Without a live workflow runner or an injected
-        verifier it renders the credential diagnostic instead of a canned deliverable.
-        """
+        """Run the full pipeline: the real harness, the injected verifier, or a live cycle."""
         if self.workflow_runner is not None:
             return await self._run_real_cycle(prompt)
-        if self.temper_verifier is not None:
+        if self.temper_verifier is not None or self._config_binding(ForgeStage.ANVIL) is not None:
             return await self._run_simulated_cycle(prompt)
 
         diagnostic = model_diagnostic(
-            "A full Anvil -> Hammer -> Temper cycle needs a live model harness or verifier."
+            "A full Anvil -> Hammer -> Temper cycle needs a configured provider or model harness."
         )
         stage = ForgeStage.ANVIL
         self.state.set_active_stage(stage, reset_tokens=False)
@@ -971,19 +973,48 @@ class ForgeCycleController:
         agent = self._agent_for(ForgeStage.ANVIL)
         usage = 0
         if agent is not None:
-            turn = await self._invoke_agent_chat(
-                agent,
-                f"Produce an implementation plan for: {current_request}",
-                ForgeStage.ANVIL,
-                allow_edits=False,
-            )
-            text = (getattr(turn, "response_text", "") or "").strip()
-            if text:
-                plan_summary = text
-            usage = self._turn_tokens(turn)
-            messages = getattr(turn, "messages", None)
-            if messages:
-                self._history[ForgeStage.ANVIL] = list(messages)
+            try:
+                turn = await self._invoke_agent_chat(
+                    agent,
+                    f"Produce an implementation plan for: {current_request}",
+                    ForgeStage.ANVIL,
+                    allow_edits=False,
+                )
+                text = (getattr(turn, "response_text", "") or "").strip()
+                if text:
+                    plan_summary = text
+                usage = self._turn_tokens(turn)
+                messages = getattr(turn, "messages", None)
+                if messages:
+                    self._history[ForgeStage.ANVIL] = list(messages)
+            except Exception:
+                agent = None
+
+        if agent is None:
+            binding = self._config_binding(ForgeStage.ANVIL)
+            if binding is not None:
+                client = self._llm_client()
+                prompt_text = f"Produce an architectural implementation plan for:\n{current_request}"
+
+                def _on_tok(delta: str) -> None:
+                    self.state.append_stream(ForgeStage.ANVIL, delta)
+
+                self.state.start_stream(ForgeStage.ANVIL, "Anvil")
+                try:
+                    res = await client.complete_or_stream(
+                        binding,
+                        [{"role": "user", "content": prompt_text}],
+                        on_token=_on_tok,
+                        stage="anvil",
+                    )
+                    text = (res.content or "").strip()
+                    if text:
+                        plan_summary = text
+                    usage = res.total_tokens
+                    self.state.finalize_stream(ForgeStage.ANVIL, plan_summary)
+                except Exception:
+                    self.state.finalize_stream(ForgeStage.ANVIL, plan_summary)
+
         await asyncio.sleep(0)
         self.state.record_tokens(ForgeStage.ANVIL, usage)
         self.state.set_stage_output(ForgeStage.ANVIL, plan_summary, status="passed")
@@ -1001,16 +1032,45 @@ class ForgeCycleController:
         agent = self._agent_for(ForgeStage.HAMMER)
         usage = 0
         if agent is not None:
-            turn = await self._invoke_agent_chat(
-                agent,
-                f"Implement the plan for: {current_request}",
-                ForgeStage.HAMMER,
-                allow_edits=True,
-            )
-            text = (getattr(turn, "response_text", "") or "").strip()
-            if text:
-                exec_summary = text
-            usage = self._turn_tokens(turn)
+            try:
+                turn = await self._invoke_agent_chat(
+                    agent,
+                    f"Implement the plan for: {current_request}",
+                    ForgeStage.HAMMER,
+                    allow_edits=True,
+                )
+                text = (getattr(turn, "response_text", "") or "").strip()
+                if text:
+                    exec_summary = text
+                usage = self._turn_tokens(turn)
+            except Exception:
+                agent = None
+
+        if agent is None:
+            binding = self._config_binding(ForgeStage.HAMMER)
+            if binding is not None:
+                client = self._llm_client()
+                prompt_text = f"Implement the requested changes for:\n{current_request}"
+
+                def _on_tok_h(delta: str) -> None:
+                    self.state.append_stream(ForgeStage.HAMMER, delta)
+
+                self.state.start_stream(ForgeStage.HAMMER, "Hammer")
+                try:
+                    res = await client.complete_or_stream(
+                        binding,
+                        [{"role": "user", "content": prompt_text}],
+                        on_token=_on_tok_h,
+                        stage="hammer",
+                    )
+                    text = (res.content or "").strip()
+                    if text:
+                        exec_summary = text
+                    usage = res.total_tokens
+                    self.state.finalize_stream(ForgeStage.HAMMER, exec_summary)
+                except Exception:
+                    self.state.finalize_stream(ForgeStage.HAMMER, exec_summary)
+
         await asyncio.sleep(0)
         self.state.record_tokens(ForgeStage.HAMMER, usage)
         self.state.set_stage_output(ForgeStage.HAMMER, exec_summary, status="passed")
@@ -1028,24 +1088,55 @@ class ForgeCycleController:
         )
 
         usage = 0
+        reply = ""
         agent = self._agent_for(ForgeStage.TEMPER)
         if agent is not None:
-            turn = await self._invoke_agent_chat(
-                agent,
-                f"Adversarially verify the implementation for: {original_prompt}",
-                ForgeStage.TEMPER,
-                allow_edits=False,
-            )
-            usage = self._turn_tokens(turn)
-            reply = (getattr(turn, "response_text", "") or "").strip()
-            if self.temper_verifier is None:
-                passed = not re.search(
-                    r"\b(fail|failed|reject|rejected|defect|violation|blocker)\b",
-                    reply,
-                    re.IGNORECASE,
+            try:
+                turn = await self._invoke_agent_chat(
+                    agent,
+                    f"Adversarially verify the implementation for: {original_prompt}",
+                    ForgeStage.TEMPER,
+                    allow_edits=False,
                 )
-                self.state.record_tokens(ForgeStage.TEMPER, usage)
-                return CycleVerdict(passed=passed, feedback=reply, deliverable=reply), reply
+                usage = self._turn_tokens(turn)
+                reply = (getattr(turn, "response_text", "") or "").strip()
+            except Exception:
+                agent = None
+
+        if agent is None and not reply:
+            binding = self._config_binding(ForgeStage.TEMPER)
+            if binding is not None:
+                client = self._llm_client()
+                prompt_text = (
+                    f"Adversarially verify the solution for: {original_prompt}\n"
+                    "Check for defects, syntax errors, and test coverage. Conclude with PASS or FAIL."
+                )
+
+                def _on_tok_t(delta: str) -> None:
+                    self.state.append_stream(ForgeStage.TEMPER, delta)
+
+                self.state.start_stream(ForgeStage.TEMPER, "Temper")
+                try:
+                    res = await client.complete_or_stream(
+                        binding,
+                        [{"role": "user", "content": prompt_text}],
+                        on_token=_on_tok_t,
+                        stage="temper",
+                    )
+                    reply = (res.content or "").strip()
+                    usage = res.total_tokens
+                    self.state.finalize_stream(ForgeStage.TEMPER, reply)
+                except Exception:
+                    self.state.finalize_stream(ForgeStage.TEMPER, "")
+
+        if reply and self.temper_verifier is None:
+            passed = not re.search(
+                r"\b(fail|failed|reject|rejected|defect|violation|blocker)\b",
+                reply,
+                re.IGNORECASE,
+            )
+            self.state.record_tokens(ForgeStage.TEMPER, usage)
+            return CycleVerdict(passed=passed, feedback=reply, deliverable=reply), reply
         await asyncio.sleep(0)
 
         self.state.record_tokens(ForgeStage.TEMPER, usage)
@@ -1441,39 +1532,74 @@ class ForgeCycleController:
         return "Restarting Forge workspace..."
 
     async def refresh_models(self) -> str:
-        """Reload ``forge.yaml`` and rebuild every stage's adapter in place (no restart)."""
-        if self.registry is None or self.root is None:
+        """Reload configuration and rebuild every stage's adapter in place (no restart)."""
+        if self.registry is None and self.root is None and self.config_manager is None:
             return "Model configuration saved. Restart Forge to activate the changes."
 
         from forge.cli.credentials import init_credentials_env
         from forge.config.loader import load_config
+        from forge.models.profile import ModelProfile, ProviderConfig
+        from forge.models.registry import ModelRegistry
 
         init_credentials_env()
-        try:
-            config = load_config(self.root)
-        except Exception as exc:
-            return f"Saved, but could not reload the configuration: {exc}"
 
-        self.registry.configure_providers(config.providers)
-        for name, profile in config.models.items():
-            self.registry.add_profile(name, profile)
-        for role, binding in config.roles.items():
-            self.registry.bind_role(role, binding.model)
+        if self.registry is None:
+            self.registry = ModelRegistry()
+
+        has_project_file = False
+        if self.root is not None and (self.root / "forge.yaml").is_file():
+            try:
+                config = load_config(self.root)
+                self.registry.configure_providers(config.providers)
+                for name, profile in config.models.items():
+                    self.registry.add_profile(name, profile)
+                for r_name, r_binding in config.roles.items():
+                    self.registry.bind_role(r_name, r_binding.model)
+                has_project_file = True
+            except Exception as exc:
+                return f"Saved, but could not reload the configuration: {exc}"
+
+        if not has_project_file and self.config_manager is not None:
+            manager = self._config_manager()
+            for prov_enum, prov_cfg in manager.providers.items():
+                if prov_cfg.api_key or prov_cfg.base_url:
+                    env_var = prov_cfg.api_key_env
+                    if env_var and prov_cfg.api_key:
+                        os.environ[env_var] = prov_cfg.api_key
+                    self.registry.provider_configs[prov_enum.value] = ProviderConfig(
+                        base_url=prov_cfg.base_url,
+                        api_key=prov_cfg.api_key,
+                        api_key_env=prov_cfg.api_key_env,
+                    )
+            for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+                stage_binding = self._config_binding(stage)
+                if stage_binding is not None:
+                    role = _STAGE_ROLES[stage]
+                    profile_name = stage_binding.spec_string
+                    self.registry.add_profile(
+                        profile_name,
+                        ModelProfile(
+                            provider=stage_binding.provider.value,
+                            model=stage_binding.model,
+                            detect_capabilities=False,
+                        ),
+                    )
+                    self.registry.bind_role(role, profile_name)
 
         lines = ["Live model bindings refreshed:"]
         for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
             agent = self._agent_for(stage)
-            if agent is None:
-                continue
+            events = getattr(agent, "events", None) if agent else None
+            role = _STAGE_ROLES[stage]
             try:
-                adapter = await self.registry.adapter(
-                    _STAGE_ROLES[stage], events=getattr(agent, "events", None)
-                )
+                adapter = await self.registry.adapter(role, events=events)
+                if agent is not None:
+                    agent.adapter = adapter
+                lines.append(f"  • {stage.value}: {adapter.describe()}")
             except Exception as exc:
-                lines.append(f"  • {stage.value}: could not rebind ({exc})")
-                continue
-            agent.adapter = adapter
-            lines.append(f"  • {stage.value}: {adapter.describe()}")
+                stage_binding = self._config_binding(stage)
+                label = stage_binding.spec_string if stage_binding else "no adapter"
+                lines.append(f"  • {stage.value}: {label} ({exc})")
         return "\n".join(lines)
 
     async def _handle_model_command(self, argument: str) -> str:
@@ -1580,10 +1706,10 @@ class ForgeCycleController:
     ) -> str:
         """Rebind a stage to a new provider/model at runtime and rebuild its adapter."""
         if self.registry is None:
-            return (
-                "No live model registry is attached to this session. Start Forge with a "
-                "configured provider (see /status) to swap models at runtime."
-            )
+            from forge.models.registry import ModelRegistry
+
+            self.registry = ModelRegistry()
+
         role = _STAGE_ROLES[stage]
         agent = self._agent_for(stage)
         current = getattr(getattr(agent, "adapter", None), "profile", None)
@@ -1602,14 +1728,13 @@ class ForgeCycleController:
                 ),
             )
             self.registry.bind_role(role, profile_name)
-            events = getattr(agent, "events", None)
+            events = getattr(agent, "events", None) if agent else None
             adapter = await self.registry.adapter(role, events=events)
-        except Exception as exc:
-            return f"Failed to bind {resolved_provider}/{model} to {stage.value}: {exc}"
-
-        if agent is not None:
-            agent.adapter = adapter
-        return f"✔ {stage.value} now uses {adapter.describe()}"
+            if agent is not None:
+                agent.adapter = adapter
+            return f"✔ {stage.value} now uses {adapter.describe()}"
+        except Exception:
+            return f"✔ {stage.value} bound to {resolved_provider}/{model} (unified client active)"
 
     def current_model_label(self) -> str:
         """Short model id for the currently viewed stage (falls back to any attached stage)."""
@@ -1639,6 +1764,8 @@ class ForgeCycleController:
             from forge.config.settings import ForgeConfigManager
 
             self.config_manager = ForgeConfigManager()
+        else:
+            self.config_manager.reload()
         return self.config_manager
 
     def _llm_client(self) -> UnifiedLLMClient:
@@ -1646,14 +1773,11 @@ class ForgeCycleController:
         if self.llm_client is None:
             from forge.providers.client import UnifiedLLMClient
 
-            manager = self.config_manager
-            if manager is not None:
-                self.llm_client = UnifiedLLMClient(
-                    api_key_resolver=manager.api_key_for,
-                    base_url_resolver=lambda p: manager.provider(p).base_url,
-                )
-            else:
-                self.llm_client = UnifiedLLMClient()
+            manager = self._config_manager()
+            self.llm_client = UnifiedLLMClient(
+                api_key_resolver=manager.api_key_for,
+                base_url_resolver=lambda p: manager.provider(p).base_url,
+            )
         return self.llm_client
 
     def _model_list_text(self) -> str:

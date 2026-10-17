@@ -96,7 +96,17 @@ def _launch_split_workspace(path: Path) -> None:
 
     path = path.resolve()
     state = ForgeTUIState()
-    controller = ForgeCycleController(state=state, root=path)
+    from forge.config.settings import ForgeConfigManager
+    from forge.providers.client import UnifiedLLMClient
+
+    config_manager = ForgeConfigManager()
+    llm_client = UnifiedLLMClient(
+        api_key_resolver=config_manager.api_key_for,
+        base_url_resolver=lambda p: config_manager.provider(p).base_url,
+    )
+    controller = ForgeCycleController(
+        state=state, root=path, config_manager=config_manager, llm_client=llm_client
+    )
     app_instance = ForgeSplitPaneApp(state=state, controller=controller, path=path)
     session: dict[str, Any] = {}
 

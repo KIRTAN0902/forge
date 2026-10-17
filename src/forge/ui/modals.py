@@ -212,14 +212,16 @@ class ForgeModalManager:
 
     @property
     def config_manager(self) -> ForgeConfigManager:
-        if self._config_manager is not None:
-            return self._config_manager
+        if self.app.controller and hasattr(self.app.controller, "_config_manager"):
+            mgr = self.app.controller._config_manager()
+            if isinstance(mgr, ForgeConfigManager):
+                return mgr
         if self.app.controller and hasattr(self.app.controller, "config_manager"):
             mgr = self.app.controller.config_manager
             if isinstance(mgr, ForgeConfigManager):
                 return mgr
-
-        self._config_manager = ForgeConfigManager()
+        if self._config_manager is None:
+            self._config_manager = ForgeConfigManager()
         return self._config_manager
 
     def _create_task(self, coro: Any) -> asyncio.Task[Any]:

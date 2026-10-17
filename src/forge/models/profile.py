@@ -58,6 +58,21 @@ BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
         api_key_env="ANTHROPIC_API_KEY",
         reasoning_style="none",
     ),
+    "deepseek": ProviderConfig(
+        base_url="https://api.deepseek.com",
+        api_key_env="DEEPSEEK_API_KEY",
+        reasoning_style="openai",
+    ),
+    "groq": ProviderConfig(
+        base_url="https://api.groq.com/openai/v1",
+        api_key_env="GROQ_API_KEY",
+        reasoning_style="none",
+    ),
+    "custom": ProviderConfig(
+        base_url="http://localhost:8000/v1",
+        api_key_env="CUSTOM_API_KEY",
+        reasoning_style="none",
+    ),
 }
 
 

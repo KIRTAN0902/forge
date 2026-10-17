@@ -28,7 +28,10 @@ def find_config(start: Path) -> Path | None:
     Checks .forge/config.json, .forge/config.yaml, or forge.yaml.
     """
     start = start.resolve()
+    home = Path.home().resolve()
     for directory in (start, *start.parents):
+        if directory == home:
+            continue
         forge_dir = directory / ".forge"
         if (forge_dir / "config.json").is_file():
             return forge_dir / "config.json"

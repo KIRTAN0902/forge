@@ -59,6 +59,27 @@ PROVIDER_METADATA: dict[str, dict[str, Any]] = {
         "base_url": "http://localhost:11434/v1",
         "label": "Ollama (Local, free, private - runs locally on port 11434)",
     },
+    "gemini": {
+        "name": "Google Gemini",
+        "env": "GEMINI_API_KEY",
+        "default_model": "gemini-2.5-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "label": "Google Gemini (gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash)",
+    },
+    "deepseek": {
+        "name": "DeepSeek",
+        "env": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com",
+        "label": "DeepSeek (deepseek-chat, deepseek-reasoner)",
+    },
+    "groq": {
+        "name": "Groq",
+        "env": "GROQ_API_KEY",
+        "default_model": "llama-3.3-70b-versatile",
+        "base_url": "https://api.groq.com/openai/v1",
+        "label": "Groq (Llama 3.3 70B, Llama 3.1 8B)",
+    },
     "custom": {
         "name": "Custom",
         "env": "CUSTOM_API_KEY",
@@ -223,7 +244,22 @@ def init_credentials_env() -> bool:
         if provider == "ollama":
             has_credentials = True
 
-    # 3. Check if any known environment variable is already set
+    # 3. Check ~/.forge/config.json via ForgeConfigManager
+    with contextlib.suppress(Exception):
+        from forge.config.settings import ForgeConfigManager, ProviderName
+
+        cfg_mgr = ForgeConfigManager()
+        for prov_enum in ProviderName:
+            p_cfg = cfg_mgr.provider(prov_enum)
+            p_key = cfg_mgr.api_key_for(prov_enum)
+            if p_key and p_cfg.api_key_env:
+                if not os.environ.get(p_cfg.api_key_env):
+                    os.environ[p_cfg.api_key_env] = p_key
+                has_credentials = True
+            elif p_cfg.api_key_env and os.environ.get(p_cfg.api_key_env):
+                has_credentials = True
+
+    # 4. Check if any known environment variable is already set
     for meta in PROVIDER_METADATA.values():
         env_var = meta.get("env")
         if env_var and os.environ.get(env_var):
@@ -234,6 +270,36 @@ def init_credentials_env() -> bool:
 
 def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
     """Resolve a default ModelProfile based on the active environment/credentials."""
+    # 1. Check ~/.forge/config.json via ForgeConfigManager
+    with contextlib.suppress(Exception):
+        from forge.config.settings import AUTO_PRIORITY, ForgeConfigManager, ProviderName
+
+        cfg_mgr = ForgeConfigManager()
+        binding = cfg_mgr.binding_for("anvil") or cfg_mgr.binding_for("all")
+        if binding and cfg_mgr.is_connected(binding.provider):
+            return f"{binding.provider.value}_default", ModelProfile(
+                provider=binding.provider.value,
+                model=binding.model,
+                capabilities=ModelCapabilities(
+                    tool_calling=True, structured_output=True, vision=True
+                ),
+                detect_capabilities=False,
+            )
+
+        for env_var, prov_enum, default_model in AUTO_PRIORITY:
+            key = cfg_mgr.api_key_for(prov_enum) or (os.environ.get(env_var) if env_var else None)
+            if key or prov_enum is ProviderName.OLLAMA:
+                p_cfg = cfg_mgr.provider(prov_enum)
+                model = p_cfg.default_model or default_model
+                return f"{prov_enum.value}_default", ModelProfile(
+                    provider=prov_enum.value,
+                    model=model,
+                    capabilities=ModelCapabilities(
+                        tool_calling=True, structured_output=True, vision=True
+                    ),
+                    detect_capabilities=False,
+                )
+
     stored = load_stored_credentials()
     if stored:
         provider = stored.get("provider")
@@ -278,6 +344,29 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
                 ),
                 detect_capabilities=False,
             )
+        if provider == "gemini" and (os.environ.get("GEMINI_API_KEY") or stored.get("api_key")):
+            return "gemini_default", ModelProfile(
+                provider="gemini",
+                model=model_name or "gemini-2.5-flash",
+                capabilities=ModelCapabilities(
+                    tool_calling=True, structured_output=True, vision=True
+                ),
+                detect_capabilities=False,
+            )
+        if provider == "deepseek" and (os.environ.get("DEEPSEEK_API_KEY") or stored.get("api_key")):
+            return "deepseek_default", ModelProfile(
+                provider="deepseek",
+                model=model_name or "deepseek-chat",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
+        if provider == "groq" and (os.environ.get("GROQ_API_KEY") or stored.get("api_key")):
+            return "groq_default", ModelProfile(
+                provider="groq",
+                model=model_name or "llama-3.3-70b-versatile",
+                capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+                detect_capabilities=False,
+            )
         if provider == "ollama":
             return "ollama_default", ModelProfile(
                 provider="ollama",
@@ -294,6 +383,15 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             )
 
     # Fallback to direct environment variables
+    if os.environ.get("GEMINI_API_KEY"):
+        model_name = os.environ.get("FORGE_DEFAULT_MODEL", "gemini-2.5-flash")
+        return "gemini_default", ModelProfile(
+            provider="gemini",
+            model=model_name,
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+            detect_capabilities=False,
+        )
+
     if os.environ.get("ANTHROPIC_API_KEY"):
         model_name = os.environ.get("FORGE_DEFAULT_MODEL", "claude-3-7-sonnet-20250219")
         return "anthropic_default", ModelProfile(
@@ -327,6 +425,24 @@ def resolve_default_model_profile() -> tuple[str, ModelProfile | None]:
             provider="openai",
             model=model_name,
             capabilities=ModelCapabilities(tool_calling=True, structured_output=True, vision=True),
+            detect_capabilities=False,
+        )
+
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        model_name = os.environ.get("FORGE_DEFAULT_MODEL", "deepseek-chat")
+        return "deepseek_default", ModelProfile(
+            provider="deepseek",
+            model=model_name,
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+            detect_capabilities=False,
+        )
+
+    if os.environ.get("GROQ_API_KEY"):
+        model_name = os.environ.get("FORGE_DEFAULT_MODEL", "llama-3.3-70b-versatile")
+        return "groq_default", ModelProfile(
+            provider="groq",
+            model=model_name,
+            capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
             detect_capabilities=False,
         )
 

@@ -377,6 +377,9 @@ class ForgeConfigManager:
                 provider = ProviderName(name)
                 self.providers[provider].api_key = key
                 self._api_keys[name] = key
+                env_var = self.providers[provider].api_key_env
+                if env_var and key:
+                    os.environ[env_var] = key
 
         for name, override in (data.get("provider_overrides") or {}).items():
             if name not in ProviderName._value2member_map_ or not isinstance(override, dict):
@@ -475,7 +478,17 @@ class ForgeConfigManager:
         self.save()
         return binding
 
+    def reload(self) -> None:
+        """Reload configuration from disk and re-apply environment."""
+        self._load_file()
+        self._dotenv = _read_dotenv(self._cwd / ".env")
+        self._apply_environment()
+
     def binding_for(self, stage: str) -> StageModelBinding | None:
+        binding = self.bindings.get(stage)
+        if binding is not None:
+            return binding
+        self.auto_resolve_bindings()
         return self.bindings.get(stage)
 
     def is_connected(self, provider: ProviderName | str) -> bool:

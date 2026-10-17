@@ -692,7 +692,12 @@ class ForgeSplitPaneApp:
             # 3. Everything else (including `/commands` and `!shell`) goes straight to the
             #    controller's deterministic dispatcher on a background task.
             async def _run_submission() -> None:
-                await self.submit_text(stripped)
+                try:
+                    await self.submit_text(stripped)
+                except Exception as exc:
+                    stage = self.state.selected_view_stage
+                    self.state.append_chat(stage, "Forge", f"[Execution Error]: {exc}")
+                    self.state.set_active_stage(None)
 
             self._background_task = self.application.create_background_task(_run_submission())
 

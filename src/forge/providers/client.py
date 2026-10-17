@@ -101,11 +101,20 @@ class UnifiedLLMClient:
 
     def api_key(self, provider: ProviderName) -> str | None:
         if self._api_key_resolver is not None:
-            return self._api_key_resolver(provider)
+            key = self._api_key_resolver(provider)
+            if key:
+                return key
         env_var = DEFAULT_PROVIDERS[provider].api_key_env
-        if env_var is None:
+        if env_var:
+            key = os.environ.get(env_var) or self._env.get(env_var)
+            if key:
+                return key
+        try:
+            from forge.config.settings import ForgeConfigManager
+
+            return ForgeConfigManager().api_key_for(provider)
+        except Exception:
             return None
-        return self._env.get(env_var)
 
     def base_url(self, provider: ProviderName) -> str:
         if self._base_url_resolver is not None:
@@ -281,7 +290,8 @@ class UnifiedLLMClient:
     ) -> LLMResponse:
         provider = binding.provider
         base = self.base_url(provider)
-        result = LLMResponse(model=binding.model, provider=provider.value)
+        model_name = binding.model.removeprefix("models/")
+        result = LLMResponse(model=model_name, provider=provider.value)
         body: dict[str, Any] = {
             "contents": _gemini_contents(messages),
             "generationConfig": {
@@ -291,19 +301,23 @@ class UnifiedLLMClient:
         }
         if system_prompt:
             body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
-        headers = self._auth_headers(provider, self.api_key(provider))
+        key = self.api_key(provider)
+        headers = self._auth_headers(provider, key)
+        params = {"key": key} if key else {}
         async with self._client() as client:
             if on_token is None:
-                url = f"{base}/models/{binding.model}:generateContent"
-                resp = await client.post(url, headers=headers, json=body)
+                url = f"{base}/models/{model_name}:generateContent"
+                resp = await client.post(url, headers=headers, params=params, json=body)
                 resp.raise_for_status()
                 return _parse_gemini_response(resp.json(), result)
-            url = f"{base}/models/{binding.model}:streamGenerateContent?alt=sse"
-            async with client.stream("POST", url, headers=headers, json=body) as stream:
+            url = f"{base}/models/{model_name}:streamGenerateContent?alt=sse"
+            async with client.stream(
+                "POST", url, headers=headers, params=params, json=body
+            ) as stream:
                 stream.raise_for_status()
                 async for payload in _iter_sse(stream):
                     _consume_gemini_chunk(payload, result, on_token)
-        return result.finish(binding.model, provider)
+        return result.finish(model_name, provider)
 
     async def _anthropic(
         self,
@@ -377,23 +391,50 @@ class UnifiedLLMClient:
 # -- wire-format conversion --------------------------------------------------------------
 
 
+def _sanitize_turns(
+    messages: list[MessageLike] | list[dict[str, str]],
+) -> list[dict[str, str]]:
+    cleaned: list[dict[str, str]] = []
+    for m in messages:
+        role = (
+            "assistant"
+            if str(m.get("role", "")).lower() in {"assistant", "model", "forge"}
+            else "user"
+        )
+        content = str(m.get("content", "")).strip()
+        if not content:
+            continue
+        if not cleaned and role == "assistant":
+            # Models like Gemini and Claude reject conversations starting with an assistant turn
+            continue
+        if cleaned and cleaned[-1]["role"] == role:
+            # Merge consecutive turns of the same role
+            cleaned[-1]["content"] += "\n\n" + content
+        else:
+            cleaned.append({"role": role, "content": content})
+    if not cleaned:
+        cleaned.append({"role": "user", "content": "Hello"})
+    return cleaned
+
+
 def _openai_messages(
     messages: list[MessageLike] | list[dict[str, str]], system_prompt: str | None
 ) -> list[dict[str, str]]:
     wire: list[dict[str, str]] = []
     if system_prompt:
         wire.append({"role": "system", "content": system_prompt})
-    wire.extend({"role": str(m["role"]), "content": str(m["content"])} for m in messages)
+    wire.extend(_sanitize_turns(messages))
     return wire
 
 
 def _gemini_contents(
     messages: list[MessageLike] | list[dict[str, str]],
 ) -> list[dict[str, Any]]:
+    sanitized = _sanitize_turns(messages)
     contents: list[dict[str, Any]] = []
-    for message in messages:
-        role = "model" if str(message["role"]) == "assistant" else "user"
-        contents.append({"role": role, "parts": [{"text": str(message["content"])}]})
+    for message in sanitized:
+        role = "model" if message["role"] == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": message["content"]}]})
     return contents
 
 
@@ -401,13 +442,14 @@ def _anthropic_messages(
     messages: list[MessageLike] | list[dict[str, str]],
 ) -> list[dict[str, str]]:
     # Anthropic rejects system turns in ``messages``; they travel in the top-level ``system``.
+    sanitized = _sanitize_turns(messages)
     return [
         {
-            "role": "assistant" if str(m["role"]) == "assistant" else "user",
-            "content": str(m["content"]),
+            "role": m["role"],
+            "content": m["content"],
         }
-        for m in messages
-        if str(m["role"]) != "system"
+        for m in sanitized
+        if m["role"] != "system"
     ]
 
 
