@@ -32,7 +32,14 @@ from forge.harness.memory import EpisodicRepoMemory
 from forge.models import Message
 from forge.models.profile import ModelProfile
 from forge.skills import AutonomousSkillRouter
-from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, UserQuestion
+from forge.ui.state import (
+    CycleMode,
+    ForgeStage,
+    ForgeTUIState,
+    UserQuestion,
+    format_stage_deliverable,
+    format_transient_action,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from forge.config.settings import ForgeConfigManager, StageModelBinding
@@ -629,13 +636,40 @@ class ForgeCycleController:
         return await agent.chat(prompt, **kwargs)
 
     def _stream_tool_result(self, stage: ForgeStage, result: Any) -> None:
-        """Stream a finished tool invocation into the stage viewport."""
-        tool = getattr(result, "tool", "tool")
-        ok = getattr(result, "ok", True)
+        """Overwrite the stage's transient status with the live tool action (no scrolling wall)."""
+        tool = str(getattr(result, "tool", "tool") or "tool")
         content = (getattr(result, "content", "") or "").strip()
-        marker = "✔" if ok else "✖"
-        first_lines = "\n".join(content.splitlines()[:6])
-        self.state.append_tool_event(stage, f"{marker} {tool}\n{first_lines}".strip())
+        first_line = content.splitlines()[0] if content else ""
+        headline = self._stage_work_headline(stage)
+        self.state.set_live_activity(
+            stage, headline, format_transient_action(tool, first_line)
+        )
+
+    @staticmethod
+    def _stage_work_headline(stage: ForgeStage) -> str:
+        """Headline for the ephemeral live-activity indicator, per stage role."""
+        if stage is ForgeStage.TEMPER:
+            return "Verifying..."
+        if stage is ForgeStage.HAMMER:
+            return "Implementing..."
+        return "Thinking..."
+
+    def _begin_stage_activity(self, stage: ForgeStage, subline: str = "") -> None:
+        """Show the transient 2-line indicator the moment a stage starts working."""
+        self.state.set_live_activity(stage, self._stage_work_headline(stage), subline)
+
+    def _commit_stage_output(
+        self,
+        stage: ForgeStage,
+        text: str,
+        *,
+        status: Literal["idle", "running", "passed", "failed"] = "passed",
+    ) -> str:
+        """Clear the transient indicator and commit the role-pure final output for a stage."""
+        formatted = format_stage_deliverable(stage, text)
+        self.state.clear_live_activity(stage)
+        self.state.set_stage_output(stage, formatted, status=status)
+        return formatted
 
     @staticmethod
     def _turn_tokens(turn: Any) -> int:
@@ -664,6 +698,7 @@ class ForgeCycleController:
         """
         self.state.set_active_stage(stage, reset_tokens=False)
         self.state.append_chat(stage, "You", prompt)
+        self._begin_stage_activity(stage, "analyzing request...")
         self.conversation_history[stage].append({"role": "user", "content": prompt})
 
         agent = self._agent_for(stage)
@@ -672,11 +707,11 @@ class ForgeCycleController:
             if binding is not None:
                 return await self._run_llm_turn(prompt, stage, binding)
             reply = model_diagnostic()
-            self.state.append_chat(stage, self._speaker(stage), reply)
-            self.state.set_stage_output(stage, reply, status="failed")
-            self.conversation_history[stage].append({"role": "assistant", "content": reply})
+            formatted = self._commit_stage_output(stage, reply, status="failed")
+            self.state.append_chat(stage, self._speaker(stage), formatted)
+            self.conversation_history[stage].append({"role": "assistant", "content": formatted})
             self.state.set_active_stage(None)
-            return reply
+            return formatted
 
         def _on_token(delta: str) -> None:
             self.state.append_stream(stage, delta)
@@ -698,14 +733,15 @@ class ForgeCycleController:
                 reply = "(no response)"
 
             self.state.record_tokens(stage, tokens)
-            self.state.finalize_stream(stage, reply)
-            self.conversation_history[stage].append({"role": "assistant", "content": reply})
-            self.state.set_stage_output(stage, reply, status="passed")
+            formatted = format_stage_deliverable(stage, reply)
+            self.state.finalize_stream(stage, formatted)
+            self.conversation_history[stage].append({"role": "assistant", "content": formatted})
+            self._commit_stage_output(stage, reply, status="passed")
             self.state.set_active_stage(None)
 
             if handoff:
                 return await self.escalate_to_forge_cycle(handoff)
-            return reply
+            return formatted
         except Exception:
             binding = self._config_binding(stage)
             if binding is not None:
@@ -730,6 +766,7 @@ class ForgeCycleController:
         def _on_token(delta: str) -> None:
             self.state.append_stream(stage, delta)
 
+        self._begin_stage_activity(stage, "streaming live model...")
         self.state.start_stream(stage, self._speaker(stage))
         try:
             response = await client.complete_or_stream(
@@ -737,19 +774,21 @@ class ForgeCycleController:
             )
         except Exception as exc:  # pragma: no cover - network dependent
             reply = model_diagnostic(f"Live model call failed ({binding.spec_string}): {exc}")
-            self.state.finalize_stream(stage, reply)
-            self.conversation_history[stage].append({"role": "assistant", "content": reply})
-            self.state.set_stage_output(stage, reply, status="failed")
+            formatted = format_stage_deliverable(stage, reply)
+            self.state.finalize_stream(stage, formatted)
+            self.conversation_history[stage].append({"role": "assistant", "content": formatted})
+            self._commit_stage_output(stage, reply, status="failed")
             self.state.set_active_stage(None)
-            return reply
+            return formatted
 
         reply = (response.content or response.reasoning_content or "").strip() or "(no response)"
         self.state.record_tokens(stage, response.total_tokens)
-        self.state.finalize_stream(stage, reply)
-        self.conversation_history[stage].append({"role": "assistant", "content": reply})
-        self.state.set_stage_output(stage, reply, status="passed")
+        formatted = format_stage_deliverable(stage, reply)
+        self.state.finalize_stream(stage, formatted)
+        self.conversation_history[stage].append({"role": "assistant", "content": formatted})
+        self._commit_stage_output(stage, reply, status="passed")
         self.state.set_active_stage(None)
-        return reply
+        return formatted
 
     # -- real subprocess execution (!shell) ----------------------------------------------
 
@@ -821,6 +860,7 @@ class ForgeCycleController:
     async def _run_real_cycle(self, prompt: str) -> str:
         """Delegate to the real multi-agent workflow orchestrator and mirror its outcome."""
         self.state.set_active_stage(ForgeStage.ANVIL, reset_tokens=False)
+        self._begin_stage_activity(ForgeStage.ANVIL, "planning multi-agent workflow...")
         self.state.append_thought(
             ForgeStage.ANVIL, f"Escalating to full Forge cycle: {prompt[:120]}"
         )
@@ -838,12 +878,22 @@ class ForgeCycleController:
         self.state.append_thought(
             ForgeStage.ANVIL, f"Workflow finished with status '{status}'."
         )
-        self.state.set_stage_output(
-            ForgeStage.ANVIL, f"Planned {len(tasks)} task(s) for:\n{prompt}", status="passed"
+        plan_line = f"Planned {len(tasks)} task(s) for:\n{prompt}"
+        self.state.append_chat(
+            ForgeStage.ANVIL,
+            self._speaker(ForgeStage.ANVIL),
+            format_stage_deliverable(ForgeStage.ANVIL, plan_line),
         )
-        self.state.set_stage_output(
-            ForgeStage.HAMMER, f"Executed {len(tasks)} task(s).", status="passed"
+        self._commit_stage_output(ForgeStage.ANVIL, plan_line, status="passed")
+
+        exec_line = f"Executed {len(tasks)} task(s)."
+        self.state.append_chat(
+            ForgeStage.HAMMER,
+            self._speaker(ForgeStage.HAMMER),
+            format_stage_deliverable(ForgeStage.HAMMER, exec_line),
         )
+        self._commit_stage_output(ForgeStage.HAMMER, exec_line, status="passed")
+
         summary = (
             f"Full Forge cycle finished for: '{prompt}'\n"
             f"• Workflow status: {status}\n"
@@ -851,10 +901,13 @@ class ForgeCycleController:
             f"• QA verdict: {qa_status.upper()}"
         )
         temper_ok = qa_status.lower() in {"pass", "passed"}
-        self.state.set_stage_output(
+        self.state.append_chat(
             ForgeStage.TEMPER,
-            summary,
-            status="passed" if temper_ok else "failed",
+            self._speaker(ForgeStage.TEMPER),
+            format_stage_deliverable(ForgeStage.TEMPER, summary),
+        )
+        self._commit_stage_output(
+            ForgeStage.TEMPER, summary, status="passed" if temper_ok else "failed"
         )
         self.state.set_active_stage(None)
         return summary
@@ -913,7 +966,7 @@ class ForgeCycleController:
                     ForgeStage.TEMPER,
                     "Gatekeeper Decision: APPROVED. All requirements & security checks passed.",
                 )
-                self.state.set_stage_output(ForgeStage.TEMPER, final_deliverable, status="passed")
+                self._commit_stage_output(ForgeStage.TEMPER, final_deliverable, status="passed")
                 self.state.set_active_stage(None)
                 return final_deliverable
 
@@ -921,7 +974,7 @@ class ForgeCycleController:
             self.state.append_thought(
                 ForgeStage.TEMPER, f"Gatekeeper Decision: REJECTED. Defects: {rejection}"
             )
-            self.state.set_stage_output(
+            self._commit_stage_output(
                 ForgeStage.TEMPER,
                 f"Cycle #{self.state.cycle_count} Rejection Report:\n{rejection}",
                 status="failed",
@@ -953,7 +1006,9 @@ class ForgeCycleController:
         return final_deliverable
 
     async def _simulated_anvil(self, current_request: str) -> None:
-        self.state.set_active_stage(ForgeStage.ANVIL, reset_tokens=False)
+        stage = ForgeStage.ANVIL
+        self.state.set_active_stage(stage, reset_tokens=False)
+        self._begin_stage_activity(stage, "analyzing goal & repository...")
         self.state.append_thought(
             ForgeStage.ANVIL,
             f"Analyzing goal for Cycle #{self.state.cycle_count}: {current_request[:120]}",
@@ -992,6 +1047,7 @@ class ForgeCycleController:
             except Exception:
                 agent = None
 
+        streamed = False
         if agent is None:
             binding = self._config_binding(ForgeStage.ANVIL)
             if binding is not None:
@@ -1002,6 +1058,7 @@ class ForgeCycleController:
                     self.state.append_stream(ForgeStage.ANVIL, delta)
 
                 self.state.start_stream(ForgeStage.ANVIL, "Anvil")
+                streamed = True
                 try:
                     res = await client.complete_or_stream(
                         binding,
@@ -1013,16 +1070,22 @@ class ForgeCycleController:
                     if text:
                         plan_summary = text
                     usage = res.total_tokens
-                    self.state.finalize_stream(ForgeStage.ANVIL, plan_summary)
                 except Exception:
-                    self.state.finalize_stream(ForgeStage.ANVIL, plan_summary)
+                    pass
 
         await asyncio.sleep(0)
         self.state.record_tokens(ForgeStage.ANVIL, usage)
-        self.state.set_stage_output(ForgeStage.ANVIL, plan_summary, status="passed")
+        formatted = format_stage_deliverable(ForgeStage.ANVIL, plan_summary)
+        if streamed:
+            self.state.finalize_stream(ForgeStage.ANVIL, formatted)
+        else:
+            self.state.append_chat(ForgeStage.ANVIL, self._speaker(stage), formatted)
+        self._commit_stage_output(ForgeStage.ANVIL, plan_summary, status="passed")
 
     async def _simulated_hammer(self, current_request: str) -> None:
-        self.state.set_active_stage(ForgeStage.HAMMER, reset_tokens=False)
+        stage = ForgeStage.HAMMER
+        self.state.set_active_stage(stage, reset_tokens=False)
+        self._begin_stage_activity(stage, "applying changes...")
         self.state.append_thought(
             ForgeStage.HAMMER, "Beginning code synthesis, AST patching, and tool execution..."
         )
@@ -1048,6 +1111,7 @@ class ForgeCycleController:
             except Exception:
                 agent = None
 
+        streamed = False
         if agent is None:
             binding = self._config_binding(ForgeStage.HAMMER)
             if binding is not None:
@@ -1058,6 +1122,7 @@ class ForgeCycleController:
                     self.state.append_stream(ForgeStage.HAMMER, delta)
 
                 self.state.start_stream(ForgeStage.HAMMER, "Hammer")
+                streamed = True
                 try:
                     res = await client.complete_or_stream(
                         binding,
@@ -1069,16 +1134,22 @@ class ForgeCycleController:
                     if text:
                         exec_summary = text
                     usage = res.total_tokens
-                    self.state.finalize_stream(ForgeStage.HAMMER, exec_summary)
                 except Exception:
-                    self.state.finalize_stream(ForgeStage.HAMMER, exec_summary)
+                    pass
 
         await asyncio.sleep(0)
         self.state.record_tokens(ForgeStage.HAMMER, usage)
-        self.state.set_stage_output(ForgeStage.HAMMER, exec_summary, status="passed")
+        formatted = format_stage_deliverable(ForgeStage.HAMMER, exec_summary)
+        if streamed:
+            self.state.finalize_stream(ForgeStage.HAMMER, formatted)
+        else:
+            self.state.append_chat(ForgeStage.HAMMER, self._speaker(stage), formatted)
+        self._commit_stage_output(ForgeStage.HAMMER, exec_summary, status="passed")
 
     async def _simulated_temper(self, original_prompt: str) -> tuple[CycleVerdict, str]:
-        self.state.set_active_stage(ForgeStage.TEMPER, reset_tokens=False)
+        stage = ForgeStage.TEMPER
+        self.state.set_active_stage(stage, reset_tokens=False)
+        self._begin_stage_activity(stage, "running test suite & security checks...")
         self.state.append_thought(
             ForgeStage.TEMPER,
             "Adversarial QA Gatekeeper: checking code for security and leaks...",
@@ -1091,6 +1162,7 @@ class ForgeCycleController:
 
         usage = 0
         reply = ""
+        streamed = False
         agent = self._agent_for(ForgeStage.TEMPER)
         if agent is not None:
             try:
@@ -1118,6 +1190,7 @@ class ForgeCycleController:
                     self.state.append_stream(ForgeStage.TEMPER, delta)
 
                 self.state.start_stream(ForgeStage.TEMPER, "Temper")
+                streamed = True
                 try:
                     res = await client.complete_or_stream(
                         binding,
@@ -1127,9 +1200,8 @@ class ForgeCycleController:
                     )
                     reply = (res.content or "").strip()
                     usage = res.total_tokens
-                    self.state.finalize_stream(ForgeStage.TEMPER, reply)
                 except Exception:
-                    self.state.finalize_stream(ForgeStage.TEMPER, "")
+                    pass
 
         if reply and self.temper_verifier is None:
             passed = not re.search(
@@ -1138,9 +1210,11 @@ class ForgeCycleController:
                 re.IGNORECASE,
             )
             self.state.record_tokens(ForgeStage.TEMPER, usage)
+            self._finish_temper_turn(stage, reply, streamed)
+            self.state.clear_live_activity(stage)
             return CycleVerdict(passed=passed, feedback=reply, deliverable=reply), reply
-        await asyncio.sleep(0)
 
+        await asyncio.sleep(0)
         self.state.record_tokens(ForgeStage.TEMPER, usage)
 
         if self.temper_verifier is not None:
@@ -1159,7 +1233,17 @@ class ForgeCycleController:
         deliverable = verdict.deliverable or (
             f"Verified Deliverable for '{original_prompt}' (Cycle #{self.state.cycle_count})."
         )
+        self._finish_temper_turn(stage, reply or deliverable, streamed)
+        self.state.clear_live_activity(stage)
         return verdict, deliverable
+
+    def _finish_temper_turn(self, stage: ForgeStage, text: str, streamed: bool) -> None:
+        """Commit Temper's role-pure QA verdict as the permanent (transient-free) viewport turn."""
+        formatted = format_stage_deliverable(stage, text)
+        if streamed:
+            self.state.finalize_stream(stage, formatted)
+        else:
+            self.state.append_chat(stage, self._speaker(stage), formatted)
 
     # -- deep research -------------------------------------------------------------------
 

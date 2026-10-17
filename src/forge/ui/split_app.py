@@ -855,11 +855,22 @@ class ForgeSplitPaneApp:
         return result if isinstance(result, str) else ""
 
     async def _spin(self) -> None:
-        """Animate the running-stage spinner while the app is live."""
+        """Animate the transient live-activity indicator while any stage is actively working.
+
+        Ticks every 100ms only when at least one stage buffer reports ``is_working`` (or a stage
+        is actively executing), advancing each working buffer's spinner frame and invalidating
+        the app so the ``⠋ Thinking...`` / ``└─ action`` block animates smoothly while awaiting
+        LLM streaming or subprocess execution.
+        """
         while True:
-            await asyncio.sleep(0.12)
-            self._spinner_index += 1
-            if self.state.active_worker_stage is not None:
+            await asyncio.sleep(0.1)
+            working = False
+            for buffer in self.state.stage_buffers.values():
+                if buffer.is_working:
+                    buffer.spinner_index += 1
+                    working = True
+            if working or self.state.active_worker_stage is not None:
+                self._spinner_index += 1
                 self._handle_state_redraw()
 
     async def run_async(self) -> None:

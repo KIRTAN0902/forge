@@ -6,7 +6,8 @@ import asyncio
 import contextlib
 import copy
 import io
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
@@ -69,6 +70,182 @@ def _turn_marker(speaker: str) -> tuple[str, str]:
     return "◆ forge", "bold #94a3b8"
 
 
+# Braille spinner frames for the ephemeral 2-line live-activity indicator.
+TRANSIENT_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Stage accent colours (Anvil blue, Hammer red, Temper green).
+_STAGE_ACCENT: dict[ForgeStage, str] = {
+    ForgeStage.ANVIL: "#3b82f6",
+    ForgeStage.HAMMER: "#ef4444",
+    ForgeStage.TEMPER: "#10b981",
+}
+
+# Human-readable verb templates for the transient live-activity subline.
+_LIST_TOOLS = frozenset({"list_files", "list_dir", "list_directory", "ls", "list"})
+_READ_TOOLS = frozenset({"read_file", "read", "view_file", "open_file"})
+_SEARCH_TOOLS = frozenset(
+    {
+        "search_code",
+        "search_symbols",
+        "symbol_search",
+        "search",
+        "grep",
+        "find",
+        "find_files",
+    }
+)
+_WRITE_TOOLS = frozenset(
+    {"write_file", "edit_file", "quick_edit", "apply_patch", "patch", "write", "edit"}
+)
+_SHELL_TOOLS = frozenset(
+    {"run_shell", "run_command", "run_tests", "shell", "bash", "execute", "cmd"}
+)
+_AST_TOOLS = frozenset(
+    {
+        "ast_slice",
+        "skeletonize",
+        "ast_grep",
+        "file_outline",
+        "outline",
+        "dependency_analysis",
+        "repository_structure",
+        "repo_structure",
+    }
+)
+_MUTATION_TOOLS = frozenset({"mutation_test", "mutate", "mutation"})
+
+_ARG_KEYS = (
+    "path",
+    "file",
+    "file_path",
+    "filepath",
+    "query",
+    "pattern",
+    "command",
+    "cmd",
+    "dir",
+    "directory",
+    "target",
+    "name",
+)
+
+_MARKDOWN_NOISE = re.compile(r"[`*_>#]")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _extract_arg(value: object) -> str:
+    """Best-effort extraction of the salient argument (path / query / command) from a tool call."""
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        for key in _ARG_KEYS:
+            candidate = value.get(key)
+            if candidate:
+                return str(candidate).strip()
+        for candidate in value.values():
+            if isinstance(candidate, (str, int, float)) and str(candidate).strip():
+                return str(candidate).strip()
+        return ""
+    return str(value).strip()
+
+
+def _clean_thought(text: str) -> str:
+    """Flatten a raw streaming thought chunk into a single clean < 70 char clause."""
+    flat = re.sub(r"[\r\n]+", " ", text or "")
+    flat = _MARKDOWN_NOISE.sub("", flat)
+    flat = _WHITESPACE.sub(" ", flat).strip(" -•·\t")
+    if not flat:
+        return "thinking..."
+    for sep in (". ", "! ", "? ", "; ", " - "):
+        head = flat.split(sep, 1)[0].strip()
+        if head:
+            flat = head
+            break
+    flat = flat[:67].strip()
+    if not flat:
+        return "thinking..."
+    flat = flat[0].lower() + flat[1:]
+    return flat if flat.endswith("...") else f"{flat}..."
+
+
+def format_transient_action(tool_name: str, args_or_thought: object = "") -> str:
+    """Convert a tool call or raw thought chunk into a clean 1-line Claude-Code status phrase.
+
+    Examples::
+
+        format_transient_action("read_file", {"path": "forge/ui/state.py"})
+            -> "reading forge/ui/state.py..."
+        format_transient_action("run_shell", {"command": "pytest -q"})
+            -> "running command `pytest -q`..."
+        format_transient_action("", "Evaluating module dependencies. Next...")
+            -> "evaluating module dependencies..."
+    """
+    name = (tool_name or "").strip()
+    low = name.lower()
+    arg = _extract_arg(args_or_thought)
+
+    if low in _LIST_TOOLS:
+        return f"accessing folder {arg or '.'}..."
+    if low in _READ_TOOLS:
+        return f"reading {arg or 'file'}..."
+    if low in _SEARCH_TOOLS:
+        return f"searching codebase for '{arg or 'symbols'}'..."
+    if low in _WRITE_TOOLS:
+        return f"applying changes to {arg or 'file'}..."
+    if low in _SHELL_TOOLS:
+        return f"running command `{arg or name or 'command'}`..."
+    if low in _AST_TOOLS:
+        return f"analyzing AST dependencies{f' for {arg}' if arg else ''}..."
+    if low in _MUTATION_TOOLS:
+        return "running mutation tests on diff..."
+
+    combined = " ".join(part for part in (name, arg) if part)
+    return _clean_thought(combined)
+
+
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def _strip_long_code_blocks(text: str, max_lines: int = 3) -> str:
+    """Replace any fenced code block longer than ``max_lines`` with a clean 1-line reference."""
+
+    def _replace(match: re.Match[str]) -> str:
+        body = match.group(1).rstrip("\n")
+        if len(body.splitlines()) > max_lines:
+            return "• [Target Implementation: see Hammer stage]"
+        return match.group(0)
+
+    return _FENCE_RE.sub(_replace, text)
+
+
+def _ensure_heading(text: str, heading: str) -> str:
+    if not text:
+        return heading
+    if text.lstrip().lower().startswith(heading.lower()):
+        return text
+    return f"{heading}\n{text}"
+
+
+def format_stage_deliverable(stage: ForgeStage, raw_text: str) -> str:
+    """Enforce role-pure final output for each stage (Anvil plan, Hammer report, Temper verdict).
+
+    * **Anvil** never shows implementation source dumps: any fenced code block longer than a
+      few lines is replaced with a clean reference to the Hammer stage.
+    * **Hammer** leads with an ``Implementation Report`` heading (files/diff/commands).
+    * **Temper** leads with a ``QA & Verification Verdict`` heading.
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+    if stage is ForgeStage.ANVIL:
+        return _strip_long_code_blocks(text).strip()
+    if stage is ForgeStage.HAMMER:
+        return _ensure_heading(text, "Implementation Report")
+    if stage is ForgeStage.TEMPER:
+        return _ensure_heading(text, "QA & Verification Verdict")
+    return text
+
+
 @dataclass
 class StageBuffer:
     """Isolated, async-safe buffer storing execution state and thoughts for a single stage."""
@@ -83,6 +260,10 @@ class StageBuffer:
     scroll_offset: int = 0
     total_rendered_lines: int = 0
     status: Literal["idle", "running", "passed", "failed"] = "idle"
+    is_working: bool = False
+    spinner_index: int = 0
+    live_headline: str = "Thinking..."
+    live_subline: str = ""
 
     def render_to_ansi(
         self,
@@ -160,6 +341,22 @@ class StageBuffer:
                     style="italic #94a3b8",
                 )
             )
+
+        # 7. Ephemeral 2-line live-activity indicator (vanishes the instant work finishes).
+        if self.is_working:
+            accent = _STAGE_ACCENT.get(self.stage, "#3b82f6")
+            frame = TRANSIENT_SPINNER_FRAMES[
+                self.spinner_index % len(TRANSIENT_SPINNER_FRAMES)
+            ]
+            headline = (self.live_headline or "Thinking...").strip()
+            console.print(Text(f"{frame} {headline}", style=f"bold {accent}"))
+            subline = (self.live_subline or "").strip()
+            if subline:
+                # Truncate so the subline never wraps onto a second line.
+                limit = max(4, effective_width - 8)
+                if len(subline) > limit:
+                    subline = subline[: limit - 1].rstrip() + "…"
+                console.print(Text(f"  └─ {subline}", style="dim #94a3b8"))
 
         full_output = sio.getvalue()
         lines = full_output.splitlines()
@@ -321,6 +518,30 @@ class ForgeTUIState:
     def append_tool_event(self, stage: ForgeStage, text: str) -> None:
         """Append a tool or sandbox execution event to a stage's buffer."""
         self.stage_buffers[stage].tool_events.append(text)
+        self._notify_redraw()
+
+    def set_live_activity(
+        self, stage: ForgeStage, headline: str = "Thinking...", subline: str = ""
+    ) -> None:
+        """Overwrite a stage's transient live-activity status (never appends).
+
+        Sets ``is_working`` so the 2-line ``⠋ Thinking...`` / ``└─ action`` indicator renders at
+        the bottom of the stream, replaces the previous tool/thought subline in place, advances
+        the spinner, and triggers a redraw.
+        """
+        buffer = self.stage_buffers[stage]
+        buffer.is_working = True
+        buffer.live_headline = headline or "Thinking..."
+        buffer.live_subline = subline
+        buffer.spinner_index += 1
+        self._notify_redraw()
+
+    def clear_live_activity(self, stage: ForgeStage) -> None:
+        """Clear a stage's transient indicator so only the clean final output remains."""
+        buffer = self.stage_buffers[stage]
+        buffer.is_working = False
+        buffer.live_headline = ""
+        buffer.live_subline = ""
         self._notify_redraw()
 
     def set_stage_output(
