@@ -307,6 +307,46 @@ class ForgeTUIState:
         self.stage_buffers[stage].chat_history.append((speaker, text))
         self._notify_redraw()
 
+    def start_stream(self, stage: ForgeStage, speaker: str) -> None:
+        """Open a new streaming assistant turn that deltas will fill in live."""
+        self.stage_buffers[stage].chat_history.append((speaker, ""))
+        self._notify_redraw()
+
+    def append_stream(self, stage: ForgeStage, delta: str) -> None:
+        """Append a streamed token delta onto the currently open assistant turn."""
+        if not delta:
+            return
+        history = self.stage_buffers[stage].chat_history
+        if not history:
+            history.append(("assistant", ""))
+        speaker, text = history[-1]
+        history[-1] = (speaker, text + delta)
+        self._notify_redraw()
+
+    def finalize_stream(self, stage: ForgeStage, text: str) -> None:
+        """Close the open streamed turn (created by :meth:`start_stream`) with final text."""
+        history = self.stage_buffers[stage].chat_history
+        if history:
+            speaker, _ = history[-1]
+            history[-1] = (speaker, text)
+        else:
+            history.append(("assistant", text))
+        self._notify_redraw()
+
+    def clear_stage(self, stage: ForgeStage) -> None:
+        """Clear a single stage's transcript, thoughts, tool events and tokens (``/clear``)."""
+        buffer = self.stage_buffers[stage]
+        buffer.chat_history.clear()
+        buffer.thoughts.clear()
+        buffer.tool_events.clear()
+        buffer.final_output = ""
+        buffer.stage_tokens = 0
+        buffer.scroll_line = 0
+        buffer.status = "idle"
+        if self.selected_view_stage == stage and self.active_worker_stage is None:
+            self.active_stage_tokens = 0
+        self._notify_redraw()
+
     def reset_view(self) -> None:
         """Clear every stage buffer's transcript and reset the cycle view (``/clear``)."""
         self.cycle_history.clear()

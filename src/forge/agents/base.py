@@ -10,11 +10,20 @@ from forge.context.history import compact_history
 from forge.events.bus import EventBus
 from forge.events.types import Event, EventType
 from forge.models.adapter import ModelAdapter
-from forge.models.types import ContentPart, Message, Usage
+from forge.models.types import (
+    ContentPart,
+    Message,
+    ModelResponse,
+    StreamDone,
+    TextDelta,
+    ToolDefinition,
+    Usage,
+)
 from forge.tools.base import ToolResult
 from forge.tools.runtime import ToolRuntime
 
 ToolResultHandler = Callable[[ToolResult], None]
+TokenHandler = Callable[[str], None]
 
 
 @dataclass
@@ -77,6 +86,35 @@ class BaseAgent:
                 )
             )
 
+    async def _generate(
+        self,
+        conversation: Sequence[Message],
+        definitions: Sequence[ToolDefinition],
+        on_token: TokenHandler | None,
+    ) -> ModelResponse:
+        """One model turn, streaming real token deltas through ``on_token`` when possible.
+
+        Streaming is only used when the model advertises streaming and speaks the native tool
+        protocol; otherwise the (prompt-protocol) reply must be parsed in full and we fall back
+        to a single non-streamed generation.
+        """
+        if (
+            on_token is None
+            or not self.adapter.capabilities.streaming
+            or self.adapter.tool_strategy() != "native"
+        ):
+            return await self.adapter.generate(conversation, tools=list(definitions))
+
+        done: ModelResponse | None = None
+        async for event in self.adapter.stream(conversation, tools=list(definitions)):
+            if isinstance(event, TextDelta):
+                on_token(event.text)
+            elif isinstance(event, StreamDone):
+                done = event.response
+        if done is None:  # pragma: no cover - provider contract guarantees StreamDone
+            return await self.adapter.generate(conversation, tools=list(definitions))
+        return done
+
     async def _run_tool_loop(
         self,
         messages: Sequence[Message],
@@ -85,12 +123,14 @@ class BaseAgent:
         max_steps: int = 15,
         compact_budget: int | None = None,
         on_tool_result: ToolResultHandler | None = None,
+        on_token: TokenHandler | None = None,
     ) -> AgentLoopOutcome:
         """Execute turns using the model and tool runtime until conclusion or max_steps.
 
         Token usage is accumulated from the real provider ``usage`` metadata returned by
         every model turn; ``on_tool_result`` is invoked as each real tool finishes so a UI
-        can stream live tool output into its viewport.
+        can stream live tool output into its viewport, and ``on_token`` receives streamed
+        text deltas so a UI can render the reply as it is generated.
         """
         if self.runtime is None:
             raise RuntimeError(f"Agent {self.role!r} requires a ToolRuntime to execute tools.")
@@ -107,7 +147,7 @@ class BaseAgent:
             if len(conversation) > 4:
                 conversation = compact_history(conversation, budget)
 
-            response = await self.adapter.generate(conversation, tools=definitions)
+            response = await self._generate(conversation, definitions, on_token)
             outcome.usage = outcome.usage + response.usage
             conversation.append(response.message)
 
@@ -140,6 +180,7 @@ class BaseAgent:
         max_tool_steps: int = 5,
         allowed_tools: Sequence[str] | None = None,
         on_tool_result: ToolResultHandler | None = None,
+        on_token: TokenHandler | None = None,
     ) -> AgentChatTurn:
         """Chat with the developer in this agent's specialization."""
         from forge.agents.prompts import (
@@ -176,13 +217,14 @@ class BaseAgent:
                 allowed_tools=active_allowed,
                 max_steps=max_tool_steps,
                 on_tool_result=on_tool_result,
+                on_token=on_token,
             )
             raw_text = outcome.final_text
             updated_messages = outcome.messages
             usage = outcome.usage
             tool_names = outcome.tool_names
         else:
-            resp = await self.adapter.generate(conversation)
+            resp = await self._generate(conversation, (), on_token)
             raw_text = resp.text
             updated_messages = [*list(conversation), resp.message]
             usage = resp.usage

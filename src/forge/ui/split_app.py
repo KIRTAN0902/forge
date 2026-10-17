@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import (
     ANSI,
     AnyFormattedText,
@@ -19,15 +21,77 @@ from prompt_toolkit.formatted_text import (
 )
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
-from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+from prompt_toolkit.layout.containers import (
+    Float,
+    FloatContainer,
+    HSplit,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.output import DummyOutput, Output
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 
-from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, format_tokens
+from forge.ui.state import ForgeStage, ForgeTUIState, format_tokens
+
+# Animated braille spinner frames shown next to the actively running stage.
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Bold ASCII block-art FORGE banner rendered in the top header when there is room.
+_FORGE_ART: tuple[str, ...] = (
+    " ███████╗ ██████╗ ██████╗  ██████╗ ███████╗",
+    " ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝",
+    " █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ",
+    " ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ",
+    " ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗",
+    " ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
+)
+
+_STAGE_DOT: dict[ForgeStage, str] = {
+    ForgeStage.ANVIL: "🟦",
+    ForgeStage.HAMMER: "🟥",
+    ForgeStage.TEMPER: "🟩",
+}
+
+
+# Slash command catalogue used for both the popup completion menu and `/help`.
+SLASH_COMMANDS: dict[str, str] = {
+    "/help": "Show the command reference",
+    "/status": "Provider/model, connection & token diagnostics",
+    "/model": "List or switch a stage's model",
+    "/mode": "Set execution mode: auto | chat | cycle",
+    "/cycle": "Force a full Anvil -> Hammer -> Temper cycle",
+    "/research": "Run the STORM deep research pipeline",
+    "/clear": "Clear the active stage viewport",
+    "/reset": "Reset the whole session",
+    "/exit": "Exit the Forge workspace",
+}
+
+
+class SlashCommandCompleter(Completer):
+    """Pops a command menu whenever the input buffer starts with ``/``."""
+
+    def __init__(self, commands: dict[str, str] | None = None) -> None:
+        self.commands = commands or SLASH_COMMANDS
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text:
+            return
+        for name, description in self.commands.items():
+            if name.startswith(text):
+                yield Completion(
+                    name,
+                    start_position=-len(text),
+                    display=name,
+                    display_meta=description,
+                )
 
 
 def create_safe_output(output: Output | None = None) -> Output:
@@ -40,7 +104,9 @@ def create_safe_output(output: Output | None = None) -> Output:
         return DummyOutput()
 
 
-def render_sidebar_formatted_text(state: ForgeTUIState) -> StyleAndTextTuples:
+def render_sidebar_formatted_text(
+    state: ForgeTUIState, spinner_frame: str = ""
+) -> StyleAndTextTuples:
     """Generate prompt_toolkit formatted text fragments for the left sidebar."""
     fragments: StyleAndTextTuples = []
 
@@ -61,32 +127,32 @@ def render_sidebar_formatted_text(state: ForgeTUIState) -> StyleAndTextTuples:
         click_fn = make_click_handler(stg)
         stage_name = stg.value
         style_name = f"class:{stg.name.lower()}"
+        dot = _STAGE_DOT.get(stg, "⬜")
 
         is_active_worker = state.active_worker_stage == stg
         is_viewed = state.selected_view_stage == stg
 
         if is_active_worker:
-            # Enclosed in ASCII box with left arrow
-            # +----------+
-            # |  Stage   | <--
-            # +----------+
+            # Rounded box with a running indicator; the middle line keeps the classic
+            # `|  Stage  | <--` shape while gaining a live spinner when work is in flight.
             pad_left = (10 - len(stage_name)) // 2
             pad_right = 10 - len(stage_name) - pad_left
             padded = f"{' ' * pad_left}{stage_name}{' ' * pad_right}"
 
-            fragments.append(("class:active_box", "+----------+\n", click_fn))
+            fragments.append(("class:active_box", "╭──────────╮\n", click_fn))
             fragments.append(("class:active_box", "|", click_fn))
             fragments.append((style_name, padded, click_fn))
             fragments.append(("class:active_box", "| <--", click_fn))
 
             if is_viewed and not state.auto_follow:
-                fragments.append(("class:viewing_badge", " [👁 VIEWING]\n", click_fn))
-            else:
-                fragments.append(("", "\n", click_fn))
+                fragments.append(("class:viewing_badge", " [👁 VIEWING]", click_fn))
+            elif spinner_frame:
+                fragments.append(("class:spinner", f" {spinner_frame}", click_fn))
+            fragments.append(("", "\n", click_fn))
 
-            fragments.append(("class:active_box", "+----------+\n", click_fn))
+            fragments.append(("class:active_box", "╰──────────╯\n", click_fn))
         else:
-            fragments.append(("", "   ", click_fn))
+            fragments.append(("", f" {dot} ", click_fn))
             fragments.append((style_name, f"{stage_name:<8}", click_fn))
             if is_viewed:
                 fragments.append(("class:viewing_badge", " [👁 VIEWING]\n", click_fn))
@@ -140,6 +206,7 @@ def render_sidebar_formatted_text(state: ForgeTUIState) -> StyleAndTextTuples:
     fragments.append(("class:hint", " [F5] Toggle Mode\n"))
     fragments.append(("class:hint", " [Alt+←/→] History\n"))
     fragments.append(("class:hint", " [PgUp/Dn] Scroll View\n"))
+    fragments.append(("class:hint", " [Tab] / Commands\n"))
     fragments.append(("class:hint", " [Ctrl+C] Cancel Task\n"))
     fragments.append(("class:hint", " [Ctrl+Q] Exit Forge\n"))
 
@@ -155,9 +222,18 @@ def render_sidebar_plain_text(state: ForgeTUIState) -> str:
 class SidebarControl(FormattedTextControl):
     """FormattedTextControl displaying Anvil, Hammer, Temper, Cycle, and Token counters."""
 
-    def __init__(self, state: ForgeTUIState) -> None:
+    def __init__(
+        self,
+        state: ForgeTUIState,
+        spinner_getter: Callable[[], str] | None = None,
+    ) -> None:
         self.state = state
-        super().__init__(text=lambda: render_sidebar_formatted_text(self.state), show_cursor=False)
+        self._spinner_getter = spinner_getter
+        super().__init__(text=self._render, show_cursor=False)
+
+    def _render(self) -> StyleAndTextTuples:
+        frame = self._spinner_getter() if self._spinner_getter is not None else ""
+        return render_sidebar_formatted_text(self.state, frame)
 
 
 class ForgeSplitPaneApp:
@@ -175,14 +251,21 @@ class ForgeSplitPaneApp:
         self.controller = controller
         self.output = create_safe_output(output)
         self._background_task: asyncio.Task[Any] | None = None
+        self._spinner_task: asyncio.Task[Any] | None = None
+        self._spinner_index = 0
         self.bootstrap: Callable[[], Awaitable[None]] | None = None
         self.close_session: Callable[[], Awaitable[None]] | None = None
 
-        # Input buffer
-        self.input_buffer = Buffer(multiline=False)
+        # Input buffer with live `/` command autocompletion
+        self.completer = SlashCommandCompleter()
+        self.input_buffer = Buffer(
+            multiline=False,
+            completer=self.completer,
+            complete_while_typing=True,
+        )
 
         # Build prompt_toolkit UI layout
-        self.sidebar_control = SidebarControl(self.state)
+        self.sidebar_control = SidebarControl(self.state, self._current_spinner)
         self.sidebar_window = Window(
             content=self.sidebar_control,
             width=28,
@@ -202,7 +285,7 @@ class ForgeSplitPaneApp:
         )
         self.header_window = Window(
             content=self.header_control,
-            height=3,
+            height=self._header_height,
             style="class:header",
         )
 
@@ -229,7 +312,7 @@ class ForgeSplitPaneApp:
             style="class:border",
         )
 
-        # Input prompt control
+        # Bottom command bar: top frame, [Stage →] prompt + input, and a hint line
         self.input_control = BufferControl(
             buffer=self.input_buffer,
         )
@@ -239,7 +322,7 @@ class ForgeSplitPaneApp:
         )
         self.input_window = Window(
             content=self.input_control,
-            height=2,
+            height=1,
             style="class:input_box",
         )
         self.input_box_row = VSplit(
@@ -251,7 +334,24 @@ class ForgeSplitPaneApp:
                 ),
                 self.input_window,
             ],
-            height=2,
+            height=1,
+        )
+        self.input_top_border = Window(height=1, char="─", style="class:input_border")
+        self.input_hint_control = FormattedTextControl(
+            text=self._render_input_hint,
+            show_cursor=False,
+        )
+        self.input_hint_window = Window(
+            content=self.input_hint_control,
+            height=1,
+            style="class:hint",
+        )
+        self.input_area = HSplit(
+            [
+                self.input_top_border,
+                self.input_box_row,
+                self.input_hint_window,
+            ]
         )
 
         # Right pane container
@@ -261,7 +361,7 @@ class ForgeSplitPaneApp:
                 self.divider_horizontal_top,
                 self.viewport_window,
                 self.divider_horizontal_bottom,
-                self.input_box_row,
+                self.input_area,
             ]
         )
 
@@ -274,7 +374,20 @@ class ForgeSplitPaneApp:
             ]
         )
 
-        self.layout = Layout(self.root_container, focused_element=self.input_window)
+        # Floating completion menu (pops above the input bar on `/`)
+        self.layout = Layout(
+            FloatContainer(
+                content=self.root_container,
+                floats=[
+                    Float(
+                        xcursor=True,
+                        ycursor=True,
+                        content=CompletionsMenu(max_height=8, scroll_offset=1),
+                    )
+                ],
+            ),
+            focused_element=self.input_window,
+        )
 
         # Keybindings
         self.kb = KeyBindings()
@@ -294,14 +407,22 @@ class ForgeSplitPaneApp:
                 "token_total": "#ea580c bold",
                 "viewing_badge": "#eab308 bold",
                 "active_box": "#38bdf8 bold",
+                "spinner": "#facc15 bold",
                 "border": "#334155",
                 "sidebar_header": "#3b82f6 bold",
                 "header_title": "#3b82f6 bold",
+                "header_art": "#22d3ee bold",
                 "header_telemetry": "#94a3b8",
                 "prompt": "#38bdf8 bold",
+                "input_stage": "#eab308 bold",
+                "input_border": "#1e293b",
                 "question_prompt": "#00e5ff bold",
                 "hint_title": "#64748b bold",
                 "hint": "#64748b",
+                "completion-menu.completion": "bg:#0f172a #cbd5e1",
+                "completion-menu.completion.current": "bg:#38bdf8 #0f172a bold",
+                "completion-menu.meta.completion": "bg:#0f172a #64748b",
+                "completion-menu.meta.completion.current": "bg:#38bdf8 #0f172a",
             }
         )
 
@@ -318,10 +439,28 @@ class ForgeSplitPaneApp:
         # Register state redraw notification
         self.state._on_redraw = self._handle_state_redraw
 
+    # -- helpers ------------------------------------------------------------------------
+
     def _handle_state_redraw(self) -> None:
         """Invalidate the prompt_toolkit application so it redraws on state mutations."""
         with contextlib.suppress(Exception):
             self.application.invalidate()
+
+    def _current_spinner(self) -> str:
+        """Return the animated spinner frame only while a stage is actively running."""
+        if self.state.active_worker_stage is None:
+            return ""
+        return _SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)]
+
+    def _header_height(self) -> int:
+        return 2 if _is_compact_terminal() else len(_FORGE_ART)
+
+    def _model_label(self) -> str:
+        getter = getattr(self.controller, "current_model_label", None)
+        if callable(getter):
+            with contextlib.suppress(Exception):
+                return str(getter())
+        return "(no model)"
 
     def _render_input_prompt(self) -> AnyFormattedText:
         """Render dynamic prompt: switches to question option indicator when question is pending."""
@@ -329,36 +468,58 @@ class ForgeSplitPaneApp:
             num = len(self.state.pending_question.options)
             prefix = f"[1-{num}]" if num > 0 else "[?]"
             return [("class:question_prompt", f"? {prefix} > ")]
-        return [("class:prompt", "> ")]
+        stage = self.state.selected_view_stage.value
+        return [
+            ("class:prompt", "> "),
+            ("class:input_stage", f"[{stage} →] "),
+        ]
+
+    def _render_input_hint(self) -> AnyFormattedText:
+        stage = self.state.selected_view_stage.value
+        return [
+            (
+                "class:hint",
+                f" [{stage} →] Type a message, /command (/help, /model, /cycle, "
+                f"/research), or !shell...",
+            )
+        ]
 
     def _render_header(self) -> AnyFormattedText:
-        """Render the top header banner with centered FORGE title and live telemetry bar."""
+        """Render the top header: ASCII FORGE art + live telemetry (or a compact fallback)."""
         worker_str = (
             self.state.active_worker_stage.value if self.state.active_worker_stage else "IDLE"
         )
         viewport_str = self.state.selected_view_stage.value
-        follow_str = "AUTO-FOLLOW" if self.state.auto_follow else "PINNED (Alt+0 to follow)"
+        follow_str = "AUTO-FOLLOW" if self.state.auto_follow else "PINNED"
         cycle_str = f"Cycle #{self.state.cycle_count} [{self.state.cycle_mode.value}]"
         if self.state.viewing_history_cycle is not None:
-            cycle_str += f" [VIEWING HISTORY: Cycle {self.state.viewing_history_cycle}]"
+            cycle_str += f" [HIST:{self.state.viewing_history_cycle}]"
 
-        telemetry = (
-            f" {cycle_str} | Worker: {worker_str} | Viewport: {viewport_str} [{follow_str}] | "
-            f"Stage Tokens: {self.state.active_stage_tokens:,} | "
-            f"Session Total: {self.state.total_session_tokens:,}"
+        row_harness = "⚡ Autonomous Cybernetic Coding Harness"
+        row_status = (
+            f"{cycle_str} │ Worker: {worker_str} │ View: {viewport_str} [{follow_str}]"
+        )
+        row_tokens = (
+            f"Stage Tokens: {self.state.active_stage_tokens:,} │ "
+            f"Session Total: {self.state.total_session_tokens:,} │ "
+            f"Model: {self._model_label()}"
         )
 
-        # Dynamic terminal width for title centering
-        cols = shutil.get_terminal_size((100, 30)).columns
-        right_width = max(30, cols - 29)
-        title = "FORGE"
-        pad = max(0, (right_width - len(title)) // 2)
-        centered_title = f"{' ' * pad}{title}\n"
+        if _is_compact_terminal():
+            return [
+                ("class:header_art", " FORGE ⚡ Cybernetic Coding Harness\n"),
+                ("class:header_telemetry", f" {row_status}"),
+            ]
 
-        return [
-            ("class:header_title", centered_title),
-            ("class:header_telemetry", telemetry),
-        ]
+        telemetry_by_row = {1: row_harness, 2: row_status, 3: row_tokens}
+        fragments: StyleAndTextTuples = []
+        for index, art_line in enumerate(_FORGE_ART):
+            fragments.append(("class:header_art", art_line))
+            overlay = telemetry_by_row.get(index)
+            if overlay:
+                fragments.append(("class:header_telemetry", f"   {overlay}"))
+            fragments.append(("", "\n" if index < len(_FORGE_ART) - 1 else ""))
+        return fragments
 
     def _render_viewport(self) -> AnyFormattedText:
         """Render the exclusive stage viewport buffer using ANSI conversion."""
@@ -416,6 +577,15 @@ class ForgeSplitPaneApp:
         def _scroll_down(event: KeyPressEvent) -> None:
             self.state.scroll_down(5)
 
+        @self.kb.add("tab")
+        def _complete(event: KeyPressEvent) -> None:
+            """Cycle through the `/` completion popup, opening it on first Tab."""
+            buffer = event.current_buffer
+            if buffer.complete_state:
+                buffer.complete_next()
+            else:
+                buffer.start_completion(select_first=True)
+
         @self.kb.add("enter")
         def _handle_enter(event: KeyPressEvent) -> None:
             user_text = self.input_buffer.text
@@ -430,31 +600,13 @@ class ForgeSplitPaneApp:
             if not stripped:
                 return
 
-            # If user types /exit or /quit
+            # 2. Explicit exit
             if stripped.lower() in {"/exit", "/quit", "exit", "quit"}:
                 event.app.exit()
                 return
 
-            # Local mode commands keep the legacy F5/Mode shortcuts working
-            if stripped.lower() in {"/single", "/step", "/1"}:
-                self.state.set_cycle_mode(CycleMode.SINGLE_CYCLE)
-                if self.controller and hasattr(self.controller, "set_cycle_mode"):
-                    self.controller.set_cycle_mode(CycleMode.SINGLE_CYCLE)
-                return
-
-            if stripped.lower() in {"/auto", "/continuous", "/fulfill"}:
-                self.state.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
-                if self.controller and hasattr(self.controller, "set_cycle_mode"):
-                    self.controller.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
-                return
-
-            if stripped.lower() in {"/mode", "/toggle"}:
-                new_m = self.state.toggle_cycle_mode()
-                if self.controller and hasattr(self.controller, "set_cycle_mode"):
-                    self.controller.set_cycle_mode(new_m)
-                return
-
-            # Submit to the adaptive controller with the pinned stage (if any)
+            # 3. Everything else (including `/commands` and `!shell`) goes straight to the
+            #    controller's deterministic dispatcher on a background task.
             async def _run_submission() -> None:
                 await self.submit_text(stripped)
 
@@ -481,22 +633,35 @@ class ForgeSplitPaneApp:
     async def submit_text(self, user_text: str) -> str:
         """Route a submitted input to the adaptive controller, resolving the pinned stage.
 
-        When the developer has manually pinned a stage in the sidebar (auto-follow off), the
-        turn is routed directly to that stage's agent (e.g. talking to Temper). Otherwise the
-        controller classifies the intent itself.
+        Explicit ``/`` and ``!`` syntax is dispatched immediately by the controller's slash
+        handler; free-form text is routed through intent classification with the pinned stage
+        (when the developer has turned auto-follow off).
         """
+        if self.controller is None:
+            self.state.append_thought(ForgeStage.ANVIL, f"User Goal: {user_text}")
+            return ""
+
+        stripped = user_text.strip()
+        if stripped.startswith("/") or stripped.startswith("!"):
+            handler = getattr(self.controller, "handle_slash_command", None)
+            if callable(handler):
+                result = await handler(stripped)
+                return result if isinstance(result, str) else ""
+
         stage: ForgeStage | None = None
         if not self.state.auto_follow:
             stage = self.state.selected_view_stage
 
-        if self.controller is not None:
-            result = await self.controller.run_cycle_loop(user_text, target_stage=stage)
-            if isinstance(result, str):
-                return result
-            return ""
-        # Standalone simulation or test invocation without a controller
-        self.state.append_thought(ForgeStage.ANVIL, f"User Goal: {user_text}")
-        return ""
+        result = await self.controller.run_cycle_loop(user_text, target_stage=stage)
+        return result if isinstance(result, str) else ""
+
+    async def _spin(self) -> None:
+        """Animate the running-stage spinner while the app is live."""
+        while True:
+            await asyncio.sleep(0.12)
+            self._spinner_index += 1
+            if self.state.active_worker_stage is not None:
+                self._handle_state_redraw()
 
     async def run_async(self) -> None:
         """Run the full-screen TUI application asynchronously.
@@ -507,12 +672,26 @@ class ForgeSplitPaneApp:
         """
         if self.bootstrap is not None:
             await self.bootstrap()
+        self._spinner_task = asyncio.ensure_future(self._spin())
         try:
             await self.application.run_async()
         finally:
+            if self._spinner_task is not None:
+                self._spinner_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._spinner_task
             if self.close_session is not None:
                 await self.close_session()
 
     def run(self) -> None:
         """Run the full-screen TUI application synchronously."""
         self.application.run()
+
+
+def _is_compact_terminal() -> bool:
+    """True when the terminal is too short for the multi-line ASCII banner."""
+    try:
+        lines = shutil.get_terminal_size((100, 30)).lines
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return lines < 24

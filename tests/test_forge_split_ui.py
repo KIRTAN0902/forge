@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
+from forge.agents import ExecutorAgent, OrchestratorAgent, QAAgent
+from forge.models import ModelAdapter, ModelCapabilities, ModelProfile
+from forge.models.providers.scripted import ScriptedProvider
 from forge.tools.human_question import AskUserQuestion, AskUserQuestionInput
 from forge.ui.cycle_controller import CycleVerdict, ForgeCycleController
 from forge.ui.split_app import (
@@ -11,6 +16,23 @@ from forge.ui.split_app import (
     render_sidebar_plain_text,
 )
 from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, UserQuestion, format_tokens
+
+
+def _scripted_agent(provider: ScriptedProvider, role: str) -> Any:
+    profile = ModelProfile(provider="scripted", model=f"{role}-test", detect_capabilities=False)
+    adapter = ModelAdapter(
+        profile_name=role,
+        profile=profile,
+        provider=provider,
+        capabilities=ModelCapabilities(tool_calling=True, structured_output=True),
+        role=role,
+    )
+    if role == "orchestrator":
+        return OrchestratorAgent(adapter)
+    no_runtime = cast("Any", None)
+    if role == "executor":
+        return ExecutorAgent(adapter, no_runtime)
+    return QAAgent(adapter, no_runtime)
 
 
 def test_format_tokens_helper() -> None:
@@ -269,11 +291,11 @@ async def test_dynamic_cycle_mode_continuous_until_fulfilled() -> None:
 async def test_conversational_turn_behaves_like_chat_without_cycles_or_questions() -> None:
     """Verify that pure conversational inquiries (like 'hi', 'hello', 'what can you do')
 
-    behave normally like chat: Anvil responds directly without triggering questions or
-    running Hammer/Temper stages.
+    stream a real model reply on Anvil without triggering questions or running Hammer/Temper.
     """
     state = ForgeTUIState()
     asked_questions: list[UserQuestion] = []
+    provider = ScriptedProvider()
 
     async def mock_question_handler(question: UserQuestion) -> str:
         asked_questions.append(question)
@@ -282,27 +304,36 @@ async def test_conversational_turn_behaves_like_chat_without_cycles_or_questions
     controller = ForgeCycleController(
         state=state,
         question_handler=mock_question_handler,
+        agents={ForgeStage.ANVIL: _scripted_agent(provider, "orchestrator")},
     )
 
-    # 1. Test "hi"
+    # 1. Test "hi" — the reply is whatever the model returns, not a canned string.
+    provider.add("Hello! I am Forge. How can I help you today?")
     result = await controller.run_cycle_loop("hi")
 
     # No questions asked
     assert len(asked_questions) == 0
-    # Responded conversationally
-    assert "Hello!" in result or "Forge" in result
+    assert "Forge" in result
+    assert len(provider.requests) == 1
     assert state.stage_buffers[ForgeStage.ANVIL].status == "passed"
     assert state.active_worker_stage is None
+    # The full multi-turn conversation history is preserved for the next turn.
+    anvil_history = controller.conversation_history[ForgeStage.ANVIL]
+    assert anvil_history[0] == {"role": "user", "content": "hi"}
+    assert "Forge" in anvil_history[1]["content"]
 
     # Hammer & Temper stages were deferred (never executed)
     assert len(state.stage_buffers[ForgeStage.HAMMER].thoughts) == 0
     assert len(state.stage_buffers[ForgeStage.HAMMER].tool_events) == 0
     assert len(state.stage_buffers[ForgeStage.TEMPER].thoughts) == 0
 
-    # 2. Test "what can you do"
+    # 2. Test "what can you do" — the prior turn is replayed to the model.
+    provider.add("I run the Anvil -> Hammer -> Temper blacksmithing pipeline.")
     result_help = await controller.run_cycle_loop("what can you do")
     assert len(asked_questions) == 0
-    assert "Blacksmithing Pipeline" in result_help or "Anvil" in result_help
+    assert "Anvil" in result_help or "pipeline" in result_help
+    second_request = provider.requests[1]
+    assert any("hi" in (m.content or "") for m in second_request.messages)
 
 
 @pytest.mark.asyncio
@@ -318,9 +349,17 @@ async def test_unspecified_task_executes_without_unnecessary_question() -> None:
         asked_questions.append(question)
         return question.options[0]
 
+    def verifier(_cycle: int, _prompt: str) -> CycleVerdict:
+        return CycleVerdict(
+            passed=True,
+            feedback="All acceptance criteria satisfied.",
+            deliverable="Exported user profiles to profiles.json.",
+        )
+
     controller = ForgeCycleController(
         state=state,
         question_handler=mock_question_handler,
+        temper_verifier=verifier,
     )
 
     result = await controller.run_cycle_loop("Create user profile export feature")
@@ -331,7 +370,7 @@ async def test_unspecified_task_executes_without_unnecessary_question() -> None:
     assert controller.cycle_mode == CycleMode.UNTIL_FULFILLED
     assert state.cycle_mode == CycleMode.UNTIL_FULFILLED
     # Finished successfully
-    assert "Final Deliverable for: 'Create user profile export feature'" in result
+    assert "Exported user profiles to profiles.json." in result
 
 
 @pytest.mark.asyncio

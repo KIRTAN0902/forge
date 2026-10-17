@@ -37,6 +37,10 @@ class ProviderConfig(_Config):
 
 BUILTIN_PROVIDERS: dict[str, ProviderConfig] = {
     "openai": ProviderConfig(base_url="https://api.openai.com/v1", api_key_env="OPENAI_API_KEY"),
+    "gemini": ProviderConfig(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        api_key_env="GEMINI_API_KEY",
+    ),
     "openrouter": ProviderConfig(
         base_url="https://openrouter.ai/api/v1",
         api_key_env="OPENROUTER_API_KEY",

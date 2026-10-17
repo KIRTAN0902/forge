@@ -166,6 +166,7 @@ async def _build_tui_controller(state: Any, harness: Any, path: Path) -> Any:
     return ForgeCycleController(
         state=state,
         runtime=runtime,
+        registry=registry,
         root=path,
         project_context=project_context,
         agents=agents,

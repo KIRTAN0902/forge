@@ -17,16 +17,19 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from forge.harness.adversarial_qa import AdversarialQAGatekeeper, detect_secrets_in_text
 from forge.harness.memory import EpisodicRepoMemory
+from forge.models import Message
+from forge.models.profile import ModelProfile
 from forge.skills import AutonomousSkillRouter
 from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, UserQuestion
 
@@ -38,6 +41,35 @@ class ExecutionMode(StrEnum):
     DIRECT_TOOL = "direct_tool"
     FULL_FORGE_CYCLE = "full_forge_cycle"
     DEEP_RESEARCH = "deep_research"
+
+
+# Stage <-> role aliases used by the `/model` command to route a binding to the right agent.
+_STAGE_ALIASES: dict[str, ForgeStage] = {
+    "anvil": ForgeStage.ANVIL,
+    "orchestrator": ForgeStage.ANVIL,
+    "orch": ForgeStage.ANVIL,
+    "hammer": ForgeStage.HAMMER,
+    "executor": ForgeStage.HAMMER,
+    "exec": ForgeStage.HAMMER,
+    "temper": ForgeStage.TEMPER,
+    "qa": ForgeStage.TEMPER,
+    "verifier": ForgeStage.TEMPER,
+}
+
+_STAGE_ROLES: dict[ForgeStage, str] = {
+    ForgeStage.ANVIL: "orchestrator",
+    ForgeStage.HAMMER: "executor",
+    ForgeStage.TEMPER: "qa",
+}
+
+
+def _mode_label(mode: ExecutionMode | None) -> str:
+    """Human-readable label for the forced execution mode (or ``AUTO``)."""
+    if mode is ExecutionMode.CONVERSATIONAL:
+        return "CHAT"
+    if mode is ExecutionMode.FULL_FORGE_CYCLE:
+        return "CYCLE"
+    return "AUTO"
 
 
 # -- Deterministic zero-latency intent pre-filter -----------------------------------------
@@ -272,35 +304,35 @@ def classify_intent(prompt: str, *, forced: ExecutionMode | None = None) -> Exec
     return ExecutionMode.CONVERSATIONAL
 
 
-def get_conversational_response(prompt: str) -> str:
-    """Offline fallback used only when no live agent/model is attached (e.g. tests)."""
-    p_clean = prompt.strip().lower().rstrip(".!?,;: ").strip()
+# Provider API-key environment variables surfaced in the offline diagnostic panel. Forge
+# NEVER fabricates an assistant reply: if no live model is reachable we explain exactly what
+# to configure instead of returning a canned sentence.
+_API_KEY_ENV_VARS: tuple[tuple[str, str], ...] = (
+    ("OPENROUTER_API_KEY", "OpenRouter (openrouter.ai)"),
+    ("OPENAI_API_KEY", "OpenAI (api.openai.com)"),
+    ("GEMINI_API_KEY", "Google Gemini"),
+    ("ANTHROPIC_API_KEY", "Anthropic Claude"),
+    ("NVIDIA_API_KEY", "NVIDIA NIM"),
+)
 
-    help_triggers = {
-        "help",
-        "what can you do",
-        "what is forge",
-        "info",
-        "who are you",
-        "what are you",
-    }
-    if p_clean in help_triggers:
-        return (
-            "I am Forge — your autonomous blacksmithing development environment.\n\n"
-            "I respond conversationally here in Anvil. Ask me about the codebase, run a "
-            "command directly (e.g. `run pytest`), or give me a build task and I will hand "
-            "it off to Hammer (execution) and Temper (adversarial QA)."
-        )
-    gratitude = {"thanks", "thank you", "thx", "cool", "awesome", "great", "nice"}
-    if any(w in p_clean for w in gratitude):
-        return "You're welcome! Ready when you are."
-    if any(w in p_clean for w in {"bye", "goodbye", "see you"}):
-        return "Goodbye! The Forge workspace is standing by whenever you return."
 
-    return (
-        "Hello! I am Forge, your autonomous blacksmithing development environment.\n\n"
-        "Ask me anything about this repository, or tell me what to run or build."
+def model_diagnostic(reason: str = "No live LLM model is attached to this session.") -> str:
+    """Actionable diagnostic shown instead of a fabricated reply when no model is reachable."""
+    lines = [
+        f"⚠ {reason}",
+        "",
+        "Forge does not fake model output — every conversational turn must reach a real LLM.",
+        "Configure a provider API key, then restart Forge (or run `forge login`):",
+    ]
+    lines.extend(f"  • {env}  →  {label}" for env, label in _API_KEY_ENV_VARS)
+    lines.append(
+        "  • OLLAMA_HOST (optional) for a local Ollama server "
+        "(default http://localhost:11434)"
     )
+    lines.append("")
+    lines.append("Or switch models live at any time: /model <stage> <provider>/<model>")
+    lines.append("Example: /model anvil openrouter/google/gemini-2.5-flash")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -328,6 +360,7 @@ class ForgeCycleController:
         *,
         agents: Mapping[ForgeStage, Any] | None = None,
         runtime: Any = None,
+        registry: Any = None,
         root: Path | None = None,
         project_context: str = "",
         workflow_runner: Callable[[str], Awaitable[Any]] | None = None,
@@ -346,6 +379,7 @@ class ForgeCycleController:
 
         self.agents: dict[ForgeStage, Any] = dict(agents or {})
         self.runtime = runtime
+        self.registry = registry
         self.root = root
         self.project_context = project_context
         self.workflow_runner = workflow_runner
@@ -357,11 +391,19 @@ class ForgeCycleController:
         self.qa_gatekeeper = AdversarialQAGatekeeper()
         self.memory = EpisodicRepoMemory()
 
-        self._history: dict[ForgeStage, list[Any]] = {
+        # Canonical provider-neutral Message history per stage (fed to the real model) plus a
+        # lightweight role/content transcript used for introspection and the live viewport.
+        self._history: dict[ForgeStage, list[Message]] = {
             ForgeStage.ANVIL: [],
             ForgeStage.HAMMER: [],
             ForgeStage.TEMPER: [],
         }
+        self.conversation_history: dict[ForgeStage, list[dict[str, str]]] = {
+            ForgeStage.ANVIL: [],
+            ForgeStage.HAMMER: [],
+            ForgeStage.TEMPER: [],
+        }
+        self.forced_mode: ExecutionMode | None = None
         self.last_mode: ExecutionMode = ExecutionMode.CONVERSATIONAL
         self._current_task: asyncio.Task[Any] | None = None
         self._cancelled: bool = False
@@ -384,10 +426,26 @@ class ForgeCycleController:
         if self._current_task is not None and not self._current_task.done():
             self._current_task.cancel()
 
+    def set_execution_mode(self, name: str) -> str:
+        """Set the router execution mode: ``auto`` (adaptive), ``chat``, or ``cycle``."""
+        normalized = name.strip().lower()
+        if normalized in {"auto", "adaptive", "default"}:
+            self.forced_mode = None
+            return "Execution mode: AUTO (adaptive routing)"
+        if normalized in {"chat", "conversation", "talk"}:
+            self.forced_mode = ExecutionMode.CONVERSATIONAL
+            return "Execution mode: CHAT (stay conversational — no automatic cycles)"
+        if normalized in {"cycle", "forge", "build"}:
+            self.forced_mode = ExecutionMode.FULL_FORGE_CYCLE
+            return "Execution mode: CYCLE (force Anvil -> Hammer -> Temper)"
+        return f"Unknown mode: {name!r}. Use one of: auto | chat | cycle"
+
     def classify(self, prompt: str, target_stage: ForgeStage | None = None) -> ExecutionMode:
-        """Classify a prompt, honoring an explicitly pinned stage."""
+        """Classify a prompt, honoring an explicitly pinned stage and any forced mode."""
         if self.intent_classifier is not None:
             return self.intent_classifier(prompt)
+        if self.forced_mode is not None:
+            return self.forced_mode
         if target_stage is not None and target_stage != ForgeStage.ANVIL:
             # The developer selected a specific stage: talk directly to that agent.
             base = classify_intent(prompt)
@@ -408,19 +466,9 @@ class ForgeCycleController:
         if not stripped:
             return ""
 
-        # 1. Explicit slash / shell syntax handlers
-        if stripped.startswith("!"):
-            self.last_mode = ExecutionMode.DIRECT_TOOL
-            return await self.execute_shell_command(
-                stripped[1:].strip(), stage=target_stage or ForgeStage.ANVIL
-            )
-        if stripped.startswith("/"):
-            low_slash = stripped.lower()
-            if low_slash.startswith("/cycle"):
-                self.last_mode = ExecutionMode.FULL_FORGE_CYCLE
-            elif low_slash.startswith("/research"):
-                self.last_mode = ExecutionMode.DEEP_RESEARCH
-            return await self._handle_slash_command(stripped)
+        # 1. Explicit slash / shell syntax handlers run BEFORE any intent classification.
+        if stripped.startswith("!") or stripped.startswith("/"):
+            return await self.handle_slash_command(stripped)
 
         # 2. Deterministic intent routing
         mode = self.classify(stripped, target_stage)
@@ -528,6 +576,7 @@ class ForgeCycleController:
         stage: ForgeStage,
         *,
         allow_edits: bool,
+        on_token: Callable[[str], None] | None = None,
     ) -> Any:
         """Call an agent's ``chat`` with only the kwargs it actually supports."""
         kwargs: dict[str, Any] = {}
@@ -551,6 +600,8 @@ class ForgeCycleController:
             kwargs["allowed_tools"] = self._toolset_for(stage, allow_edits)
         if accepts("on_tool_result"):
             kwargs["on_tool_result"] = lambda result: self._stream_tool_result(stage, result)
+        if accepts("on_token") and on_token is not None:
+            kwargs["on_token"] = on_token
 
         return await agent.chat(prompt, **kwargs)
 
@@ -581,31 +632,45 @@ class ForgeCycleController:
         *,
         allow_edits: bool,
     ) -> str:
-        """Run one real agent chat / ReAct tool turn strictly inside ``stage``."""
+        """Run one real agent chat / ReAct tool turn strictly inside ``stage``.
+
+        The prompt is sent to the stage's real configured LLM (never a canned string), streamed
+        token-by-token into the viewport, and both the user and assistant turns are recorded in
+        the persistent per-stage ``conversation_history``. When no model is attached we render an
+        actionable credential diagnostic instead of fabricating a reply.
+        """
         self.state.set_active_stage(stage, reset_tokens=False)
         self.state.append_chat(stage, "You", prompt)
+        self.conversation_history[stage].append({"role": "user", "content": prompt})
 
         agent = self._agent_for(stage)
-        handoff: str | None = None
-        tokens = 0
-
         if agent is None:
-            reply = get_conversational_response(prompt)
-        else:
-            turn = await self._invoke_agent_chat(
-                agent, prompt, stage, allow_edits=allow_edits
-            )
-            reply = (getattr(turn, "response_text", "") or "").strip()
-            tokens = self._turn_tokens(turn)
-            messages = getattr(turn, "messages", None)
-            if messages:
-                self._history[stage] = list(messages)
-            handoff = getattr(turn, "handoff_requirements", None)
-            if not reply:
-                reply = "(no response)"
+            reply = model_diagnostic()
+            self.state.append_chat(stage, self._speaker(stage), reply)
+            self.state.set_stage_output(stage, reply, status="failed")
+            self.conversation_history[stage].append({"role": "assistant", "content": reply})
+            self.state.set_active_stage(None)
+            return reply
+
+        def _on_token(delta: str) -> None:
+            self.state.append_stream(stage, delta)
+
+        self.state.start_stream(stage, self._speaker(stage))
+        turn = await self._invoke_agent_chat(
+            agent, prompt, stage, allow_edits=allow_edits, on_token=_on_token
+        )
+        reply = (getattr(turn, "response_text", "") or "").strip()
+        tokens = self._turn_tokens(turn)
+        messages = getattr(turn, "messages", None)
+        if messages:
+            self._history[stage] = list(messages)
+        handoff = getattr(turn, "handoff_requirements", None)
+        if not reply:
+            reply = "(no response)"
 
         self.state.record_tokens(stage, tokens)
-        self.state.append_chat(stage, self._speaker(stage), reply)
+        self.state.finalize_stream(stage, reply)
+        self.conversation_history[stage].append({"role": "assistant", "content": reply})
         self.state.set_stage_output(stage, reply, status="passed")
         self.state.set_active_stage(None)
 
@@ -663,9 +728,26 @@ class ForgeCycleController:
     # -- full Anvil -> Hammer -> Temper cycle --------------------------------------------
 
     async def _run_full_cycle(self, prompt: str) -> str:
+        """Run the full pipeline: the real harness, the injected verifier, or a diagnostic.
+
+        Forge never fabricates a cycle outcome. Without a live workflow runner or an injected
+        verifier it renders the credential diagnostic instead of a canned deliverable.
+        """
         if self.workflow_runner is not None:
             return await self._run_real_cycle(prompt)
-        return await self._run_simulated_cycle(prompt)
+        if self.temper_verifier is not None:
+            return await self._run_simulated_cycle(prompt)
+
+        diagnostic = model_diagnostic(
+            "A full Anvil -> Hammer -> Temper cycle needs a live model harness or verifier."
+        )
+        stage = ForgeStage.ANVIL
+        self.state.set_active_stage(stage, reset_tokens=False)
+        self.state.append_chat(stage, "You", prompt)
+        self.state.append_chat(stage, "Forge", diagnostic)
+        self.state.set_stage_output(stage, diagnostic, status="failed")
+        self.state.set_active_stage(None)
+        return diagnostic
 
     async def _run_real_cycle(self, prompt: str) -> str:
         """Delegate to the real multi-agent workflow orchestrator and mirror its outcome."""
@@ -954,43 +1036,175 @@ class ForgeCycleController:
 
     # -- slash commands ------------------------------------------------------------------
 
-    async def _handle_slash_command(self, raw: str) -> str:
-        command, _, argument = raw.partition(" ")
+    def _view_stage(self) -> ForgeStage:
+        """The stage whose viewport a command's output should be rendered into."""
+        if self.state.active_worker_stage is not None:
+            return self.state.active_worker_stage
+        return self.state.selected_view_stage
+
+    def _emit_command_output(
+        self,
+        command: str,
+        text: str,
+        *,
+        status: Literal["idle", "running", "passed", "failed"] = "passed",
+    ) -> str:
+        """Render a command's output into the active stage buffer and return the text."""
+        stage = self._view_stage()
+        self.state.append_chat(stage, "You", command)
+        self.state.append_chat(stage, "Forge", text)
+        self.state.set_stage_output(stage, text, status=status)
+        return text
+
+    async def handle_slash_command(self, raw: str) -> str:
+        """Deterministic dispatcher for explicit ``/command`` and ``!shell`` syntax.
+
+        Runs BEFORE the intent router so command output is always immediate and visible in the
+        active stage viewport — never swallowed by classification.
+        """
+        stripped = raw.strip()
+        if stripped.startswith("!"):
+            self.last_mode = ExecutionMode.DIRECT_TOOL
+            return await self.execute_shell_command(
+                stripped[1:].strip(), stage=self._view_stage()
+            )
+
+        command, _, argument = stripped.partition(" ")
         command = command.strip().lower()
         argument = argument.strip()
 
         if command == "/help":
-            return self._help_text()
-        if command in {"/status", "/models"}:
-            return self._status_text()
-        if command == "/clear":
-            self.state.reset_view()
-            return "Cleared the viewport and reset the cycle view."
-        if command == "/cycle":
+            return self._emit_command_output("/help", self._help_text())
+        if command == "/shortcuts":
+            return self._emit_command_output("/shortcuts", self._shortcuts_text())
+        if command in {"/status", "/models"} and not argument:
+            return self._emit_command_output(command, self._status_text())
+        if command in {"/model", "/models"}:
+            text = await self._handle_model_command(argument)
+            return self._emit_command_output(command, text)
+        if command == "/mode":
+            text = (
+                self.set_execution_mode(argument)
+                if argument
+                else self._mode_summary()
+            )
+            return self._emit_command_output("/mode", text)
+        if command in {"/cycle", "/forge"}:
             if not argument:
-                return "Usage: /cycle <engineering task to force through Anvil -> Hammer -> Temper>"
+                text = "Usage: /cycle <engineering task> — force Anvil -> Hammer -> Temper."
+                return self._emit_command_output(command, text, status="failed")
+            self.last_mode = ExecutionMode.FULL_FORGE_CYCLE
             return await self._run_full_cycle(argument)
         if command == "/research":
+            if not argument:
+                text = "Usage: /research <topic> — run the STORM deep research pipeline."
+                return self._emit_command_output(command, text, status="failed")
+            self.last_mode = ExecutionMode.DEEP_RESEARCH
             return await self._run_research(f"/research {argument}")
+        if command == "/clear":
+            stage = self._view_stage()
+            self.state.clear_stage(stage)
+            return self._emit_command_output("/clear", f"Cleared the {stage.value} viewport.")
+        if command == "/reset":
+            self.state.reset_view()
+            return self._emit_command_output(
+                "/reset", "Session reset: Cycle #1, all stage buffers and history cleared."
+            )
         if command in {"/exit", "/quit"}:
             return "Goodbye! The Forge workspace is standing by whenever you return."
-        return f"Unknown command: {command}. Type /help to see available commands."
 
-    def _help_text(self) -> str:
+        text = f"Unknown command: {command}. Type /help to see available commands."
+        return self._emit_command_output(command, text, status="failed")
+
+    # Backwards-compatible private alias (older call sites).
+    async def _handle_slash_command(self, raw: str) -> str:
+        return await self.handle_slash_command(raw)
+
+    def _mode_summary(self) -> str:
+        label = _mode_label(self.forced_mode)
         return (
-            "Forge Interactive Commands:\n"
-            "  /help                 Show this help\n"
-            "  /status | /models     Show model bindings per stage and token usage\n"
-            "  /clear                Clear the viewport and reset the cycle\n"
-            "  /cycle <prompt>       Force a full Anvil -> Hammer -> Temper cycle\n"
-            "  /research <topic>     Deep research mode\n"
-            "  !<shell command>      Run a shell command directly (e.g. !pytest -q)\n\n"
-            "Shortcuts: Alt+1 Anvil | Alt+2 Hammer | Alt+3 Temper | Alt+0 Auto-follow\n"
-            "           F5 Toggle mode | PgUp/PgDn Scroll | Ctrl+C Cancel | Ctrl+Q Exit"
+            f"Execution mode: {label}\n"
+            "  /mode auto   adaptive routing (chat or cycle as appropriate)\n"
+            "  /mode chat   always stay conversational in the active stage\n"
+            "  /mode cycle  always force Anvil -> Hammer -> Temper"
         )
 
-    def _status_text(self) -> str:
-        lines = ["Forge Model Bindings & Token Usage:"]
+    async def _handle_model_command(self, argument: str) -> str:
+        """List model bindings, or live-swap a stage's model (``/model <stage> <prov>/<model>``)."""
+        if not argument:
+            return self._model_list_text()
+
+        tokens = argument.split(None, 1)
+        stage_token = tokens[0].lower()
+        stage = _STAGE_ALIASES.get(stage_token)
+        if stage is None:
+            return (
+                f"Unknown stage {stage_token!r}. Use one of: anvil | hammer | temper "
+                "(aliases: orchestrator | executor | qa)."
+            )
+        if len(tokens) < 2 or not tokens[1].strip():
+            return (
+                "Usage: /model <stage> <provider>/<model>  "
+                "e.g. /model anvil openrouter/google/gemini-2.5-flash"
+            )
+
+        target = tokens[1].strip()
+        provider, _, model = target.partition("/")
+        if not model:
+            provider, model = "", provider  # bare model name; keep current provider
+        return await self.swap_stage_model(stage, provider or None, model.strip())
+
+    async def swap_stage_model(
+        self, stage: ForgeStage, provider: str | None, model: str
+    ) -> str:
+        """Rebind a stage to a new provider/model at runtime and rebuild its adapter."""
+        if self.registry is None:
+            return (
+                "No live model registry is attached to this session. Start Forge with a "
+                "configured provider (see /status) to swap models at runtime."
+            )
+        role = _STAGE_ROLES[stage]
+        agent = self._agent_for(stage)
+        current = getattr(getattr(agent, "adapter", None), "profile", None)
+        resolved_provider = provider or getattr(current, "provider", None)
+        if not resolved_provider:
+            return (
+                "Cannot resolve a provider for that model. Use "
+                "<provider>/<model> (e.g. openrouter/google/gemini-2.5-flash)."
+            )
+        profile_name = f"{resolved_provider}/{model}"
+        try:
+            self.registry.add_profile(
+                profile_name,
+                ModelProfile(
+                    provider=resolved_provider, model=model, detect_capabilities=False
+                ),
+            )
+            self.registry.bind_role(role, profile_name)
+            events = getattr(agent, "events", None)
+            adapter = await self.registry.adapter(role, events=events)
+        except Exception as exc:
+            return f"Failed to bind {resolved_provider}/{model} to {stage.value}: {exc}"
+
+        if agent is not None:
+            agent.adapter = adapter
+        return f"✔ {stage.value} now uses {adapter.describe()}"
+
+    def current_model_label(self) -> str:
+        """Short model id for the currently viewed stage (falls back to any attached stage)."""
+        for stage in (
+            self.state.selected_view_stage,
+            ForgeStage.ANVIL,
+            ForgeStage.HAMMER,
+            ForgeStage.TEMPER,
+        ):
+            adapter = getattr(self._agent_for(stage), "adapter", None)
+            if adapter is not None:
+                return str(getattr(adapter, "model", "unknown"))
+        return "(no model)"
+
+    def _model_list_text(self) -> str:
+        lines = ["Forge Model Bindings:"]
         for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
             agent = self._agent_for(stage)
             adapter = getattr(agent, "adapter", None)
@@ -1001,7 +1215,91 @@ class ForgeCycleController:
                     label = str(getattr(adapter, "model", "unknown"))
             else:
                 label = "(no live model attached)"
+            lines.append(f"  {stage.value:<7}: {label}")
+
+        providers: list[str] = []
+        if self.registry is not None:
+            providers = sorted(getattr(self.registry, "provider_configs", {}) or {})
+        if not providers:
+            from forge.models.profile import BUILTIN_PROVIDERS
+
+            providers = sorted(BUILTIN_PROVIDERS)
+        lines.append("")
+        lines.append(f"Providers: {', '.join(providers)}")
+        lines.append("Swap example: /model hammer ollama/qwen2.5-coder:7b")
+        return "\n".join(lines)
+
+    def _help_text(self) -> str:
+        rows = [
+            ("/help", "Show this command reference"),
+            ("/status", "Provider/model, connection status, cycle & token telemetry"),
+            ("/model [stage] [prov/model]", "List bindings or live-swap a stage's model"),
+            ("/mode [auto|chat|cycle]", "Switch adaptive execution mode"),
+            ("/cycle <task> | /forge <task>", "Force a full Anvil -> Hammer -> Temper cycle"),
+            ("/research <topic>", "Run the STORM deep research pipeline"),
+            ("/clear", "Clear the active stage viewport and its tokens"),
+            ("/reset", "Reset the whole session (Cycle #1, all buffers)"),
+            ("/quit | /exit", "Exit the Forge workspace"),
+            ("!<shell command>", "Run a real shell command (e.g. !pytest -q)"),
+        ]
+        width = max(len(name) for name, _ in rows)
+        lines = ["Forge Interactive Commands:", ""]
+        lines.extend(f"  {name:<{width}}  {desc}" for name, desc in rows)
+        lines.append("")
+        lines.append(self._shortcuts_text())
+        return "\n".join(lines)
+
+    def _shortcuts_text(self) -> str:
+        return (
+            "Shortcuts: Alt+1 Anvil | Alt+2 Hammer | Alt+3 Temper | Alt+0 Auto-follow\n"
+            "           F5 Toggle mode | PgUp/PgDn Scroll | Tab Complete | Ctrl+C Cancel "
+            "| Ctrl+Q Exit"
+        )
+
+    def _provider_key_status(self, provider_name: str) -> tuple[str, str | None]:
+        """Return (status, env_var) describing whether a provider looks reachable."""
+        config = None
+        if self.registry is not None:
+            config = (getattr(self.registry, "provider_configs", {}) or {}).get(provider_name)
+        env_var = getattr(config, "api_key_env", None)
+        if env_var is None:
+            from forge.models.profile import BUILTIN_PROVIDERS
+
+            builtin = BUILTIN_PROVIDERS.get(provider_name)
+            env_var = getattr(builtin, "api_key_env", None)
+        if env_var is None:
+            return "READY (no key required)", None
+        return ("CONNECTED" if os.environ.get(env_var) else "MISSING KEY", env_var)
+
+    def _status_text(self) -> str:
+        lines = ["Forge Session Status", ""]
+        lines.append(f"  Cycle      : #{self.state.cycle_count}  [{self.state.cycle_mode.value}]")
+        mode_label = _mode_label(self.forced_mode)
+        lines.append(f"  Routing    : {mode_label}")
+        worker = self.state.active_worker_stage.value if self.state.active_worker_stage else "IDLE"
+        lines.append(f"  Worker     : {worker}")
+        lines.append(f"  View       : {self.state.selected_view_stage.value}")
+        lines.append("")
+        lines.append("  Stage models & connections:")
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            agent = self._agent_for(stage)
+            adapter = getattr(agent, "adapter", None)
+            if adapter is not None:
+                try:
+                    label = adapter.describe()
+                except Exception:
+                    label = str(getattr(adapter, "model", "unknown"))
+                provider_name = getattr(getattr(adapter, "profile", None), "provider", "")
+                status, env_var = self._provider_key_status(provider_name)
+                if env_var and status != "CONNECTED":
+                    suffix = f" [{status} · ${env_var}]"
+                else:
+                    suffix = f" [{status}]"
+            else:
+                label = "(no live model attached)"
+                suffix = " [⚠ NO MODEL]"
             tokens = self.state.stage_buffers[stage].stage_tokens
-            lines.append(f"  {stage.value:<7}: {label}  [stage tokens: {tokens:,}]")
+            lines.append(f"    {stage.value:<7}: {label}{suffix}  [tokens: {tokens:,}]")
+        lines.append("")
         lines.append(f"  Session total tokens: {self.state.total_session_tokens:,}")
         return "\n".join(lines)
