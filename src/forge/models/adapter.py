@@ -326,8 +326,8 @@ class ModelAdapter:
 
     def _normalize(self, response: ModelResponse) -> ModelResponse:
         text = response.message.text
-        if "</think" in text.lower():
-            answer, inline_reasoning = split_reasoning(text)
+        answer, inline_reasoning = split_reasoning(text)
+        if inline_reasoning or answer != text:
             reasoning = "\n\n".join(r for r in (response.message.reasoning, inline_reasoning) if r)
             response.message = response.message.model_copy(
                 update={"content": answer or None, "reasoning": reasoning or None}

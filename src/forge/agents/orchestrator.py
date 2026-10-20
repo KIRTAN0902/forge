@@ -12,7 +12,13 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from forge.agents.base import AgentChatTurn, BaseAgent, TokenHandler, ToolResultHandler
+from forge.agents.base import (
+    AgentChatTurn,
+    BaseAgent,
+    ThinkingHandler,
+    TokenHandler,
+    ToolResultHandler,
+)
 from forge.agents.prompts import ORCHESTRATOR_CHAT_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
 from forge.context.builder import BuiltContext
 from forge.context.render import render_plan, render_requirements
@@ -102,6 +108,7 @@ class OrchestratorAgent(BaseAgent):
         allowed_tools: Sequence[str] | None = None,
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
+        on_thinking: ThinkingHandler | None = None,
     ) -> OrchestratorChatTurn:
         """Chat with the developer to brainstorm or synthesize requirements for planning."""
         conversation: list[Message] = []
@@ -135,13 +142,14 @@ class OrchestratorAgent(BaseAgent):
                 max_steps=max_tool_steps,
                 on_tool_result=on_tool_result,
                 on_token=on_token,
+                on_thinking=on_thinking,
             )
             raw_text = outcome.final_text
             updated_messages = outcome.messages
             usage = outcome.usage
             tool_names = outcome.tool_names
         else:
-            resp = await self._generate(conversation, (), on_token)
+            resp = await self._generate(conversation, (), on_token, on_thinking=on_thinking)
             raw_text = resp.text
             updated_messages = [*list(conversation), resp.message]
             usage = resp.usage

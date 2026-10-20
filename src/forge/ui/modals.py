@@ -132,6 +132,8 @@ class ForgeModalManager:
             text=self._render_body,
             key_bindings=self.modal_kb,
             show_cursor=False,
+            focusable=True,
+            modal=True,
         )
         self.body_window = Window(
             content=self.body_control,
@@ -191,7 +193,12 @@ class ForgeModalManager:
 
         # Centered floating dialog
         self.dialog_window = Window(
-            content=FormattedTextControl(text=self._render_body, key_bindings=self.modal_kb),
+            content=FormattedTextControl(
+                text=self._render_body,
+                key_bindings=self.modal_kb,
+                focusable=True,
+                modal=True,
+            ),
             wrap_lines=False,
         )
 
@@ -496,6 +503,10 @@ class ForgeModalManager:
             else:
                 self.close_modal()
 
+        @kb.add("c-c")
+        def _ctrl_c(event: KeyPressEvent) -> None:
+            self.close_modal()
+
         # Keybindings for input field
         in_kb = self.input_kb
 
@@ -528,6 +539,10 @@ class ForgeModalManager:
             self.input_mode = None
             self._focus_body()
             self._invalidate()
+
+        @in_kb.add("c-c")
+        def _in_ctrl_c(event: KeyPressEvent) -> None:
+            self.close_modal()
 
     def _handle_enter(self) -> None:
         """Handle Enter key pressed on modal body."""

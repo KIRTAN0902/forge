@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shutil
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,11 @@ from forge.ui.state import ForgeStage, ForgeTUIState, format_tokens
 
 # Animated braille spinner frames shown next to the actively running stage.
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Coalesce rapid stream deltas into at most one repaint per window. prompt_toolkit also
+# enforces this at the renderer level, but throttling here avoids scheduling thousands of
+# invalidations during token-by-token LLM output.
+_REDRAW_MIN_INTERVAL = 0.05
 
 # Bold ASCII block-art FORGE banner rendered in the top header when there is room.
 _FORGE_ART: tuple[str, ...] = (
@@ -492,15 +498,20 @@ class ForgeSplitPaneApp:
             }
         )
 
-        # Application instance with mouse_support=False for native text selection
+        # Application instance with mouse_support=False for native text selection.
+        # ``min_redraw_interval`` complements our own coalescing throttle.
         self.application: Application[None] = Application(
             layout=self.layout,
             key_bindings=self.kb,
             style=self.style,
             full_screen=True,
             mouse_support=False,
+            min_redraw_interval=0.04,
             output=self.output,
         )
+        self._redraw_interval = _REDRAW_MIN_INTERVAL
+        self._last_redraw_at = 0.0
+        self._redraw_handle: asyncio.TimerHandle | None = None
 
         # Register state redraw notification
         self.state._on_redraw = self._handle_state_redraw
@@ -556,7 +567,36 @@ class ForgeSplitPaneApp:
     # -- helpers ------------------------------------------------------------------------
 
     def _handle_state_redraw(self) -> None:
-        """Invalidate the prompt_toolkit application so it redraws on state mutations."""
+        """Coalesce redraw requests into one repaint per 50ms window.
+
+        Streaming can append hundreds of deltas per second. Invalidating the application for
+        every delta causes terminal tearing and wasted CPU, so bursts are collapsed while the
+        final state is always flushed.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Synchronous tests / teardown: no loop to schedule on, repaint immediately.
+            self._invalidate_now()
+            return
+
+        now = time.monotonic()
+        delay = self._redraw_interval - (now - self._last_redraw_at)
+        if delay <= 0:
+            if self._redraw_handle is not None:
+                self._redraw_handle.cancel()
+                self._redraw_handle = None
+            self._last_redraw_at = now
+            self._invalidate_now()
+        elif self._redraw_handle is None:
+            self._redraw_handle = loop.call_later(delay, self._flush_redraw)
+
+    def _flush_redraw(self) -> None:
+        self._redraw_handle = None
+        self._last_redraw_at = time.monotonic()
+        self._invalidate_now()
+
+    def _invalidate_now(self) -> None:
         with contextlib.suppress(Exception):
             self.application.invalidate()
 
@@ -679,75 +719,75 @@ class ForgeSplitPaneApp:
 
     def _setup_keybindings(self) -> None:
         """Wire all required keyboard shortcuts for non-blocking stage switching and navigation."""
+        modal_closed = Condition(lambda: not self.modal_manager.is_open)
 
-        @self.kb.add("escape", "1")
-        @self.kb.add("f1")
+        @self.kb.add("escape", "1", filter=modal_closed)
+        @self.kb.add("f1", filter=modal_closed)
         def _switch_anvil(event: KeyPressEvent) -> None:
             self.state.select_view_stage(ForgeStage.ANVIL)
 
-        @self.kb.add("escape", "2")
-        @self.kb.add("f2")
+        @self.kb.add("escape", "2", filter=modal_closed)
+        @self.kb.add("f2", filter=modal_closed)
         def _switch_hammer(event: KeyPressEvent) -> None:
             self.state.select_view_stage(ForgeStage.HAMMER)
 
-        @self.kb.add("escape", "3")
-        @self.kb.add("f3")
+        @self.kb.add("escape", "3", filter=modal_closed)
+        @self.kb.add("f3", filter=modal_closed)
         def _switch_temper(event: KeyPressEvent) -> None:
             self.state.select_view_stage(ForgeStage.TEMPER)
 
-        @self.kb.add("escape", "0")
-        @self.kb.add("f4")
+        @self.kb.add("escape", "0", filter=modal_closed)
+        @self.kb.add("f4", filter=modal_closed)
         def _auto_follow(event: KeyPressEvent) -> None:
             self.state.resume_auto_follow()
 
-        @self.kb.add("escape", "left")
+        @self.kb.add("escape", "left", filter=modal_closed)
         def _history_prev(event: KeyPressEvent) -> None:
             self.state.view_cycle_history(-1)
 
-        @self.kb.add("escape", "right")
+        @self.kb.add("escape", "right", filter=modal_closed)
         def _history_next(event: KeyPressEvent) -> None:
             self.state.view_cycle_history(1)
 
-        @self.kb.add("f5")
-        @self.kb.add("escape", "m")
+        @self.kb.add("f5", filter=modal_closed)
+        @self.kb.add("escape", "m", filter=modal_closed)
         def _toggle_cycle_mode(event: KeyPressEvent) -> None:
             new_mode = self.state.toggle_cycle_mode()
             if self.controller and hasattr(self.controller, "set_cycle_mode"):
                 self.controller.set_cycle_mode(new_mode)
 
-        @self.kb.add("pageup")
+        @self.kb.add("pageup", filter=modal_closed)
         def _scroll_up(event: KeyPressEvent) -> None:
             self.state.scroll_up(5)
 
-        @self.kb.add("pagedown")
+        @self.kb.add("pagedown", filter=modal_closed)
         def _scroll_down(event: KeyPressEvent) -> None:
             self.state.scroll_down(5)
 
-        @self.kb.add("home")
+        @self.kb.add("home", filter=modal_closed)
         def _scroll_top(event: KeyPressEvent) -> None:
             self.state.scroll_to_top()
 
-        @self.kb.add("end")
+        @self.kb.add("end", filter=modal_closed)
         def _scroll_bottom(event: KeyPressEvent) -> None:
             self.state.scroll_to_bottom()
 
-        @self.kb.add("escape", "up")
+        @self.kb.add("escape", "up", filter=modal_closed)
         def _alt_up(event: KeyPressEvent) -> None:
             self.state.scroll_up(3)
 
-        @self.kb.add("escape", "down")
+        @self.kb.add("escape", "down", filter=modal_closed)
         def _alt_down(event: KeyPressEvent) -> None:
             self.state.scroll_down(3)
 
-        @self.kb.add("c-u")
+        @self.kb.add("c-u", filter=modal_closed)
         def _ctrl_u(event: KeyPressEvent) -> None:
             self.state.scroll_up(10)
 
         @self.kb.add(
             "up",
             filter=Condition(
-                lambda: not self.input_buffer.text
-                and (not hasattr(self, "modal_manager") or not self.modal_manager.is_open)
+                lambda: not self.input_buffer.text and not self.modal_manager.is_open
             ),
         )
         def _up_scroll(event: KeyPressEvent) -> None:
@@ -756,14 +796,13 @@ class ForgeSplitPaneApp:
         @self.kb.add(
             "down",
             filter=Condition(
-                lambda: not self.input_buffer.text
-                and (not hasattr(self, "modal_manager") or not self.modal_manager.is_open)
+                lambda: not self.input_buffer.text and not self.modal_manager.is_open
             ),
         )
         def _down_scroll(event: KeyPressEvent) -> None:
             self.state.scroll_down(2)
 
-        @self.kb.add("tab")
+        @self.kb.add("tab", filter=modal_closed)
         def _complete(event: KeyPressEvent) -> None:
             """Cycle through the `/` completion popup, opening it on first Tab."""
             buffer = event.current_buffer
@@ -772,12 +811,12 @@ class ForgeSplitPaneApp:
             else:
                 buffer.start_completion(select_first=True)
 
-        @self.kb.add("escape", "enter")
-        @self.kb.add("c-j")
+        @self.kb.add("escape", "enter", filter=modal_closed)
+        @self.kb.add("c-j", filter=modal_closed)
         def _handle_newline(event: KeyPressEvent) -> None:
             self.input_buffer.insert_text("\n")
 
-        @self.kb.add("enter")
+        @self.kb.add("enter", filter=modal_closed)
         def _handle_enter(event: KeyPressEvent) -> None:
             user_text = self.input_buffer.text
             self.input_buffer.text = ""
@@ -813,6 +852,9 @@ class ForgeSplitPaneApp:
 
         @self.kb.add("c-c")
         def _handle_ctrl_c(event: KeyPressEvent) -> None:
+            if self.modal_manager.is_open:
+                self.modal_manager.close_modal()
+                return
             if self.state.pending_question is not None:
                 self.state.cancel_pending_question()
                 return
@@ -890,6 +932,9 @@ class ForgeSplitPaneApp:
                 self._spinner_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._spinner_task
+            if self._redraw_handle is not None:
+                self._redraw_handle.cancel()
+                self._redraw_handle = None
             if self.close_session is not None:
                 await self.close_session()
 

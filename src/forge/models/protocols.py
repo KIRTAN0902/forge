@@ -20,27 +20,13 @@ from forge.models.types import Message, Role, ToolCall, ToolDefinition
 
 # -- inline reasoning ------------------------------------------------------------------
 
-_THINK_RE = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
-_UNCLOSED_THINK_RE = re.compile(r"^\s*<think(?:ing)?>(.*)$", re.DOTALL | re.IGNORECASE)
-_ORPHAN_CLOSE_RE = re.compile(r"^(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
-
 
 def split_reasoning(text: str) -> tuple[str, str | None]:
-    """Return (answer, reasoning) with ``<think>`` blocks removed from the answer."""
-    thoughts = [m.strip() for m in _THINK_RE.findall(text)]
-    answer = _THINK_RE.sub("", text)
-    unclosed = _UNCLOSED_THINK_RE.match(answer)
-    if unclosed:  # generation stopped mid-thought: everything is reasoning
-        thoughts.append(unclosed.group(1).strip())
-        answer = ""
-    else:
-        # Some chat templates put the opening tag in the prompt, so only "</think>" shows.
-        orphan = _ORPHAN_CLOSE_RE.match(answer)
-        if orphan and "<think" not in orphan.group(1).lower():
-            thoughts.append(orphan.group(1).strip())
-            answer = answer[orphan.end() :]
-    reasoning = "\n\n".join(t for t in thoughts if t) or None
-    return answer.strip(), reasoning
+    """Return (answer, reasoning) with inline reasoning blocks removed from the answer."""
+    from forge.providers.client import strip_thinking_tags
+
+    answer, reasoning = strip_thinking_tags(text)
+    return answer.strip(), reasoning.strip() or None
 
 
 # -- tool calling ----------------------------------------------------------------------

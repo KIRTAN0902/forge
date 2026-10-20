@@ -352,6 +352,25 @@ def model_diagnostic(reason: str = "No live LLM model is attached to this sessio
     return "\n".join(lines)
 
 
+def reasoning_only_diagnostic(binding: StageModelBinding, *, truncated: bool = False) -> str:
+    """Clear diagnostic for a model that spent its output budget on hidden reasoning."""
+    cause = (
+        "The output token limit was reached inside a hidden reasoning block."
+        if truncated
+        else "The model returned hidden reasoning but no final answer."
+    )
+    return "\n".join(
+        [
+            f"[WARN] {cause}",
+            "",
+            "Forge discarded the internal chain-of-thought instead of displaying it as a reply.",
+            f"  Model: {binding.spec_string}",
+            "  Remedy: increase max_tokens, lower reasoning effort, or choose a non-thinking model.",
+            "  Then retry the request.",
+        ]
+    )
+
+
 @dataclass
 class CycleVerdict:
     """Verdict result from Temper (QA Gatekeeper stage)."""
@@ -607,6 +626,7 @@ class ForgeCycleController:
         *,
         allow_edits: bool,
         on_token: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> Any:
         """Call an agent's ``chat`` with only the kwargs it actually supports."""
         kwargs: dict[str, Any] = {}
@@ -632,6 +652,8 @@ class ForgeCycleController:
             kwargs["on_tool_result"] = lambda result: self._stream_tool_result(stage, result)
         if accepts("on_token") and on_token is not None:
             kwargs["on_token"] = on_token
+        if accepts("on_thinking") and on_thinking is not None:
+            kwargs["on_thinking"] = on_thinking
 
         return await agent.chat(prompt, **kwargs)
 
@@ -644,6 +666,33 @@ class ForgeCycleController:
         self.state.set_live_activity(
             stage, headline, format_transient_action(tool, first_line)
         )
+
+    def _thinking_handler(self, stage: ForgeStage) -> Callable[[str], None]:
+        """Return a reasoning callback that only updates the ephemeral status line."""
+
+        def _on_thinking(latest_thought_line: str) -> None:
+            self.state.set_live_activity(
+                stage,
+                self._stage_work_headline(stage),
+                format_transient_action("", latest_thought_line),
+            )
+
+        return _on_thinking
+
+    def _tracking_thinking_handler(
+        self, stage: ForgeStage
+    ) -> tuple[Callable[[str], None], Callable[[], bool]]:
+        """Thinking callback plus a predicate telling whether reasoning was observed."""
+        seen = False
+        base = self._thinking_handler(stage)
+
+        def _on_thinking(latest_thought_line: str) -> None:
+            nonlocal seen
+            if latest_thought_line.strip():
+                seen = True
+            base(latest_thought_line)
+
+        return _on_thinking, lambda: seen
 
     @staticmethod
     def _stage_work_headline(stage: ForgeStage) -> str:
@@ -716,10 +765,16 @@ class ForgeCycleController:
         def _on_token(delta: str) -> None:
             self.state.append_stream(stage, delta)
 
+        on_thinking, saw_reasoning = self._tracking_thinking_handler(stage)
         self.state.start_stream(stage, self._speaker(stage))
         try:
             turn = await self._invoke_agent_chat(
-                agent, prompt, stage, allow_edits=allow_edits, on_token=_on_token
+                agent,
+                prompt,
+                stage,
+                allow_edits=allow_edits,
+                on_token=_on_token,
+                on_thinking=on_thinking,
             )
             reply = (getattr(turn, "response_text", "") or "").strip()
             tokens = self._turn_tokens(turn)
@@ -727,10 +782,13 @@ class ForgeCycleController:
             if messages:
                 self._history[stage] = list(messages)
             handoff = getattr(turn, "handoff_requirements", None)
-            if not reply and hasattr(turn, "reasoning"):
-                reply = (getattr(turn, "reasoning", "") or "").strip()
             if not reply:
-                reply = "(no response)"
+                binding = self._config_binding(stage)
+                reply = (
+                    reasoning_only_diagnostic(binding)
+                    if saw_reasoning() and binding is not None
+                    else "(no response)"
+                )
 
             self.state.record_tokens(stage, tokens)
             formatted = format_stage_deliverable(stage, reply)
@@ -770,7 +828,10 @@ class ForgeCycleController:
         self.state.start_stream(stage, self._speaker(stage))
         try:
             response = await client.complete_or_stream(
-                binding, messages, on_token=_on_token
+                binding,
+                messages,
+                on_token=_on_token,
+                on_thinking=self._thinking_handler(stage),
             )
         except Exception as exc:  # pragma: no cover - network dependent
             reply = model_diagnostic(f"Live model call failed ({binding.spec_string}): {exc}")
@@ -781,7 +842,14 @@ class ForgeCycleController:
             self.state.set_active_stage(None)
             return formatted
 
-        reply = (response.content or response.reasoning_content or "").strip() or "(no response)"
+        reply = (response.content or "").strip()
+        if not reply:
+            if response.reasoning_content:
+                reply = reasoning_only_diagnostic(
+                    binding, truncated=response.reasoning_incomplete
+                )
+            else:
+                reply = "(no response)"
         self.state.record_tokens(stage, response.total_tokens)
         formatted = format_stage_deliverable(stage, reply)
         self.state.finalize_stream(stage, formatted)
@@ -1030,16 +1098,22 @@ class ForgeCycleController:
         agent = self._agent_for(ForgeStage.ANVIL)
         usage = 0
         if agent is not None:
+            on_thinking, saw_reasoning = self._tracking_thinking_handler(ForgeStage.ANVIL)
             try:
                 turn = await self._invoke_agent_chat(
                     agent,
                     f"Produce an implementation plan for: {current_request}",
                     ForgeStage.ANVIL,
                     allow_edits=False,
+                    on_thinking=on_thinking,
                 )
                 text = (getattr(turn, "response_text", "") or "").strip()
                 if text:
                     plan_summary = text
+                elif saw_reasoning():
+                    binding = self._config_binding(ForgeStage.ANVIL)
+                    if binding is not None:
+                        plan_summary = reasoning_only_diagnostic(binding)
                 usage = self._turn_tokens(turn)
                 messages = getattr(turn, "messages", None)
                 if messages:
@@ -1064,11 +1138,16 @@ class ForgeCycleController:
                         binding,
                         [{"role": "user", "content": prompt_text}],
                         on_token=_on_tok,
+                        on_thinking=self._thinking_handler(ForgeStage.ANVIL),
                         stage="anvil",
                     )
                     text = (res.content or "").strip()
                     if text:
                         plan_summary = text
+                    elif res.reasoning_content:
+                        plan_summary = reasoning_only_diagnostic(
+                            binding, truncated=res.reasoning_incomplete
+                        )
                     usage = res.total_tokens
                 except Exception:
                     pass
@@ -1097,16 +1176,22 @@ class ForgeCycleController:
         agent = self._agent_for(ForgeStage.HAMMER)
         usage = 0
         if agent is not None:
+            on_thinking, saw_reasoning = self._tracking_thinking_handler(ForgeStage.HAMMER)
             try:
                 turn = await self._invoke_agent_chat(
                     agent,
                     f"Implement the plan for: {current_request}",
                     ForgeStage.HAMMER,
                     allow_edits=True,
+                    on_thinking=on_thinking,
                 )
                 text = (getattr(turn, "response_text", "") or "").strip()
                 if text:
                     exec_summary = text
+                elif saw_reasoning():
+                    binding = self._config_binding(ForgeStage.HAMMER)
+                    if binding is not None:
+                        exec_summary = reasoning_only_diagnostic(binding)
                 usage = self._turn_tokens(turn)
             except Exception:
                 agent = None
@@ -1128,11 +1213,16 @@ class ForgeCycleController:
                         binding,
                         [{"role": "user", "content": prompt_text}],
                         on_token=_on_tok_h,
+                        on_thinking=self._thinking_handler(ForgeStage.HAMMER),
                         stage="hammer",
                     )
                     text = (res.content or "").strip()
                     if text:
                         exec_summary = text
+                    elif res.reasoning_content:
+                        exec_summary = reasoning_only_diagnostic(
+                            binding, truncated=res.reasoning_incomplete
+                        )
                     usage = res.total_tokens
                 except Exception:
                     pass
@@ -1165,15 +1255,21 @@ class ForgeCycleController:
         streamed = False
         agent = self._agent_for(ForgeStage.TEMPER)
         if agent is not None:
+            on_thinking, saw_reasoning = self._tracking_thinking_handler(ForgeStage.TEMPER)
             try:
                 turn = await self._invoke_agent_chat(
                     agent,
                     f"Adversarially verify the implementation for: {original_prompt}",
                     ForgeStage.TEMPER,
                     allow_edits=False,
+                    on_thinking=on_thinking,
                 )
                 usage = self._turn_tokens(turn)
                 reply = (getattr(turn, "response_text", "") or "").strip()
+                if not reply and saw_reasoning():
+                    binding = self._config_binding(ForgeStage.TEMPER)
+                    if binding is not None:
+                        reply = reasoning_only_diagnostic(binding)
             except Exception:
                 agent = None
 
@@ -1196,9 +1292,14 @@ class ForgeCycleController:
                         binding,
                         [{"role": "user", "content": prompt_text}],
                         on_token=_on_tok_t,
+                        on_thinking=self._thinking_handler(ForgeStage.TEMPER),
                         stage="temper",
                     )
                     reply = (res.content or "").strip()
+                    if not reply and res.reasoning_content:
+                        reply = reasoning_only_diagnostic(
+                            binding, truncated=res.reasoning_incomplete
+                        )
                     usage = res.total_tokens
                 except Exception:
                     pass

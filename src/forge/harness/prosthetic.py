@@ -195,8 +195,10 @@ class FuzzyAnchorPatcher:
     @staticmethod
     def apply_patch(source_text: str, search_block: str, replace_block: str) -> str:
         """Apply patch across 3 matching tiers: Exact, Whitespace-Normalized, difflib >= 0.92."""
-        search_block = search_block.replace("\r\n", "\n")
-        replace_block = replace_block.replace("\r\n", "\n")
+        from forge.providers.client import strip_thinking_tags
+
+        search_block = strip_thinking_tags(search_block)[0].replace("\r\n", "\n")
+        replace_block = strip_thinking_tags(replace_block)[0].replace("\r\n", "\n")
         normalized_source = source_text.replace("\r\n", "\n")
 
         # Tier 1: Exact string match

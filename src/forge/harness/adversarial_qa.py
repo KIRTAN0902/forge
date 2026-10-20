@@ -326,8 +326,10 @@ class AdversarialQAGatekeeper:
     @staticmethod
     def strip_chain_of_thought(executor_text: str) -> str:
         """Strip Executor internal chain-of-thought to prevent confirmation bias in QA review."""
-        # Strip <think>...</think> tags
-        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", executor_text, flags=re.IGNORECASE)
+        from forge.providers.client import strip_thinking_tags
+
+        # Strip closed, unclosed, and orphan <think>/<thinking> blocks.
+        cleaned, _ = strip_thinking_tags(executor_text)
         # Strip Thought: / Reasoning: prefixes
         cleaned = re.sub(
             r"(?im)^(Thought|Reasoning|Chain of Thought):[\s\S]*?(?=\n\n|\Z)", "", cleaned

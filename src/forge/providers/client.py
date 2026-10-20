@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -27,7 +28,166 @@ from pydantic import BaseModel, ConfigDict, Field
 from forge.config.settings import DEFAULT_PROVIDERS, ProviderName, StageModelBinding
 
 TokenHandler = Callable[[str], None]
+ThinkingHandler = Callable[[str], None]
 MessageLike = Mapping[str, str]
+
+_THINK_OPEN_RE = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+_THINK_TAGS = ("<think>", "<thinking>", "</think>", "</thinking>")
+_MAX_THINK_TAG_LEN = max(len(tag) for tag in _THINK_TAGS)
+
+
+def _incomplete_tag_suffix(text: str) -> str:
+    """Return a trailing partial ``<think`` / ``</think`` tag that must be buffered."""
+    for size in range(min(len(text), _MAX_THINK_TAG_LEN - 1), 0, -1):
+        suffix = text[-size:]
+        if suffix.startswith("<") and any(
+            tag.startswith(suffix.lower()) for tag in _THINK_TAGS
+        ):
+            return suffix
+    return ""
+
+
+class ThinkingStreamParser:
+    """Incremental reasoning/answer separator shared by every provider wire format.
+
+    Native reasoning fields (OpenAI ``reasoning_content``, Gemini ``thought`` parts,
+    Anthropic ``thinking`` blocks, Ollama ``thinking``) are fed through
+    :meth:`feed_reasoning`. Inline ``<think>...</think>`` / ``<thinking>`` tags inside
+    ordinary text are handled by :meth:`feed_text`, including tags split across chunks.
+
+    Only visible answer text is emitted through ``on_token``; hidden reasoning is emitted
+    through ``on_thinking`` as the latest thought line.
+    """
+
+    def __init__(
+        self,
+        on_token: TokenHandler | None = None,
+        on_thinking: ThinkingHandler | None = None,
+    ) -> None:
+        self.on_token = on_token
+        self.on_thinking = on_thinking
+        self.in_think_block = False
+        self.think_buffer = ""
+        self.content_buffer = ""
+        self.reasoning_incomplete = False
+        self._pending = ""
+
+    @property
+    def streaming_requested(self) -> bool:
+        return self.on_token is not None or self.on_thinking is not None
+
+    @property
+    def latest_thought_line(self) -> str:
+        """Most recent non-empty line held in the hidden reasoning buffer."""
+        lines = [line.strip() for line in self.think_buffer.splitlines() if line.strip()]
+        if lines:
+            return lines[-1]
+        return self.think_buffer.strip()
+
+    def feed(self, text: str) -> str:
+        """Alias for :meth:`feed_text`."""
+        return self.feed_text(text)
+
+    def feed_text(self, text: str) -> str:
+        """Consume visible-model text, returning only the newly emitted answer text."""
+        if not text:
+            return ""
+        data = self._pending + text
+        self._pending = ""
+        emitted: list[str] = []
+
+        while data:
+            if self.in_think_block:
+                close_match = _THINK_CLOSE_RE.search(data)
+                if close_match is not None:
+                    self._append_thought(data[: close_match.start()])
+                    data = data[close_match.end() :]
+                    self.in_think_block = False
+                    continue
+                held = _incomplete_tag_suffix(data)
+                if held:
+                    self._append_thought(data[: -len(held)])
+                    self._pending = held
+                else:
+                    self._append_thought(data)
+                break
+
+            open_match = _THINK_OPEN_RE.search(data)
+            close_match = _THINK_CLOSE_RE.search(data)
+            if close_match is not None and (
+                open_match is None or close_match.start() < open_match.start()
+            ):
+                # Chat templates often place the opening tag in the prompt, leaving only
+                # a closing tag in the model output. Everything before it is reasoning.
+                self._append_thought(data[: close_match.start()])
+                data = data[close_match.end() :]
+                continue
+
+            if open_match is not None:
+                self._emit_content(data[: open_match.start()], emitted)
+                data = data[open_match.end() :]
+                self.in_think_block = True
+                continue
+
+            held = _incomplete_tag_suffix(data)
+            if held:
+                self._emit_content(data[: -len(held)], emitted)
+                self._pending = held
+            else:
+                self._emit_content(data, emitted)
+            break
+
+        return "".join(emitted)
+
+    def feed_reasoning(self, text: str) -> None:
+        """Consume a native reasoning delta; it is never emitted as visible content."""
+        if text:
+            self._append_thought(text)
+
+    def close(self) -> tuple[str, str]:
+        """Flush pending text and return ``(visible_content, hidden_reasoning)``."""
+        if self._pending:
+            pending = self._pending
+            self._pending = ""
+            if self.in_think_block:
+                self._append_thought(pending)
+            else:
+                self._emit_content(pending, [])
+        if self.in_think_block:
+            # The output budget was exhausted inside a thought block. The hidden
+            # reasoning is retained for diagnostics, but it is never promoted to content.
+            self.in_think_block = False
+            self.reasoning_incomplete = True
+        return self.content_buffer, self.think_buffer
+
+    def _emit_content(self, text: str, sink: list[str]) -> None:
+        if not text:
+            return
+        self.content_buffer += text
+        sink.append(text)
+        if self.on_token is not None:
+            self.on_token(text)
+
+    def _append_thought(self, text: str) -> None:
+        if not text:
+            return
+        self.think_buffer += text
+        if self.on_thinking is not None:
+            latest = self.latest_thought_line
+            if latest:
+                self.on_thinking(latest)
+
+
+def strip_thinking_tags(raw_text: str) -> tuple[str, str]:
+    """Split arbitrary model text into ``(clean_answer, hidden_reasoning)``.
+
+    Handles closed and unclosed ``<think>`` / ``<thinking>`` blocks, plus orphan closing
+    tags produced when the opening tag lived in the prompt template.
+    """
+    parser = ThinkingStreamParser()
+    parser.feed_text(raw_text or "")
+    return parser.close()
 
 _OPENAI_COMPATIBLE: frozenset[ProviderName] = frozenset(
     {
@@ -50,6 +210,7 @@ class LLMResponse(BaseModel):
 
     content: str = ""
     reasoning_content: str = ""
+    reasoning_incomplete: bool = False
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -58,13 +219,18 @@ class LLMResponse(BaseModel):
     provider: str = ""
 
     def finish(self, model: str, provider: ProviderName) -> LLMResponse:
-        """Backfill totals (and any missing halves) after streaming completes."""
-        if not self.content and self.reasoning_content:
-            self.content = self.reasoning_content
+        """Backfill totals after streaming completes.
+
+        Reasoning is deliberately **not** copied into ``content``. Hidden chain-of-thought
+        must never be displayed or parsed as the model's answer; callers surface a
+        diagnostic when the model produced reasoning but no final content.
+        """
         if not self.prompt_tokens:
             self.prompt_tokens = _estimate_tokens(self.content)
         if not self.completion_tokens:
-            self.completion_tokens = _estimate_tokens(self.content)
+            self.completion_tokens = _estimate_tokens(
+                f"{self.content}\n{self.reasoning_content}".strip()
+            )
         if not self.total_tokens:
             self.total_tokens = self.prompt_tokens + self.completion_tokens
         if not self.model:
@@ -139,19 +305,29 @@ class UnifiedLLMClient:
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None = None,
         on_token: TokenHandler | None = None,
+        on_thinking: ThinkingHandler | None = None,
         stage: str = "anvil",
     ) -> LLMResponse:
-        """Run one real completion, streaming token deltas to ``on_token`` when provided."""
+        """Run one real completion, streaming visible deltas to ``on_token``.
+
+        Provider-native reasoning and inline ``<think>`` blocks are routed exclusively to
+        ``on_thinking`` and never leak into ``on_token`` or the final answer.
+        """
         start = time.perf_counter()
         provider = binding.provider
+        parser = ThinkingStreamParser(on_token=on_token, on_thinking=on_thinking)
         if provider is ProviderName.GEMINI:
-            resp = await self._gemini(binding, messages, system_prompt, on_token)
+            resp = await self._gemini(binding, messages, system_prompt, parser)
         elif provider is ProviderName.ANTHROPIC:
-            resp = await self._anthropic(binding, messages, system_prompt, on_token)
+            resp = await self._anthropic(binding, messages, system_prompt, parser)
         elif provider is ProviderName.OLLAMA:
-            resp = await self._ollama(binding, messages, system_prompt, on_token)
+            resp = await self._ollama(binding, messages, system_prompt, parser)
         else:
-            resp = await self._openai_compatible(binding, messages, system_prompt, on_token)
+            resp = await self._openai_compatible(binding, messages, system_prompt, parser)
+
+        resp.content, resp.reasoning_content = parser.close()
+        resp.reasoning_incomplete = parser.reasoning_incomplete
+        resp.finish(resp.model or binding.model, provider)
 
         latency_ms = (time.perf_counter() - start) * 1000.0
         try:
@@ -176,10 +352,16 @@ class UnifiedLLMClient:
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None = None,
         on_token: TokenHandler | None = None,
+        on_thinking: ThinkingHandler | None = None,
         stage: str = "anvil",
     ) -> LLMResponse:
         return await self.complete_or_stream(
-            binding, messages, system_prompt, on_token, stage=stage
+            binding,
+            messages,
+            system_prompt,
+            on_token=on_token,
+            on_thinking=on_thinking,
+            stage=stage,
         )
 
     async def list_live_models(self, provider: ProviderName) -> list[str]:
@@ -258,7 +440,7 @@ class UnifiedLLMClient:
         binding: StageModelBinding,
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None,
-        on_token: TokenHandler | None,
+        parser: ThinkingStreamParser,
     ) -> LLMResponse:
         provider = binding.provider
         url = self.base_url(provider) + "/chat/completions"
@@ -274,12 +456,13 @@ class UnifiedLLMClient:
         }
         result = LLMResponse(model=model_name, provider=provider.value)
         async with self._client() as client:
-            if on_token is None:
+            if not parser.streaming_requested:
                 resp = await client.post(
                     url, headers=self._auth_headers(provider, self.api_key(provider)), json=body
                 )
                 resp.raise_for_status()
-                return _parse_openai_response(resp.json(), result)
+                _parse_openai_response(resp.json(), result, parser)
+                return result
             body["stream"] = True
             if provider in {ProviderName.OPENAI, ProviderName.OPENROUTER}:
                 body["stream_options"] = {"include_usage": True}
@@ -288,26 +471,30 @@ class UnifiedLLMClient:
             ) as stream:
                 stream.raise_for_status()
                 async for payload in _iter_sse(stream):
-                    _consume_openai_chunk(payload, result, on_token)
-        return result.finish(model_name, provider)
+                    _consume_openai_chunk(payload, result, parser)
+        return result
 
     async def _gemini(
         self,
         binding: StageModelBinding,
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None,
-        on_token: TokenHandler | None,
+        parser: ThinkingStreamParser,
     ) -> LLMResponse:
         provider = binding.provider
         base = self.base_url(provider)
         model_name = binding.model.removeprefix("models/")
         result = LLMResponse(model=model_name, provider=provider.value)
+        generation_config: dict[str, Any] = {
+            "temperature": binding.temperature,
+            "maxOutputTokens": binding.max_tokens,
+        }
+        if "2.5" in model_name.lower() or "thinking" in model_name.lower():
+            # Gemini only emits separate thought parts when explicitly requested.
+            generation_config["thinkingConfig"] = {"includeThoughts": True}
         body: dict[str, Any] = {
             "contents": _gemini_contents(messages),
-            "generationConfig": {
-                "temperature": binding.temperature,
-                "maxOutputTokens": binding.max_tokens,
-            },
+            "generationConfig": generation_config,
         }
         if system_prompt:
             body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -315,26 +502,27 @@ class UnifiedLLMClient:
         headers = self._auth_headers(provider, key)
         params = {"key": key} if key else {}
         async with self._client() as client:
-            if on_token is None:
+            if not parser.streaming_requested:
                 url = f"{base}/models/{model_name}:generateContent"
                 resp = await client.post(url, headers=headers, params=params, json=body)
                 resp.raise_for_status()
-                return _parse_gemini_response(resp.json(), result)
+                _parse_gemini_response(resp.json(), result, parser)
+                return result
             url = f"{base}/models/{model_name}:streamGenerateContent?alt=sse"
             async with client.stream(
                 "POST", url, headers=headers, params=params, json=body
             ) as stream:
                 stream.raise_for_status()
                 async for payload in _iter_sse(stream):
-                    _consume_gemini_chunk(payload, result, on_token)
-        return result.finish(model_name, provider)
+                    _consume_gemini_chunk(payload, result, parser)
+        return result
 
     async def _anthropic(
         self,
         binding: StageModelBinding,
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None,
-        on_token: TokenHandler | None,
+        parser: ThinkingStreamParser,
     ) -> LLMResponse:
         provider = binding.provider
         url = self.base_url(provider) + "/messages"
@@ -349,23 +537,24 @@ class UnifiedLLMClient:
             body["system"] = system_prompt
         headers = self._auth_headers(provider, self.api_key(provider))
         async with self._client() as client:
-            if on_token is None:
+            if not parser.streaming_requested:
                 resp = await client.post(url, headers=headers, json=body)
                 resp.raise_for_status()
-                return _parse_anthropic_response(resp.json(), result)
+                _parse_anthropic_response(resp.json(), result, parser)
+                return result
             body["stream"] = True
             async with client.stream("POST", url, headers=headers, json=body) as stream:
                 stream.raise_for_status()
                 async for payload in _iter_sse(stream):
-                    _consume_anthropic_chunk(payload, result, on_token)
-        return result.finish(binding.model, provider)
+                    _consume_anthropic_chunk(payload, result, parser)
+        return result
 
     async def _ollama(
         self,
         binding: StageModelBinding,
         messages: list[MessageLike] | list[dict[str, str]],
         system_prompt: str | None,
-        on_token: TokenHandler | None,
+        parser: ThinkingStreamParser,
     ) -> LLMResponse:
         provider = binding.provider
         url = self.base_url(provider) + "/api/chat"
@@ -379,11 +568,12 @@ class UnifiedLLMClient:
             },
         }
         async with self._client() as client:
-            if on_token is None:
+            if not parser.streaming_requested:
                 body["stream"] = False
                 resp = await client.post(url, json=body)
                 resp.raise_for_status()
-                return _parse_ollama_response(resp.json(), result)
+                _parse_ollama_response(resp.json(), result, parser)
+                return result
             body["stream"] = True
             async with client.stream("POST", url, json=body) as stream:
                 stream.raise_for_status()
@@ -394,8 +584,8 @@ class UnifiedLLMClient:
                         chunk = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    _consume_ollama_chunk(chunk, result, on_token)
-        return result.finish(binding.model, provider)
+                    _consume_ollama_chunk(chunk, result, parser)
+        return result
 
 
 # -- wire-format conversion --------------------------------------------------------------
@@ -480,15 +670,16 @@ async def _iter_sse(stream: httpx.Response) -> Any:
 # -- response parsing --------------------------------------------------------------------
 
 
-def _parse_openai_response(payload: dict[str, Any], result: LLMResponse) -> LLMResponse:
+def _parse_openai_response(
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
+) -> None:
     choices = payload.get("choices") or []
     message = (choices[0].get("message") if choices else {}) or {}
-    result.content = str(message.get("content") or "")
-    result.reasoning_content = str(
+    reasoning = (
         message.get("reasoning_content") or message.get("reasoning") or message.get("thought") or ""
     )
-    if not result.content and result.reasoning_content:
-        result.content = result.reasoning_content
+    parser.feed_reasoning(str(reasoning))
+    parser.feed_text(str(message.get("content") or ""))
     result.tool_calls = list(message.get("tool_calls") or [])
     usage = payload.get("usage") or {}
     result.prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -496,66 +687,76 @@ def _parse_openai_response(payload: dict[str, Any], result: LLMResponse) -> LLMR
     result.total_tokens = int(usage.get("total_tokens") or 0)
     if result.model == "":
         result.model = str(payload.get("model") or "")
-    provider = ProviderName(result.provider)
-    return result.finish(result.model, provider)
 
 
-def _parse_gemini_response(payload: dict[str, Any], result: LLMResponse) -> LLMResponse:
-    result.content = _gemini_text(payload)
+def _parse_gemini_response(
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
+) -> None:
+    _feed_gemini_parts(payload, parser)
     usage = payload.get("usageMetadata") or {}
     result.prompt_tokens = int(usage.get("promptTokenCount") or 0)
     result.completion_tokens = int(usage.get("candidatesTokenCount") or 0)
     result.total_tokens = int(usage.get("totalTokenCount") or 0)
-    return result.finish(result.model, ProviderName.GEMINI)
 
 
-def _parse_anthropic_response(payload: dict[str, Any], result: LLMResponse) -> LLMResponse:
-    blocks = payload.get("content") or []
-    result.content = "".join(
-        str(block.get("text") or "") for block in blocks if isinstance(block, dict)
-    )
+def _parse_anthropic_response(
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
+) -> None:
+    for block in payload.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "thinking":
+            parser.feed_reasoning(str(block.get("thinking") or block.get("text") or ""))
+        elif block_type == "text" or block_type is None:
+            parser.feed_text(str(block.get("text") or ""))
     usage = payload.get("usage") or {}
     result.prompt_tokens = int(usage.get("input_tokens") or 0)
     result.completion_tokens = int(usage.get("output_tokens") or 0)
-    return result.finish(result.model, ProviderName.ANTHROPIC)
 
 
-def _parse_ollama_response(payload: dict[str, Any], result: LLMResponse) -> LLMResponse:
+def _parse_ollama_response(
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
+) -> None:
     message = payload.get("message") or {}
-    result.content = str(message.get("content") or "")
+    parser.feed_reasoning(str(message.get("thinking") or message.get("reasoning") or ""))
+    parser.feed_text(str(message.get("content") or ""))
     result.prompt_tokens = int(payload.get("prompt_eval_count") or 0)
     result.completion_tokens = int(payload.get("eval_count") or 0)
-    return result.finish(result.model, ProviderName.OLLAMA)
 
 
-def _gemini_text(payload: dict[str, Any]) -> str:
+def _feed_gemini_parts(payload: dict[str, Any], parser: ThinkingStreamParser) -> None:
     candidates = payload.get("candidates") or []
     if not candidates:
-        return ""
+        return
     parts = (candidates[0].get("content") or {}).get("parts") or []
-    return "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = str(part.get("text") or "")
+        if part.get("thought") is True:
+            parser.feed_reasoning(text)
+        else:
+            parser.feed_text(text)
 
 
 # -- streaming chunk consumption ---------------------------------------------------------
 
 
 def _consume_openai_chunk(
-    payload: dict[str, Any], result: LLMResponse, on_token: TokenHandler
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
 ) -> None:
     choices = payload.get("choices") or []
     if choices:
         delta = choices[0].get("delta") or {}
-        content = delta.get("content")
-        if content:
-            result.content += content
-            on_token(content)
         reasoning = (
-            delta.get("reasoning_content")
-            or delta.get("reasoning")
-            or delta.get("thought")
+            delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thought")
         )
         if reasoning:
-            result.reasoning_content += reasoning
+            parser.feed_reasoning(str(reasoning))
+        content = delta.get("content")
+        if content:
+            parser.feed_text(str(content))
     usage = payload.get("usage")
     if usage:
         result.prompt_tokens = int(usage.get("prompt_tokens") or result.prompt_tokens)
@@ -564,12 +765,9 @@ def _consume_openai_chunk(
 
 
 def _consume_gemini_chunk(
-    payload: dict[str, Any], result: LLMResponse, on_token: TokenHandler
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
 ) -> None:
-    text = _gemini_text(payload)
-    if text:
-        result.content += text
-        on_token(text)
+    _feed_gemini_parts(payload, parser)
     usage = payload.get("usageMetadata")
     if usage:
         result.prompt_tokens = int(usage.get("promptTokenCount") or result.prompt_tokens)
@@ -580,15 +778,23 @@ def _consume_gemini_chunk(
 
 
 def _consume_anthropic_chunk(
-    payload: dict[str, Any], result: LLMResponse, on_token: TokenHandler
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
 ) -> None:
     event_type = payload.get("type")
-    if event_type == "content_block_delta":
+    if event_type == "content_block_start":
+        block = payload.get("content_block") or {}
+        if block.get("type") == "thinking":
+            parser.feed_reasoning(str(block.get("thinking") or block.get("text") or ""))
+        elif block.get("type") == "text":
+            parser.feed_text(str(block.get("text") or ""))
+    elif event_type == "content_block_delta":
         delta = payload.get("delta") or {}
-        text = delta.get("text")
-        if text:
-            result.content += text
-            on_token(text)
+        if delta.get("type") == "thinking_delta":
+            parser.feed_reasoning(str(delta.get("thinking") or delta.get("text") or ""))
+        else:
+            text = delta.get("text")
+            if text:
+                parser.feed_text(str(text))
     elif event_type == "message_start":
         usage = (payload.get("message") or {}).get("usage") or {}
         result.prompt_tokens = int(usage.get("input_tokens") or result.prompt_tokens)
@@ -598,13 +804,15 @@ def _consume_anthropic_chunk(
 
 
 def _consume_ollama_chunk(
-    payload: dict[str, Any], result: LLMResponse, on_token: TokenHandler
+    payload: dict[str, Any], result: LLMResponse, parser: ThinkingStreamParser
 ) -> None:
     message = payload.get("message") or {}
+    reasoning = message.get("thinking") or message.get("reasoning")
+    if reasoning:
+        parser.feed_reasoning(str(reasoning))
     content = message.get("content")
     if content:
-        result.content += content
-        on_token(content)
+        parser.feed_text(str(content))
     if payload.get("done"):
         result.prompt_tokens = int(payload.get("prompt_eval_count") or result.prompt_tokens)
         result.completion_tokens = int(payload.get("eval_count") or result.completion_tokens)
@@ -627,4 +835,11 @@ def _http_error_detail(exc: httpx.HTTPStatusError) -> str:
     return str(payload)[:200]
 
 
-__all__ = ["LLMResponse", "TokenHandler", "UnifiedLLMClient"]
+__all__ = [
+    "LLMResponse",
+    "ThinkingHandler",
+    "ThinkingStreamParser",
+    "TokenHandler",
+    "UnifiedLLMClient",
+    "strip_thinking_tags",
+]

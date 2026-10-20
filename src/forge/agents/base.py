@@ -14,16 +14,19 @@ from forge.models.types import (
     ContentPart,
     Message,
     ModelResponse,
+    ReasoningDelta,
     StreamDone,
     TextDelta,
     ToolDefinition,
     Usage,
 )
+from forge.providers.client import ThinkingStreamParser
 from forge.tools.base import ToolResult
 from forge.tools.runtime import ToolRuntime
 
 ToolResultHandler = Callable[[ToolResult], None]
 TokenHandler = Callable[[str], None]
+ThinkingHandler = Callable[[str], None]
 
 
 @dataclass
@@ -91,28 +94,38 @@ class BaseAgent:
         conversation: Sequence[Message],
         definitions: Sequence[ToolDefinition],
         on_token: TokenHandler | None,
+        on_thinking: ThinkingHandler | None = None,
     ) -> ModelResponse:
         """One model turn, streaming real token deltas through ``on_token`` when possible.
 
         Streaming is only used when the model advertises streaming and speaks the native tool
         protocol; otherwise the (prompt-protocol) reply must be parsed in full and we fall back
-        to a single non-streamed generation.
+        to a single non-streamed generation. Native reasoning events and inline reasoning tags
+        are routed exclusively to ``on_thinking``.
         """
         if (
-            on_token is None
+            (on_token is None and on_thinking is None)
             or not self.adapter.capabilities.streaming
             or self.adapter.tool_strategy() != "native"
         ):
-            return await self.adapter.generate(conversation, tools=list(definitions))
+            response = await self.adapter.generate(conversation, tools=list(definitions))
+            _replay_response(response, on_token, on_thinking)
+            return response
 
+        parser = ThinkingStreamParser(on_token=on_token, on_thinking=on_thinking)
         done: ModelResponse | None = None
         async for event in self.adapter.stream(conversation, tools=list(definitions)):
             if isinstance(event, TextDelta):
-                on_token(event.text)
+                parser.feed_text(event.text)
+            elif isinstance(event, ReasoningDelta):
+                parser.feed_reasoning(event.text)
             elif isinstance(event, StreamDone):
                 done = event.response
+        parser.close()
         if done is None:  # pragma: no cover - provider contract guarantees StreamDone
-            return await self.adapter.generate(conversation, tools=list(definitions))
+            response = await self.adapter.generate(conversation, tools=list(definitions))
+            _replay_response(response, on_token, on_thinking)
+            return response
         return done
 
     async def _run_tool_loop(
@@ -124,6 +137,7 @@ class BaseAgent:
         compact_budget: int | None = None,
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
+        on_thinking: ThinkingHandler | None = None,
     ) -> AgentLoopOutcome:
         """Execute turns using the model and tool runtime until conclusion or max_steps.
 
@@ -147,7 +161,9 @@ class BaseAgent:
             if len(conversation) > 4:
                 conversation = compact_history(conversation, budget)
 
-            response = await self._generate(conversation, definitions, on_token)
+            response = await self._generate(
+                conversation, definitions, on_token, on_thinking
+            )
             outcome.usage = outcome.usage + response.usage
             conversation.append(response.message)
 
@@ -181,6 +197,7 @@ class BaseAgent:
         allowed_tools: Sequence[str] | None = None,
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
+        on_thinking: ThinkingHandler | None = None,
     ) -> AgentChatTurn:
         """Chat with the developer in this agent's specialization."""
         from forge.agents.prompts import (
@@ -218,13 +235,14 @@ class BaseAgent:
                 max_steps=max_tool_steps,
                 on_tool_result=on_tool_result,
                 on_token=on_token,
+                on_thinking=on_thinking,
             )
             raw_text = outcome.final_text
             updated_messages = outcome.messages
             usage = outcome.usage
             tool_names = outcome.tool_names
         else:
-            resp = await self._generate(conversation, (), on_token)
+            resp = await self._generate(conversation, (), on_token, on_thinking)
             raw_text = resp.text
             updated_messages = [*list(conversation), resp.message]
             usage = resp.usage
@@ -236,3 +254,17 @@ class BaseAgent:
             usage=usage,
             tool_names=tool_names,
         )
+
+
+def _replay_response(
+    response: ModelResponse,
+    on_token: TokenHandler | None,
+    on_thinking: ThinkingHandler | None,
+) -> None:
+    """Replay a non-streamed response through the same reasoning-safe callbacks."""
+    if on_token is None and on_thinking is None:
+        return
+    parser = ThinkingStreamParser(on_token=on_token, on_thinking=on_thinking)
+    parser.feed_reasoning(response.message.reasoning or "")
+    parser.feed_text(response.message.text or "")
+    parser.close()

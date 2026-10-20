@@ -233,8 +233,13 @@ def format_stage_deliverable(stage: ForgeStage, raw_text: str) -> str:
       few lines is replaced with a clean reference to the Hammer stage.
     * **Hammer** leads with an ``Implementation Report`` heading (files/diff/commands).
     * **Temper** leads with a ``QA & Verification Verdict`` heading.
+
+    Inline ``<think>`` blocks are stripped here as a last line of defence so hidden
+    chain-of-thought can never reach the viewport, the transcript, or a stage deliverable.
     """
-    text = (raw_text or "").strip()
+    from forge.providers.client import strip_thinking_tags
+
+    text = strip_thinking_tags(raw_text or "")[0].strip()
     if not text:
         return ""
     if stage is ForgeStage.ANVIL:
