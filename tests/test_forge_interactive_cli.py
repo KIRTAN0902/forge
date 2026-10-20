@@ -107,6 +107,51 @@ def test_direct_queries_classify_as_tool_not_cycle() -> None:
     assert classify_intent("!npm test") == ExecutionMode.DIRECT_TOOL
 
 
+def test_unmarked_engineering_request_defaults_to_planning_cycle() -> None:
+    prompt = (
+        "I want you to create a beautiful, modern, and fully responsive personal "
+        "portfolio website using React, Tailwind CSS, and Framer Motion. Do not use "
+        "placeholder content. Please build and run the project."
+    )
+    assert classify_intent(prompt) == ExecutionMode.FULL_FORGE_CYCLE
+
+
+def test_questions_remain_conversational() -> None:
+    assert classify_intent("How should I structure this React app?") == ExecutionMode.CONVERSATIONAL
+    assert classify_intent("What are the tradeoffs of Tailwind versus CSS modules?") == (
+        ExecutionMode.CONVERSATIONAL
+    )
+
+
+async def test_creation_request_renders_pending_plan_not_code() -> None:
+    state = ForgeTUIState()
+    agents, providers = _empty_agents()
+    providers[ForgeStage.ANVIL].add(
+        "Implement the portfolio in three phases.\n\n"
+        "```tsx\n"
+        "function App() {\n"
+        "  const title = 'Portfolio';\n"
+        "  return <main>{title}</main>;\n"
+        "}\n"
+        "```\n\n"
+        "REQ-1: The page renders a responsive hero section.\n"
+        "REQ-2: The production build succeeds.\n"
+        "TARGET_FILES: src/App.tsx, src/index.css"
+    )
+    controller = ForgeCycleController(state=state, agents=agents)
+
+    result = await controller.run_cycle_loop(
+        "I want you to create a responsive React portfolio website and run it."
+    )
+
+    assert state.pending_plan is not None
+    assert "Final Plan" in result
+    assert "REQ-1" in result
+    assert "src/App.tsx" in result
+    assert "function App" not in result
+    assert providers[ForgeStage.HAMMER].requests == []
+
+
 async def test_complex_task_triggers_full_forge_cycle() -> None:
     state = ForgeTUIState()
     verdicts = {"count": 0}

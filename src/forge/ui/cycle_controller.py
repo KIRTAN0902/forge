@@ -223,6 +223,12 @@ _DIRECT_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QUESTION_LEADING_RE = re.compile(
+    r"^(what|why|how|who|where|when|which|should|explain|describe|compare|"
+    r"tell me|walk me through|what's|whats|how's|hows)\b",
+    re.IGNORECASE,
+)
+
 
 def is_conversational_turn(prompt: str) -> bool:
     """Return True for obvious greetings / one-word conversational inquiries."""
@@ -298,6 +304,13 @@ def is_conversational_turn(prompt: str) -> bool:
     return False
 
 
+def _planner_chat_prompt() -> str:
+    """Return Anvil's plan-only prompt without introducing an import cycle."""
+    from forge.agents.prompts import PLANNER_CHAT_SYSTEM_PROMPT
+
+    return PLANNER_CHAT_SYSTEM_PROMPT
+
+
 def classify_intent(prompt: str, *, forced: ExecutionMode | None = None) -> ExecutionMode:
     """Deterministically classify a prompt with zero LLM round-trips.
 
@@ -339,10 +352,12 @@ def classify_intent(prompt: str, *, forced: ExecutionMode | None = None) -> Exec
         return ExecutionMode.DIRECT_TOOL
     if _COMPLEX_DEBUG_RE.search(raw):
         return ExecutionMode.FULL_FORGE_CYCLE
+    if _QUESTION_LEADING_RE.search(raw):
+        return ExecutionMode.CONVERSATIONAL
 
-    # Fall back to a conversational reply; the active agent still has tools and can
-    # escalate on its own via a ``forge-handoff`` block when it decides a cycle is needed.
-    return ExecutionMode.CONVERSATIONAL
+    # Default to the planning cycle. A request that is not a greeting, a direct shell
+    # query, or an explicit question must produce an Anvil plan before implementation.
+    return ExecutionMode.FULL_FORGE_CYCLE
 
 
 # Provider API-key environment variables surfaced in the offline diagnostic panel. Forge
@@ -780,6 +795,7 @@ class ForgeCycleController:
         allow_edits: bool,
         on_token: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
+        system_prompt: str | None = None,
     ) -> Any:
         """Call an agent's ``chat`` with only the kwargs it actually supports."""
         kwargs: dict[str, Any] = {}
@@ -793,6 +809,8 @@ class ForgeCycleController:
         def accepts(name: str) -> bool:
             return has_var_kw or name in names
 
+        if accepts("system_prompt") and system_prompt is not None:
+            kwargs["system_prompt"] = system_prompt
         if accepts("history"):
             kwargs["history"] = list(self._history[stage])
         if accepts("project_context"):
@@ -1101,13 +1119,17 @@ class ForgeCycleController:
             f"TASK:\n{prompt}"
         )
         text, _usage = await self._stage_instruction(
-            ForgeStage.ANVIL, instruction, allow_edits=False
+            ForgeStage.ANVIL,
+            instruction,
+            allow_edits=False,
+            system_prompt=_planner_chat_prompt(),
         )
+        plan_text = format_stage_deliverable(ForgeStage.ANVIL, text)
         plan = PendingPlan(
             request=prompt,
-            plan_text=text,
-            requirements=extract_plan_requirements(text, prompt),
-            target_files=extract_target_files(text),
+            plan_text=plan_text,
+            requirements=extract_plan_requirements(plan_text, prompt),
+            target_files=extract_target_files(plan_text),
         )
         self.state.all_requirements_met = False
         self.state.set_pending_plan(plan)
@@ -1132,14 +1154,18 @@ class ForgeCycleController:
             f"USER FEEDBACK:\n{feedback}"
         )
         text, _usage = await self._stage_instruction(
-            ForgeStage.ANVIL, instruction, allow_edits=False
+            ForgeStage.ANVIL,
+            instruction,
+            allow_edits=False,
+            system_prompt=_planner_chat_prompt(),
         )
+        plan_text = format_stage_deliverable(ForgeStage.ANVIL, text)
         revised = PendingPlan(
             request=plan.request,
-            plan_text=text,
-            requirements=extract_plan_requirements(text, plan.request),
+            plan_text=plan_text,
+            requirements=extract_plan_requirements(plan_text, plan.request),
             revision=plan.revision + 1,
-            target_files=extract_target_files(text),
+            target_files=extract_target_files(plan_text),
         )
         self.state.set_pending_plan(revised)
         rendered = self._render_pending_plan(revised)
@@ -1158,6 +1184,7 @@ class ForgeCycleController:
         instruction: str,
         *,
         allow_edits: bool,
+        system_prompt: str | None = None,
     ) -> tuple[str, tuple[int, int, int]]:
         """Execute one real stage call through its agent or the live streaming client.
 
@@ -1186,6 +1213,7 @@ class ForgeCycleController:
                     allow_edits=allow_edits,
                     on_token=_on_token,
                     on_thinking=on_thinking,
+                    system_prompt=system_prompt,
                 )
                 reply = (getattr(turn, "response_text", "") or "").strip()
                 usage = self._turn_usage(turn)

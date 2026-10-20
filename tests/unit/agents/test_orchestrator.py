@@ -71,6 +71,18 @@ async def test_orchestrator_handoff_with_tag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_chat_accepts_planning_system_prompt() -> None:
+    provider = ScriptedProvider()
+    provider.add("Plan: phase one scaffolds the app.\n\nREQ-1: It builds.")
+    adapter = _make_adapter(provider)
+    agent = OrchestratorAgent(adapter=adapter)
+
+    await agent.chat("Build a portfolio site.", system_prompt="PLAN ONLY, NO CODE")
+
+    assert provider.requests[0].messages[0].text == "PLAN ONLY, NO CODE"
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_does_not_infer_handoff_from_keywords() -> None:
     provider = ScriptedProvider()
     provider.add("I will proceed with the implementation plan.")

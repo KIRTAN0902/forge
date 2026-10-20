@@ -83,12 +83,13 @@ class OrchestratorAgent(BaseAgent):
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
         on_thinking: ThinkingHandler | None = None,
+        system_prompt: str | None = None,
     ) -> OrchestratorChatTurn:
         """Chat with the developer to brainstorm or synthesize requirements for planning."""
         conversation: list[Message] = []
 
         # 1. System prompt with workspace context
-        system_content = ORCHESTRATOR_CHAT_SYSTEM_PROMPT
+        system_content = system_prompt or ORCHESTRATOR_CHAT_SYSTEM_PROMPT
         if project_context:
             system_content += f"\n\n[Active Workspace Context]:\n{project_context}"
 
