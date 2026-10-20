@@ -99,6 +99,7 @@ class WriteFileOutput(ToolOutput):
     created: bool
     bytes_written: int
     lines: int
+    diff: str = ""
 
     def render(self) -> str:
         verb = "Created" if self.created else "Overwrote"
@@ -124,18 +125,25 @@ class WriteFile(Tool[WriteFileInput, WriteFileOutput]):
 
     async def run(self, args: WriteFileInput, env: ToolEnvironment) -> WriteFileOutput:
         content = args.content
+        rel = env.workspace.relative(args.path)
         target = env.workspace.resolve(args.path)
+        before = ""
         if target.exists() and target.is_file():
+            try:
+                before = await asyncio.to_thread(env.workspace.read_text, args.path)
+            except ToolError:
+                before = ""
             # Keep the file's existing line-ending convention.
             existing = decode_text(target.read_bytes()[:65536])
             if detect_newline(existing) == "\r\n" and "\r\n" not in content:
                 content = content.replace("\n", "\r\n")
         created = await asyncio.to_thread(env.workspace.write_text, args.path, content)
         return WriteFileOutput(
-            path=env.workspace.relative(args.path),
+            path=rel,
             created=created,
             bytes_written=len(content.encode("utf-8")),
             lines=content.count("\n") + (0 if content.endswith("\n") or not content else 1),
+            diff=unified_diff(before, content, rel),
         )
 
 

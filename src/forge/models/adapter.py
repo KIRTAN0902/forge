@@ -159,21 +159,7 @@ class ModelAdapter:
             params=merged,
         )
         response = await self._call(request, strategy="native_tools" if tool_list else "text")
-        text = response.text
-        if (
-            tool_list
-            and not response.tool_calls
-            and ("tool_call>" in text or '"arguments"' in text)
-        ):
-            # Some servers advertise tools but the model still answers in its training
-            # format; recover the calls rather than losing them.
-            remaining, calls = parse_text_tool_calls(response.text, tool_list)
-            if calls:
-                response.message = response.message.model_copy(
-                    update={"content": remaining or None, "tool_calls": calls}
-                )
-                response.finish_reason = FinishReason.TOOL_CALLS
-        return response
+        return self._recover_text_tool_calls(response, tool_list)
 
     async def stream(
         self,
@@ -206,7 +192,9 @@ class ModelAdapter:
         )
         async for event in self.provider.stream(self.profile.model, request):
             if isinstance(event, StreamDone):
-                response = self._normalize(event.response)
+                response = self._recover_text_tool_calls(
+                    self._normalize(event.response), tool_list
+                )
                 await self._record(response, strategy="stream")
                 yield StreamDone(response=response)
             else:
@@ -277,6 +265,29 @@ class ModelAdapter:
             ]
 
     # -- internals ----------------------------------------------------------------------
+
+    def _recover_text_tool_calls(
+        self, response: ModelResponse, tools: Sequence[ToolDefinition]
+    ) -> ModelResponse:
+        """Recover text-protocol calls from a reply that advertised native tools.
+
+        Some OpenAI-compatible servers accept the ``tools`` field but stream the model's
+        training-format ``<tool_call>`` block instead of native ``delta.tool_calls``. Without
+        this recovery the agent only sees prose and never executes a write.
+        """
+        if not tools or response.tool_calls:
+            return response
+        text = response.text
+        if "tool_call>" not in text and '"arguments"' not in text:
+            return response
+        remaining, calls = parse_text_tool_calls(text, list(tools))
+        if not calls:
+            return response
+        response.message = response.message.model_copy(
+            update={"content": remaining or None, "tool_calls": calls}
+        )
+        response.finish_reason = FinishReason.TOOL_CALLS
+        return response
 
     def _history(self, messages: Sequence[Message]) -> list[Message]:
         """Conversation as this model can accept it.

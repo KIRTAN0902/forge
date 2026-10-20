@@ -17,6 +17,7 @@ from forge.models.types import (
     ReasoningDelta,
     StreamDone,
     TextDelta,
+    ToolCall,
     ToolDefinition,
     Usage,
 )
@@ -25,6 +26,7 @@ from forge.tools.base import ToolResult
 from forge.tools.runtime import ToolRuntime
 
 ToolResultHandler = Callable[[ToolResult], None]
+ToolCallHandler = Callable[[ToolCall], None]
 TokenHandler = Callable[[str], None]
 ThinkingHandler = Callable[[str], None]
 
@@ -135,6 +137,7 @@ class BaseAgent:
         allowed_tools: Sequence[str],
         max_steps: int = 15,
         compact_budget: int | None = None,
+        on_tool_call: ToolCallHandler | None = None,
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
         on_thinking: ThinkingHandler | None = None,
@@ -173,6 +176,9 @@ class BaseAgent:
                 break
 
             outcome.tool_names.extend(call.name for call in response.tool_calls)
+            if on_tool_call is not None:
+                for call in response.tool_calls:
+                    on_tool_call(call)
             results = await self.runtime.execute_many(
                 response.tool_calls, actor=self.role, allowed=allowed
             )
@@ -195,6 +201,7 @@ class BaseAgent:
         project_context: str = "",
         max_tool_steps: int = 5,
         allowed_tools: Sequence[str] | None = None,
+        on_tool_call: ToolCallHandler | None = None,
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
         on_thinking: ThinkingHandler | None = None,
@@ -233,6 +240,7 @@ class BaseAgent:
                 conversation,
                 allowed_tools=active_allowed,
                 max_steps=max_tool_steps,
+                on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result,
                 on_token=on_token,
                 on_thinking=on_thinking,

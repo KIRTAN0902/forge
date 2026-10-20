@@ -28,6 +28,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from forge.core.logging import get_logger
 from forge.harness.adversarial_qa import AdversarialQAGatekeeper
 from forge.harness.memory import EpisodicRepoMemory
 from forge.models import Message
@@ -54,6 +55,36 @@ PlanIntent = PlanTurnIntent
 # writing each file, installing dependencies, and fixing build failures all consume calls.
 _CYCLE_HAMMER_TOOL_STEPS = 50
 _CYCLE_TEMPER_TOOL_STEPS = 24
+
+log = get_logger("ui.cycle_controller")
+
+
+def _diff_stats(diff: str) -> tuple[int, int]:
+    """Count added and removed lines in a unified diff, ignoring file headers."""
+    added = removed = 0
+    for line in (diff or "").splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return added, removed
+
+
+def _tail_text(text: str, *, max_lines: int, max_chars: int) -> str:
+    """Keep the useful end of command output without flooding the viewport."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    lines = cleaned.splitlines()
+    if len(lines) > max_lines:
+        removed = len(lines) - max_lines
+        lines = [f"... [{removed} earlier lines omitted] ...", *lines[-max_lines:]]
+    clipped = "\n".join(lines)
+    if len(clipped) > max_chars:
+        clipped = f"... [{len(clipped) - max_chars} earlier characters omitted] ...\n" + (
+            clipped[-max_chars:]
+        )
+    return clipped
 
 __all__ = [
     "AnvilPlanEvaluation",
@@ -827,6 +858,8 @@ class ForgeCycleController:
             )
         if accepts("allowed_tools"):
             kwargs["allowed_tools"] = self._toolset_for(stage, allow_edits)
+        if accepts("on_tool_call"):
+            kwargs["on_tool_call"] = lambda call: self._stream_tool_call(stage, call)
         if accepts("on_tool_result"):
             kwargs["on_tool_result"] = lambda result: self._stream_tool_result(stage, result)
         if accepts("on_token") and on_token is not None:
@@ -836,15 +869,116 @@ class ForgeCycleController:
 
         return await agent.chat(prompt, **kwargs)
 
-    def _stream_tool_result(self, stage: ForgeStage, result: Any) -> None:
-        """Overwrite the stage's transient status with the live tool action (no scrolling wall)."""
-        tool = str(getattr(result, "tool", "tool") or "tool")
-        content = (getattr(result, "content", "") or "").strip()
-        first_line = content.splitlines()[0] if content else ""
-        headline = self._stage_work_headline(stage)
+    def _stream_tool_call(self, stage: ForgeStage, call: Any) -> None:
+        """Show the requested tool immediately, before it runs."""
+        tool = str(getattr(call, "name", "") or "tool")
+        arguments = getattr(call, "arguments", None)
         self.state.set_live_activity(
-            stage, headline, format_transient_action(tool, first_line)
+            stage,
+            self._stage_work_headline(stage),
+            format_transient_action(tool, arguments if isinstance(arguments, Mapping) else ""),
         )
+
+    def _stream_tool_result(self, stage: ForgeStage, result: Any) -> None:
+        """Update the transient status and commit persistent file/command evidence.
+
+        Only the last status line is transient. File mutations and terminal executions are
+        appended to the stage buffer so the viewport keeps the real diff and command output.
+        """
+        tool = str(getattr(result, "tool", "tool") or "tool")
+        ok = bool(getattr(result, "ok", False))
+        data = getattr(result, "data", None)
+        payload: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+        content = (getattr(result, "content", "") or "").strip()
+        error = str(getattr(result, "error", "") or "").strip()
+        argument = (
+            payload.get("path")
+            or payload.get("command")
+            or payload.get("query")
+            or (content.splitlines()[0] if content else "")
+        )
+        self.state.set_live_activity(
+            stage,
+            self._stage_work_headline(stage),
+            format_transient_action(tool, payload or argument),
+        )
+        block = self._tool_event_block(tool, payload, ok=ok, error=error)
+        if block:
+            self.state.append_tool_event(stage, block)
+
+    @staticmethod
+    def _tool_event_block(
+        tool: str, data: Mapping[str, Any], *, ok: bool, error: str
+    ) -> str:
+        """Build a persistent, richly renderable event for a tool result."""
+        if not ok:
+            detail = error or "tool execution failed"
+            return f"[WARN] {tool}: {detail}"
+
+        if tool == "write_file":
+            path = str(data.get("path") or "file")
+            diff = str(data.get("diff") or "")
+            added, removed = _diff_stats(diff)
+            verb = "Created" if data.get("created") else "Modified"
+            header = f"[FILE] {verb} {path} (+{added} -{removed})"
+            return f"{header}\n{diff}".rstrip()
+
+        if tool == "edit_file":
+            path = str(data.get("path") or "file")
+            diff = str(data.get("diff") or "")
+            added, removed = _diff_stats(diff)
+            header = f"[FILE] Modified {path} (+{added} -{removed})"
+            return f"{header}\n{diff}".rstrip()
+
+        if tool == "delete_file":
+            path = str(data.get("path") or "file")
+            count = data.get("deleted_files")
+            suffix = f" ({count} files)" if count is not None else ""
+            return f"[FILE] Deleted {path}{suffix}"
+
+        if tool in {"run_tests", "run_command"}:
+            command = str(data.get("command") or tool)
+            exit_code = data.get("exit_code")
+            duration = data.get("duration_s")
+            header = f"[CMD] $ {command}"
+            if exit_code is not None:
+                header += f"\n[exit {exit_code}"
+                if isinstance(duration, int | float):
+                    header += f", {duration:.1f}s"
+                header += "]"
+            if tool == "run_tests":
+                counts = ", ".join(
+                    f"{name}={data[key]}"
+                    for name, key in (
+                        ("passed", "passed"),
+                        ("failed", "failed"),
+                        ("errors", "errors"),
+                        ("skipped", "skipped"),
+                    )
+                    if data.get(key) is not None
+                )
+                if counts:
+                    header += f"\n[{counts}]"
+                output = str(data.get("output") or "")
+            else:
+                output = "\n".join(
+                    part
+                    for part in (
+                        str(data.get("stdout") or "").rstrip(),
+                        str(data.get("stderr") or "").rstrip(),
+                    )
+                    if part
+                )
+            tail = _tail_text(output, max_lines=30, max_chars=6000)
+            return f"{header}\n{tail}".rstrip() if tail else header
+
+        if tool in {"start_process", "stop_process", "process_output"}:
+            state = "running" if data.get("running") else f"exited ({data.get('exit_code')})"
+            output = _tail_text(str(data.get("output") or ""), max_lines=16, max_chars=3000)
+            header = f"[CMD] {data.get('command') or data.get('id') or tool}: {state}"
+            return f"{header}\n{output}".rstrip() if output else header
+
+        return ""
 
     def _thinking_handler(self, stage: ForgeStage) -> Callable[[str], None]:
         """Return a reasoning callback that only updates the ephemeral status line."""
@@ -1212,6 +1346,7 @@ class ForgeCycleController:
         usage = (0, 0, 0)
         reply = ""
         failed = False
+        agent_failure: Exception | None = None
 
         if agent is not None:
             try:
@@ -1237,10 +1372,17 @@ class ForgeCycleController:
                         if saw_reasoning() and binding is not None
                         else model_diagnostic("The live model returned no visible content.")
                     )
-            except Exception:
-                agent = None
+            except Exception as exc:  # never silently fall back to a no-tools call
+                agent_failure = exc
+                log.exception("%s agent tool loop failed", stage.value)
 
-        if agent is None:
+        if agent is not None and agent_failure is not None:
+            failed = True
+            reply = model_diagnostic(
+                f"{stage.value} agent tool loop failed: {type(agent_failure).__name__}: "
+                f"{agent_failure}"
+            )
+        elif agent is None:
             binding = self._config_binding(stage)
             if binding is None:
                 reply = model_diagnostic()
@@ -1336,7 +1478,9 @@ class ForgeCycleController:
             "Do not stop after one file. Continue working through the plan until every "
             "task is implemented. Run the project's install/build/test commands with the "
             "available tools and fix failures caused by your changes. Do not ask the user "
-            "questions and do not merely describe what you would do.\n\n"
+            "questions and do not merely describe what you would do. Your first action must "
+            "be a tool call, and you must keep calling tools until the real files exist on "
+            "disk. Finish only after a real test/build command has run successfully.\n\n"
             f"APPROVED PLAN:\n{plan.plan_text}\n\n"
             f"ACCEPTANCE REQUIREMENTS:\n{plan.checklist_text()}\n\n"
             f"TARGET FILES:\n{target_files}\n\n"
@@ -1580,11 +1724,22 @@ class ForgeCycleController:
             if handoff:
                 return await self.escalate_to_forge_cycle(handoff)
             return formatted
-        except Exception:
+        except Exception as exc:
+            log.exception("%s agent turn failed", stage.value)
             binding = self._config_binding(stage)
-            if binding is not None:
+            if not allow_edits and binding is not None:
                 return await self._run_llm_turn(prompt, stage, binding)
-            raise
+            reply = model_diagnostic(
+                f"{stage.value} agent tool loop failed: {type(exc).__name__}: {exc}"
+            )
+            formatted = format_stage_deliverable(stage, reply)
+            self.state.finalize_stream(stage, formatted)
+            self.conversation_history[stage].append(
+                {"role": "assistant", "content": formatted}
+            )
+            self._commit_stage_output(stage, reply, status="failed")
+            self.state.set_active_stage(None)
+            return formatted
 
     async def _run_llm_turn(
         self, prompt: str, stage: ForgeStage, binding: StageModelBinding

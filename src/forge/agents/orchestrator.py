@@ -17,6 +17,7 @@ from forge.agents.base import (
     BaseAgent,
     ThinkingHandler,
     TokenHandler,
+    ToolCallHandler,
     ToolResultHandler,
 )
 from forge.agents.prompts import ORCHESTRATOR_CHAT_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
@@ -80,6 +81,7 @@ class OrchestratorAgent(BaseAgent):
         project_context: str = "",
         max_tool_steps: int = 5,
         allowed_tools: Sequence[str] | None = None,
+        on_tool_call: ToolCallHandler | None = None,
         on_tool_result: ToolResultHandler | None = None,
         on_token: TokenHandler | None = None,
         on_thinking: ThinkingHandler | None = None,
@@ -115,6 +117,7 @@ class OrchestratorAgent(BaseAgent):
                 conversation,
                 allowed_tools=allowed,
                 max_steps=max_tool_steps,
+                on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result,
                 on_token=on_token,
                 on_thinking=on_thinking,

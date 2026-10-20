@@ -381,6 +381,47 @@ def format_stage_deliverable(stage: ForgeStage, raw_text: str) -> str:
     return text
 
 
+def _render_structured_tool_event(console: Console, event: str) -> bool:
+    """Render persistent file/command evidence with real diff colouring.
+
+    Returns True when the event was handled here; legacy plain-text tool events still go
+    through the compact ``exec:`` renderer in :meth:`StageBuffer.render_to_ansi`.
+    """
+    lines = event.splitlines()
+    if not lines:
+        return False
+    first = lines[0]
+    if first.startswith("[FILE]"):
+        console.print(Text(first, style="bold #f87171"))
+        for line in lines[1:]:
+            if line.startswith(("+++", "---")):
+                style = "#94a3b8"
+            elif line.startswith("+"):
+                style = "#22c55e"
+            elif line.startswith("-"):
+                style = "#ef4444"
+            elif line.startswith("@@"):
+                style = "bold #38bdf8"
+            else:
+                style = "#94a3b8"
+            console.print(Text(line, style=style))
+        return True
+    if first.startswith("[CMD]"):
+        console.print(Text(first, style="bold #f59e0b"))
+        for line in lines[1:]:
+            if line.startswith("[exit 0"):
+                style = "bold #22c55e"
+            elif line.startswith("[exit "):
+                style = "bold #ef4444"
+            elif line.startswith("[passed=") or line.startswith("[failed="):
+                style = "#94a3b8"
+            else:
+                style = "#cbd5e1"
+            console.print(Text(line, style=style))
+        return True
+    return False
+
+
 @dataclass
 class StageBuffer:
     """Isolated, async-safe buffer storing execution state and thoughts for a single stage."""
@@ -448,6 +489,8 @@ class StageBuffer:
         if self.tool_events:
             console.print(Text("── Tool & Sandbox Execution ──", style="bold #64748b"))
             for event in self.tool_events:
+                if _render_structured_tool_event(console, event):
+                    continue
                 stripped = event.strip()
                 row = Text()
                 if stripped.startswith("[WARN]") or "error" in stripped.lower():

@@ -218,9 +218,6 @@ def _install_tui_event_bridge(bus: EventBus, state: Any) -> None:
         EventType.TASK_STARTED: ForgeStage.HAMMER,
         EventType.TASK_COMPLETED: ForgeStage.HAMMER,
         EventType.TASK_FAILED: ForgeStage.HAMMER,
-        EventType.TOOL_COMPLETED: ForgeStage.HAMMER,
-        EventType.FILE_MODIFIED: ForgeStage.HAMMER,
-        EventType.TEST_COMPLETED: ForgeStage.HAMMER,
         EventType.QA_STARTED: ForgeStage.TEMPER,
         EventType.QA_FINDING_CREATED: ForgeStage.TEMPER,
         EventType.QA_COMPLETED: ForgeStage.TEMPER,
@@ -232,11 +229,7 @@ def _install_tui_event_bridge(bus: EventBus, state: Any) -> None:
         if stage is None:
             return
         payload = event.payload or {}
-        if event.type == EventType.TOOL_COMPLETED:
-            text = f"Tool: {payload.get('tool')} (ok={payload.get('ok')})"
-        elif event.type == EventType.FILE_MODIFIED:
-            text = f"Modified: {payload.get('path')}"
-        elif event.type == EventType.QA_FINDING_CREATED:
+        if event.type == EventType.QA_FINDING_CREATED:
             text = f"[{payload.get('severity')}] {payload.get('description')}"
         elif event.type in {EventType.TASK_STARTED, EventType.TASK_COMPLETED, EventType.TASK_FAILED}:
             text = f"Task {payload.get('task_id')}: {payload.get('status', event.type.value)}"
