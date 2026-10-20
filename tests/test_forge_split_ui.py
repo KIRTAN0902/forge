@@ -183,7 +183,9 @@ async def test_cycle_loop_halts_on_temper_pass_and_loops_on_reject() -> None:
         max_cycles=5,
     )
 
-    deliverable = await controller.run_cycle_loop("Implement JWT authentication service")
+    plan = await controller.run_cycle_loop("Implement JWT authentication service")
+    assert "Final Plan" in plan
+    deliverable = await controller.run_cycle_loop("approve")
 
     # Verified cycle progression
     assert state.cycle_count == 2
@@ -249,14 +251,15 @@ async def test_dynamic_cycle_mode_single_cycle_stops_after_cycle_1() -> None:
         max_cycles=5,
     )
 
-    result = await controller.run_cycle_loop("Refactor auth system: run first cycle and stop")
+    await controller.run_cycle_loop("Refactor auth system: run first cycle and stop")
+    result = await controller.run_cycle_loop("approve")
 
     assert controller.cycle_mode == CycleMode.SINGLE_CYCLE
     assert state.cycle_mode == CycleMode.SINGLE_CYCLE
     # Must halt after cycle 1 (does not loop to cycle 2)
     assert state.cycle_count == 1
     assert state.active_worker_stage is None
-    assert "Single Cycle completed" in result
+    assert "ALL_REQUIREMENTS_MET: FALSE" in result
     assert "Edge case missing" in result
 
 
@@ -279,9 +282,10 @@ async def test_dynamic_cycle_mode_continuous_until_fulfilled() -> None:
         max_cycles=5,
     )
 
-    result = await controller.run_cycle_loop(
+    await controller.run_cycle_loop(
         "Build payment webhook: run until requirements get fulfilled"
     )
+    result = await controller.run_cycle_loop("approve")
 
     assert controller.cycle_mode == CycleMode.UNTIL_FULFILLED
     assert state.cycle_mode == CycleMode.UNTIL_FULFILLED
@@ -364,7 +368,8 @@ async def test_unspecified_task_executes_without_unnecessary_question() -> None:
         temper_verifier=verifier,
     )
 
-    result = await controller.run_cycle_loop("Create user profile export feature")
+    await controller.run_cycle_loop("Create user profile export feature")
+    result = await controller.run_cycle_loop("approve")
 
     # Zero intrusive questions asked to user
     assert len(asked_questions) == 0

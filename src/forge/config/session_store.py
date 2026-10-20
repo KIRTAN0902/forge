@@ -146,7 +146,26 @@ class SessionStore:
                 "chat_history": [list(item) for item in buf.chat_history],
                 "final_output": buf.final_output,
                 "stage_tokens": buf.stage_tokens,
+                "stage_input_tokens": buf.stage_input_tokens,
+                "stage_output_tokens": buf.stage_output_tokens,
                 "status": buf.status,
+            }
+
+        pending_plan_data: dict[str, Any] | None = None
+        if state.pending_plan is not None:
+            pending_plan_data = {
+                "request": state.pending_plan.request,
+                "plan_text": state.pending_plan.plan_text,
+                "revision": state.pending_plan.revision,
+                "requirements": [
+                    {
+                        "req_id": req.req_id,
+                        "text": req.text,
+                        "met": req.met,
+                        "evidence": req.evidence,
+                    }
+                    for req in state.pending_plan.requirements
+                ],
             }
 
         # Full payload
@@ -160,6 +179,11 @@ class SessionStore:
             "cycle_mode": state.cycle_mode.value,
             "active_stage_tokens": state.active_stage_tokens,
             "total_session_tokens": state.total_session_tokens,
+            "total_session_input_tokens": state.total_session_input_tokens,
+            "total_session_output_tokens": state.total_session_output_tokens,
+            "cycle_usage": state.cycle_usage,
+            "all_requirements_met": state.all_requirements_met,
+            "pending_plan": pending_plan_data,
             "selected_view_stage": state.selected_view_stage.value,
             "stage_buffers": stage_buffers_data,
         }
@@ -224,6 +248,51 @@ class SessionStore:
 
         state.active_stage_tokens = int(data.get("active_stage_tokens", 0))
         state.total_session_tokens = int(data.get("total_session_tokens", 0))
+        state.total_session_input_tokens = int(data.get("total_session_input_tokens", 0))
+        state.total_session_output_tokens = int(data.get("total_session_output_tokens", 0))
+        state.all_requirements_met = bool(data.get("all_requirements_met", False))
+        raw_cycle_usage = data.get("cycle_usage")
+        if isinstance(raw_cycle_usage, dict):
+            state.cycle_usage = {}
+            for cycle_key, stages in raw_cycle_usage.items():
+                if not isinstance(stages, dict):
+                    continue
+                try:
+                    cycle_number = int(cycle_key)
+                except (TypeError, ValueError):
+                    continue
+                state.cycle_usage[cycle_number] = {
+                    str(stage_name): {
+                        "input": int(usage.get("input", 0)),
+                        "output": int(usage.get("output", 0)),
+                        "total": int(usage.get("total", 0)),
+                    }
+                    for stage_name, usage in stages.items()
+                    if isinstance(usage, dict)
+                }
+
+        from forge.ui.state import PendingPlan, PlanRequirement
+
+        raw_plan = data.get("pending_plan")
+        if isinstance(raw_plan, dict):
+            requirements = [
+                PlanRequirement(
+                    req_id=str(item.get("req_id", f"REQ-{index}")),
+                    text=str(item.get("text", "")),
+                    met=bool(item.get("met", False)),
+                    evidence=str(item.get("evidence", "")),
+                )
+                for index, item in enumerate(raw_plan.get("requirements", []), start=1)
+                if isinstance(item, dict)
+            ]
+            state.pending_plan = PendingPlan(
+                request=str(raw_plan.get("request", "")),
+                plan_text=str(raw_plan.get("plan_text", "")),
+                requirements=requirements,
+                revision=int(raw_plan.get("revision", 1)),
+            )
+        else:
+            state.pending_plan = None
 
         # Restore stage buffers
         stage_buffers_data = data.get("stage_buffers") or {}
@@ -241,6 +310,8 @@ class SessionStore:
             ]
             buf.final_output = str(s_data.get("final_output", ""))
             buf.stage_tokens = int(s_data.get("stage_tokens", 0))
+            buf.stage_input_tokens = int(s_data.get("stage_input_tokens", 0))
+            buf.stage_output_tokens = int(s_data.get("stage_output_tokens", 0))
             buf.status = s_data.get("status", "idle")
 
         view_stg = data.get("selected_view_stage")

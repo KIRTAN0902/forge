@@ -330,7 +330,7 @@ def test_models_menu_search_filtering_and_navigation(tmp_path: Path) -> None:
     # Rendered output must show search indicator and match count
     frags = mm._render_models_modal()
     rendered_text = "".join(t for _, t in frags)
-    assert "🔍 SEARCHING" in rendered_text
+    assert "[SEARCH] SEARCHING" in rendered_text
     assert 'Query: "claude"' in rendered_text
     assert "claude" in rendered_text.lower()
     assert "gemini-2.5-pro" not in rendered_text  # Non-matching model must not appear
@@ -348,7 +348,7 @@ def test_models_menu_search_filtering_and_navigation(tmp_path: Path) -> None:
 
     assert mm.input_mode is None
     assert manager.binding_for("anvil").spec_string == expected_spec  # type: ignore[union-attr]
-    assert f"Bound ANVIL ➔ {expected_spec}" in mm.status_message
+    assert f"Bound ANVIL -> {expected_spec}" in mm.status_message
 
     # Clear search filter resets back to full list
     mm.model_search_query = "claude"

@@ -64,16 +64,14 @@ _FORGE_ART: tuple[str, ...] = (
 # Slash command catalogue used for both the popup completion menu and `/help`.
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show the command reference",
-    "/status": "Provider/model, connection & token diagnostics",
     "/provider": "Connect, configure or disconnect model providers",
     "/models": "Assign connected models to Anvil, Hammer, Temper",
-    "/usage": "Provider API usage & cost telemetry dashboard",
-    "/resume": "Resume past conversation from global session store",
-    "/restart": "Cleanly flush state and restart Forge workspace",
-    "/config": "Show persistent ~/.forge/config.json (keys masked)",
+    "/usage": "Per-agent, per-cycle and session usage accounting",
+    "/resume": "Resume a conversation from ~/.forge/sessions/",
+    "/restart": "Flush state and restart Forge in place",
     "/mode": "Set execution mode: auto | chat | cycle",
-    "/cycle": "Force a full Anvil -> Hammer -> Temper cycle",
-    "/research": "Run the STORM deep research pipeline",
+    "/cycle": "Plan a task, then execute the autonomous cycle",
+    "/research": "Run the deep research pipeline",
     "/clear": "Clear the active stage viewport",
     "/reset": "Reset the whole session",
     "/exit": "Exit the Forge workspace",
@@ -176,24 +174,21 @@ def render_sidebar_formatted_text(
         is_viewed = state.selected_view_stage == stg
         marker = "●" if (is_active_worker or is_viewed) else "○"
 
-        if is_active_worker:
+        if is_active_worker or is_viewed:
             fragments.append(("class:active_box", "╭──────────────╮\n"))
             fragments.append(("class:active_box", "│ "))
             fragments.append((style_name, f"{marker} {stage_name:<9}"))
             fragments.append(("class:active_box", "│"))
             if is_viewed and not state.auto_follow:
                 fragments.append(("class:viewing_badge", " [VIEW]"))
-            elif spinner_frame:
+            elif is_active_worker and spinner_frame:
                 fragments.append(("class:spinner", f" {spinner_frame}"))
             fragments.append(("", " <--\n"))
             fragments.append(("class:active_box", "╰──────────────╯\n"))
         else:
             fragments.append(("", f"  {marker} "))
             fragments.append((style_name, f"{stage_name:<8}"))
-            if is_viewed:
-                fragments.append(("class:viewing_badge", " [VIEW]\n"))
-            else:
-                fragments.append(("", "\n"))
+            fragments.append(("", "\n"))
 
         fragments.append(("", "\n"))
 

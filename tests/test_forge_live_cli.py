@@ -160,7 +160,7 @@ async def test_help_and_status_commands_are_immediate() -> None:
     controller = await _fresh_controller()
 
     help_text = await controller.handle_slash_command("/help")
-    assert "/model" in help_text
+    assert "/models" in help_text
     assert "/cycle" in help_text
     assert "/research" in help_text
     assert "!<shell command>" in help_text
@@ -190,22 +190,20 @@ async def test_mode_command_sets_and_reports_routing() -> None:
     assert "AUTO" in auto
 
 
-async def test_model_command_lists_and_swaps_live() -> None:
+async def test_models_command_swaps_live() -> None:
     provider = ScriptedProvider()
     agent = OrchestratorAgent(_anvil_adapter(provider))
     controller = await _fresh_controller(
         agents={ForgeStage.ANVIL: agent}, registry=_FakeRegistry()
     )
 
-    listing = await controller.handle_slash_command("/model")
-    assert "Forge Model Bindings" in listing
-    assert "Anvil" in listing
-
-    swapped = await controller.handle_slash_command("/model hammer ollama/qwen2.5-coder:7b")
+    swapped = await controller.handle_slash_command(
+        "/models hammer ollama/qwen2.5-coder:7b"
+    )
     assert "hammer" in swapped.lower()
     assert controller.registry.roles["executor"] == "ollama/qwen2.5-coder:7b"
 
-    bad_stage = await controller.handle_slash_command("/model nope openrouter/x")
+    bad_stage = await controller.handle_slash_command("/models nope openrouter/x")
     assert "Unknown stage" in bad_stage
 
 

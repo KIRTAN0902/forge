@@ -27,7 +27,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from forge.harness.adversarial_qa import AdversarialQAGatekeeper, detect_secrets_in_text
+from forge.harness.adversarial_qa import AdversarialQAGatekeeper
 from forge.harness.memory import EpisodicRepoMemory
 from forge.models import Message
 from forge.models.profile import ModelProfile
@@ -36,6 +36,8 @@ from forge.ui.state import (
     CycleMode,
     ForgeStage,
     ForgeTUIState,
+    PendingPlan,
+    PlanRequirement,
     UserQuestion,
     format_stage_deliverable,
     format_transient_action,
@@ -55,7 +57,16 @@ class ExecutionMode(StrEnum):
     DEEP_RESEARCH = "deep_research"
 
 
-# Stage <-> role aliases used by the `/model` command to route a binding to the right agent.
+class PlanIntent(StrEnum):
+    """Semantic meaning of a user's reply to a pending implementation plan."""
+
+    APPROVE_AS_IS = "APPROVE_AS_IS"
+    MODIFY_AND_PROCEED = "MODIFY_AND_PROCEED"
+    MODIFY_AND_WAIT = "MODIFY_AND_WAIT"
+    QUESTION_OR_CHAT = "QUESTION_OR_CHAT"
+
+
+# Stage <-> role aliases used by `/models` to route a binding to the right agent.
 _STAGE_ALIASES: dict[str, ForgeStage] = {
     "anvil": ForgeStage.ANVIL,
     "orchestrator": ForgeStage.ANVIL,
@@ -338,17 +349,15 @@ def model_diagnostic(reason: str = "No live LLM model is attached to this sessio
         "Forge does not fake model output — every conversational turn must reach a real LLM.",
         "Configure a provider API key, then restart Forge (or run `forge login`):",
     ]
-    lines.extend(f"  • {env}  →  {label}" for env, label in _API_KEY_ENV_VARS)
+    lines.extend(f"  - {env}  ->  {label}" for env, label in _API_KEY_ENV_VARS)
     lines.append(
-        "  • OLLAMA_HOST (optional) for a local Ollama server "
+        "  - OLLAMA_HOST (optional) for a local Ollama server "
         "(default http://localhost:11434)"
     )
     lines.append("")
-    lines.append("Or add, key & choose a live model at any time:")
-    lines.append("  /key <provider> <api_key>   save a key (e.g. /key gemini AIzaSy...)")
-    lines.append("  /provider [name] [base_url] add/switch a provider live")
-    lines.append("  /model list|test|all        choose, list or ping models")
-    lines.append("  /config                     show ~/.forge/config.json (keys masked)")
+    lines.append("Or connect a provider and choose models at any time:")
+    lines.append("  /provider                   open the Provider Connection Manager")
+    lines.append("  /models                     assign models to Anvil, Hammer, Temper")
     return "\n".join(lines)
 
 
@@ -371,6 +380,138 @@ def reasoning_only_diagnostic(binding: StageModelBinding, *, truncated: bool = F
     )
 
 
+_MODIFICATION_RE = re.compile(
+    r"\b(instead|change|replace|swap|use|add|remove|drop|update|modify|revise|adjust|"
+    r"also|except|without|rather than|don't|do not|keep|but)\b",
+    re.IGNORECASE,
+)
+_WAIT_RE = re.compile(
+    r"\b(wait|hold|pause|not yet|don'?t start|do not start|let me review|review first|"
+    r"before you start|stop|on hold)\b",
+    re.IGNORECASE,
+)
+_PROCEED_RE = re.compile(
+    r"\b(proceed|go ahead|continue|start|launch|execute|implement|run it|do it|ship it|"
+    r"approve|approved|lgtm|looks good|sounds good|yes|yeah|yep|ok|okay|anyways|anyway)\b",
+    re.IGNORECASE,
+)
+_QUESTION_RE = re.compile(
+    r"^\s*(what|why|how|when|where|who|which|can|could|would|should|does|do|is|are|"
+    r"explain|clarify|tell me)\b",
+    re.IGNORECASE,
+)
+_REQ_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:REQ[-_ ]?(\d+)|(\d+)[.)])\s*[:\-]?\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+
+def classify_plan_response(response: str) -> PlanIntent:
+    """Classify an approval reply into the four required semantic outcomes.
+
+    The rules are deliberately semantic rather than exact-phrase matching so natural
+    phrasing such as "use B instead of A, but anyways proceed" launches immediately,
+    while "change A to B and wait" pauses for another approval round.
+    """
+    text = response.strip()
+    if not text:
+        return PlanIntent.QUESTION_OR_CHAT
+
+    has_modification = _MODIFICATION_RE.search(text) is not None
+    has_wait = _WAIT_RE.search(text) is not None
+    has_proceed = _PROCEED_RE.search(text) is not None
+    is_question = "?" in text or _QUESTION_RE.search(text) is not None
+
+    if has_modification:
+        if has_wait and not re.search(r"\b(anyways|anyway)\b", text, re.IGNORECASE):
+            return PlanIntent.MODIFY_AND_WAIT
+        if has_proceed:
+            return PlanIntent.MODIFY_AND_PROCEED
+        return PlanIntent.MODIFY_AND_WAIT
+
+    if is_question and not has_proceed:
+        return PlanIntent.QUESTION_OR_CHAT
+    if has_wait and not has_proceed:
+        return PlanIntent.QUESTION_OR_CHAT
+    if has_proceed:
+        return PlanIntent.APPROVE_AS_IS
+    return PlanIntent.QUESTION_OR_CHAT
+
+
+def extract_plan_requirements(plan_text: str, request: str) -> list[PlanRequirement]:
+    """Extract a stable ``REQ-1..REQ-N`` contract from a model-authored plan."""
+    explicit: list[str] = []
+    numbered: list[str] = []
+    for match in _REQ_LINE_RE.finditer(plan_text):
+        explicit_id, number, text = match.groups()
+        cleaned = text.strip().strip("-*_").strip()
+        if not cleaned:
+            continue
+        if explicit_id is not None:
+            explicit.append(cleaned)
+        elif number is not None:
+            numbered.append(cleaned)
+
+    candidates = explicit or numbered
+    requirements: list[PlanRequirement] = []
+    for index, text in enumerate(candidates, start=1):
+        requirements.append(PlanRequirement(req_id=f"REQ-{index}", text=text))
+    if requirements:
+        return requirements
+
+    fallback = request.strip().splitlines()[0][:240] if request.strip() else "Requested change"
+    return [PlanRequirement(req_id="REQ-1", text=fallback)]
+
+
+def apply_requirement_audit(plan: PendingPlan, audit_text: str) -> bool:
+    """Update the plan checklist from Temper's structured audit and return completion."""
+    lines = audit_text.splitlines()
+    for requirement in plan.requirements:
+        token = requirement.req_id
+        matched = next((line for line in lines if token in line), "")
+        if not matched:
+            requirement.met = False
+            requirement.evidence = ""
+            continue
+        lowered = matched.lower()
+        failed = (
+            "✗" in matched
+            or re.search(r"\[(?:fail|x| )\]", lowered) is not None
+            or re.search(
+                r"\b(fail|failed|missing|unmet|incomplete|pending|partial)\b", lowered
+            )
+            is not None
+            or re.search(r"\bnot\s+(?:met|verified|complete|completed|passing|passed)\b", lowered)
+            is not None
+        )
+        passed = (
+            "✓" in matched
+            or re.search(r"\[(?:pass|done|✓|x|yes)\]", lowered) is not None
+            or re.search(r"\b(pass|passed|met|verified|complete|completed)\b", lowered) is not None
+        )
+        requirement.met = passed and not failed
+        evidence = re.sub(
+            r"^\s*[-*]?\s*" + re.escape(token) + r"\s*[:：-]?\s*",
+            "",
+            matched,
+            flags=re.IGNORECASE,
+        )
+        evidence = re.sub(r"^\s*(?:\[[ xX✓✗]\]|[✓✗]|PASS|FAIL)\b\s*", "", evidence)
+        requirement.evidence = evidence.strip()[:180]
+
+    explicit = re.search(
+        r"ALL_REQUIREMENTS_MET\s*[:=]\s*(TRUE|FALSE|YES|NO)", audit_text, re.IGNORECASE
+    )
+    if explicit:
+        return explicit.group(1).upper() in {"TRUE", "YES"}
+    if any(req.met for req in plan.requirements):
+        return all(req.met for req in plan.requirements)
+    return bool(
+        re.search(r"\b(PASS|APPROVED|VERIFIED|ALL REQUIREMENTS MET)\b", audit_text, re.I)
+    ) and not re.search(r"\b(FAIL|FAILED|REJECTED)\b", audit_text, re.I)
+
+
 @dataclass
 class CycleVerdict:
     """Verdict result from Temper (QA Gatekeeper stage)."""
@@ -389,7 +530,7 @@ class ForgeCycleController:
         state: ForgeTUIState,
         router: Any = None,
         harness: Any = None,
-        max_cycles: int = 5,
+        max_cycles: int = 25,
         temper_verifier: Callable[[int, str], CycleVerdict] | None = None,
         cycle_mode: CycleMode = CycleMode.UNTIL_FULFILLED,
         question_handler: Callable[[UserQuestion], Awaitable[str]] | None = None,
@@ -519,7 +660,11 @@ class ForgeCycleController:
         if stripped.startswith("!") or stripped.startswith("/"):
             return await self.handle_slash_command(stripped)
 
-        # 2. Deterministic intent routing
+        # 2. A live plan contract intercepts the next natural-language reply.
+        if self.state.pending_plan is not None:
+            return await self._handle_pending_plan_response(stripped)
+
+        # 3. Deterministic intent routing
         mode = self.classify(stripped, target_stage)
         self.last_mode = mode
 
@@ -540,10 +685,10 @@ class ForgeCycleController:
         return await self.run_cycle_loop(user_prompt, target_stage=target_stage)
 
     async def escalate_to_forge_cycle(self, requirement_contract: str) -> str:
-        """Hand off a synthesized requirement contract to the full Anvil -> Hammer -> Temper cycle.
+        """Hand off a requirement contract into the plan-approval state machine.
 
-        This is the explicit handoff action an agent invokes only when the task genuinely
-        requires multi-step implementation and QA verification.
+        The handoff never starts manufacturing before the user has approved the plan (or
+        supplied modifications that explicitly say to proceed).
         """
         return await self._run_full_cycle(requirement_contract)
 
@@ -721,15 +866,433 @@ class ForgeCycleController:
         return formatted
 
     @staticmethod
-    def _turn_tokens(turn: Any) -> int:
-        total = getattr(turn, "total_tokens", None)
-        if isinstance(total, int) and total > 0:
-            return total
+    def _turn_usage(turn: Any) -> tuple[int, int, int]:
+        """Return ``(prompt, completion, total)`` from any agent/client result shape."""
         usage = getattr(turn, "usage", None)
-        total = getattr(usage, "total_tokens", None)
-        if isinstance(total, int):
-            return total
-        return 0
+        prompt = getattr(turn, "prompt_tokens", None)
+        completion = getattr(turn, "completion_tokens", None)
+        total = getattr(turn, "total_tokens", None)
+        if prompt is None:
+            prompt = getattr(usage, "prompt_tokens", None)
+        if completion is None:
+            completion = getattr(usage, "completion_tokens", None)
+        if total is None:
+            total = getattr(usage, "total_tokens", None)
+        prompt_i = int(prompt) if isinstance(prompt, int) and prompt > 0 else 0
+        completion_i = int(completion) if isinstance(completion, int) and completion > 0 else 0
+        total_i = int(total) if isinstance(total, int) and total > 0 else 0
+        if total_i == 0:
+            total_i = prompt_i + completion_i
+        return prompt_i, completion_i, total_i
+
+    @classmethod
+    def _turn_tokens(cls, turn: Any) -> int:
+        return cls._turn_usage(turn)[2]
+
+    def _cycle_banner(self, cycle: int | None = None) -> str:
+        """Stable cycle heading used across plans, implementation and QA reports."""
+        return f"Cycle :- {self.state.cycle_count if cycle is None else cycle}"
+
+    def _render_pending_plan(self, plan: PendingPlan) -> str:
+        """Render the approval contract shown before autonomous execution starts."""
+        lines = [
+            self._cycle_banner(),
+            f"Final Plan (revision {plan.revision})",
+            "",
+            plan.plan_text.strip(),
+            "",
+            "Acceptance Requirements:",
+            plan.checklist_text(),
+            "",
+            "Reply APPROVE to launch, describe modifications to revise, or ask a question.",
+        ]
+        return "\n".join(lines).strip()
+
+    async def _handle_pending_plan_response(self, response: str) -> str:
+        """Resolve a natural-language reply against the pending plan contract."""
+        plan = self.state.pending_plan
+        if plan is None:
+            return ""
+        self.last_mode = ExecutionMode.FULL_FORGE_CYCLE
+        intent = classify_plan_response(response)
+        self.state.append_thought(
+            ForgeStage.ANVIL, f"Plan intent resolved: {intent.value}"
+        )
+
+        if intent is PlanIntent.QUESTION_OR_CHAT:
+            answer = await self._run_agent_turn(
+                response, ForgeStage.ANVIL, allow_edits=False
+            )
+            self.state.append_thought(
+                ForgeStage.ANVIL,
+                "Plan remains pending approval after the user's question.",
+            )
+            self.state.set_stage_output(
+                ForgeStage.ANVIL, self._render_pending_plan(plan), status="passed"
+            )
+            return answer
+
+        if intent in {PlanIntent.MODIFY_AND_PROCEED, PlanIntent.MODIFY_AND_WAIT}:
+            revised = await self._revise_plan(plan, response)
+            if intent is PlanIntent.MODIFY_AND_WAIT:
+                return self._render_pending_plan(revised)
+            return await self._run_autonomous_cycle(revised)
+
+        return await self._run_autonomous_cycle(plan)
+
+    async def _generate_plan(self, prompt: str) -> PendingPlan:
+        """Ask the live Anvil model for a plan plus an explicit REQ contract."""
+        instruction = (
+            "You are the Anvil orchestrator. Produce an implementation plan for the task "
+            "below. Do not write implementation code. End with a requirements contract in "
+            "this exact shape, one requirement per line:\n"
+            "REQ-1: <independently verifiable requirement>\n"
+            "REQ-2: <independently verifiable requirement>\n\n"
+            f"TASK:\n{prompt}"
+        )
+        text, _usage = await self._stage_instruction(
+            ForgeStage.ANVIL, instruction, allow_edits=False
+        )
+        plan = PendingPlan(
+            request=prompt,
+            plan_text=text,
+            requirements=extract_plan_requirements(text, prompt),
+        )
+        self.state.all_requirements_met = False
+        self.state.set_pending_plan(plan)
+        rendered = self._render_pending_plan(plan)
+        self.state.set_stage_output(ForgeStage.ANVIL, rendered, status="passed")
+        self.state.finalize_stream(ForgeStage.ANVIL, rendered)
+        self.state.append_thought(
+            ForgeStage.ANVIL,
+            f"{self._cycle_banner()} plan revision {plan.revision} is awaiting approval.",
+        )
+        return plan
+
+    async def _revise_plan(self, plan: PendingPlan, feedback: str) -> PendingPlan:
+        """Ask Anvil to revise the plan from semantic user feedback."""
+        instruction = (
+            "Revise the implementation plan using the user's feedback. Preserve all "
+            "requirements that still apply and return a complete revised plan followed by "
+            "the full requirements contract (REQ-1, REQ-2, ...).\n\n"
+            f"ORIGINAL REQUEST:\n{plan.request}\n\n"
+            f"CURRENT PLAN:\n{plan.plan_text}\n\n"
+            f"USER FEEDBACK:\n{feedback}"
+        )
+        text, _usage = await self._stage_instruction(
+            ForgeStage.ANVIL, instruction, allow_edits=False
+        )
+        revised = PendingPlan(
+            request=plan.request,
+            plan_text=text,
+            requirements=extract_plan_requirements(text, plan.request),
+            revision=plan.revision + 1,
+        )
+        self.state.set_pending_plan(revised)
+        rendered = self._render_pending_plan(revised)
+        self.state.set_stage_output(ForgeStage.ANVIL, rendered, status="passed")
+        self.state.finalize_stream(ForgeStage.ANVIL, rendered)
+        self.state.append_thought(
+            ForgeStage.ANVIL,
+            f"Plan revised to revision {revised.revision}; awaiting approval "
+            "when the user requested a pause.",
+        )
+        return revised
+
+    async def _stage_instruction(
+        self,
+        stage: ForgeStage,
+        instruction: str,
+        *,
+        allow_edits: bool,
+    ) -> tuple[str, tuple[int, int, int]]:
+        """Execute one real stage call through its agent or the live streaming client.
+
+        No conversational or manufacturing stage ever substitutes a canned reply. When no
+        live model is reachable the caller receives an actionable diagnostic instead.
+        """
+        self.state.set_active_stage(stage, reset_tokens=False)
+        self._begin_stage_activity(stage)
+        agent = self._agent_for(stage)
+
+        def _on_token(delta: str) -> None:
+            self.state.append_stream(stage, delta)
+
+        on_thinking, saw_reasoning = self._tracking_thinking_handler(stage)
+        self.state.start_stream(stage, self._speaker(stage))
+        usage = (0, 0, 0)
+        reply = ""
+        failed = False
+
+        if agent is not None:
+            try:
+                turn = await self._invoke_agent_chat(
+                    agent,
+                    instruction,
+                    stage,
+                    allow_edits=allow_edits,
+                    on_token=_on_token,
+                    on_thinking=on_thinking,
+                )
+                reply = (getattr(turn, "response_text", "") or "").strip()
+                usage = self._turn_usage(turn)
+                messages = getattr(turn, "messages", None)
+                if messages:
+                    self._history[stage] = list(messages)
+                if not reply:
+                    binding = self._config_binding(stage)
+                    reply = (
+                        reasoning_only_diagnostic(binding)
+                        if saw_reasoning() and binding is not None
+                        else model_diagnostic("The live model returned no visible content.")
+                    )
+            except Exception:
+                agent = None
+
+        if agent is None:
+            binding = self._config_binding(stage)
+            if binding is None:
+                reply = model_diagnostic()
+                failed = True
+            else:
+                client = self._llm_client()
+                messages = [{"role": "user", "content": instruction}]
+                try:
+                    response = await client.stream_chat(
+                        binding,
+                        messages,
+                        on_token=_on_token,
+                        on_thinking=on_thinking,
+                        stage=stage.value.lower(),
+                    )
+                    reply = (response.content or "").strip()
+                    usage = (
+                        response.prompt_tokens,
+                        response.completion_tokens,
+                        response.total_tokens,
+                    )
+                    if not reply:
+                        reply = (
+                            reasoning_only_diagnostic(
+                                binding, truncated=response.reasoning_incomplete
+                            )
+                            if response.reasoning_content
+                            else model_diagnostic(
+                                "The live model returned no visible content."
+                            )
+                        )
+                except Exception as exc:
+                    failed = True
+                    reply = model_diagnostic(
+                        f"Live model call failed ({binding.spec_string}): {exc}"
+                    )
+
+        prompt_tokens, completion_tokens, total_tokens = usage
+        self.state.record_tokens(
+            stage,
+            total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+        formatted = format_stage_deliverable(stage, reply)
+        self.state.finalize_stream(stage, formatted)
+        self.conversation_history[stage].append(
+            {"role": "assistant", "content": formatted}
+        )
+        self._commit_stage_output(stage, reply, status="failed" if failed else "passed")
+        self.state.set_active_stage(None)
+        return formatted, usage
+
+    async def _cycle_anvil(
+        self, plan: PendingPlan, feedback: str = ""
+    ) -> str:
+        """Produce the initial plan or a delta-remediation plan for the current cycle."""
+        if not feedback:
+            rendered = self._render_pending_plan(plan)
+            self.state.set_stage_output(ForgeStage.ANVIL, rendered, status="passed")
+            return rendered
+        unmet_lines = [
+            requirement.checklist_line()
+            for requirement in plan.requirements
+            if not requirement.met
+        ]
+        unmet_text = "\n".join(unmet_lines) or plan.checklist_text()
+        instruction = (
+            f"{self._cycle_banner()} delta remediation. Do not repeat the whole plan; "
+            "resolve the unmet requirements below and state the exact corrective steps "
+            "Hammer must take.\n\n"
+            f"ORIGINAL REQUEST:\n{plan.request}\n\n"
+            f"BASE PLAN:\n{plan.plan_text}\n\n"
+            f"UNMET REQUIREMENTS:\n{unmet_text}\n\n"
+            f"TEMPER FEEDBACK:\n{feedback}"
+        )
+        text, _usage = await self._stage_instruction(
+            ForgeStage.ANVIL, instruction, allow_edits=False
+        )
+        rendered = f"{self._cycle_banner()} Remediation Plan\n\n{text}"
+        self.state.set_stage_output(ForgeStage.ANVIL, rendered, status="passed")
+        self.state.finalize_stream(ForgeStage.ANVIL, rendered)
+        return rendered
+
+    async def _cycle_hammer(self, plan: PendingPlan, feedback: str = "") -> str:
+        """Ask the live Hammer model to implement the plan in the current cycle."""
+        instruction = (
+            f"{self._cycle_banner()} implementation. Execute the approved plan using the "
+            "available repository tools, make the required edits, and report concrete "
+            "changes and test commands. Do not ask the user questions.\n\n"
+            f"APPROVED PLAN:\n{plan.plan_text}\n\n"
+            f"ACCEPTANCE REQUIREMENTS:\n{plan.checklist_text()}"
+        )
+        if feedback:
+            instruction += f"\n\nUNRESOLVED DEFECTS FROM LAST CYCLE:\n{feedback}"
+        text, _usage = await self._stage_instruction(
+            ForgeStage.HAMMER, instruction, allow_edits=True
+        )
+        rendered = f"{self._cycle_banner()} Implementation Report\n\n{text}"
+        self.state.set_stage_output(ForgeStage.HAMMER, rendered, status="passed")
+        self.state.finalize_stream(ForgeStage.HAMMER, rendered)
+        return rendered
+
+    async def _cycle_temper(
+        self, plan: PendingPlan, cycle: int
+    ) -> tuple[str, bool, str]:
+        """Audit every requirement and return ``(report, all_met, audit_text)``."""
+        instruction = (
+            f"{self._cycle_banner(cycle)} adversarial audit. Verify each requirement "
+            "against the actual repository state. Reply with exactly one line per "
+            "requirement in this form:\n"
+            "REQ-1: [✓] evidence   (or [✗] missing evidence)\n"
+            "REQ-2: [✓] evidence\n"
+            "Then finish with: ALL_REQUIREMENTS_MET: TRUE or FALSE.\n\n"
+            f"APPROVED PLAN:\n{plan.plan_text}\n\n"
+            f"REQUIREMENTS:\n{plan.checklist_text()}"
+        )
+        text, _usage = await self._stage_instruction(
+            ForgeStage.TEMPER, instruction, allow_edits=False
+        )
+
+        audit_text = text
+        all_met = apply_requirement_audit(plan, audit_text)
+        if all_met:
+            for requirement in plan.requirements:
+                requirement.met = True
+                requirement.evidence = requirement.evidence or "verified in cycle audit"
+        if self.temper_verifier is not None:
+            verdict = self.temper_verifier(cycle, plan.request)
+            all_met = verdict.passed
+            audit_text = verdict.feedback or text
+            for requirement in plan.requirements:
+                requirement.met = verdict.passed
+                if not verdict.passed:
+                    requirement.evidence = verdict.feedback[:180]
+            if verdict.deliverable:
+                text = verdict.deliverable
+
+        report_lines = [
+            self._cycle_banner(cycle),
+            "QA & Verification Verdict",
+            "",
+            plan.checklist_text(),
+            "",
+            f"ALL_REQUIREMENTS_MET: {'TRUE' if all_met else 'FALSE'}",
+        ]
+        if audit_text and audit_text not in text:
+            report_lines.extend(["", audit_text])
+        if text and text not in report_lines:
+            report_lines.extend(["", text])
+        report = "\n".join(report_lines).strip()
+        if all_met:
+            self.state.set_stage_output(ForgeStage.TEMPER, report, status="passed")
+        else:
+            self.state.set_stage_output(ForgeStage.TEMPER, report, status="failed")
+        self.state.finalize_stream(ForgeStage.TEMPER, report)
+        return report, all_met, audit_text
+
+    async def _run_autonomous_cycle(self, plan: PendingPlan) -> str:
+        """Execute plan -> implement -> audit loops without further user prompts."""
+        self.state.set_pending_plan(plan)
+        for requirement in plan.requirements:
+            requirement.met = False
+            requirement.evidence = ""
+        self.state.all_requirements_met = False
+        self.auto_save_session()
+        feedback = ""
+        final_report = ""
+
+        while not self._cancelled:
+            cycle = self.state.cycle_count
+            self.state.append_thought(
+                ForgeStage.ANVIL,
+                f"{self._cycle_banner(cycle)} autonomous execution started.",
+            )
+            await self._cycle_anvil(plan, feedback)
+            if self._cancelled:
+                break
+            await self._cycle_hammer(plan, feedback)
+            if self._cancelled:
+                break
+            final_report, all_met, audit_text = await self._cycle_temper(plan, cycle)
+            self.state.all_requirements_met = all_met
+
+            if all_met:
+                self.state.append_thought(
+                    ForgeStage.TEMPER,
+                    f"{self._cycle_banner(cycle)} ALL_REQUIREMENTS_MET == True.",
+                )
+                self._commit_stage_output(
+                    ForgeStage.TEMPER, final_report, status="passed"
+                )
+                self.state.set_pending_plan(None)
+                self.auto_save_session()
+                return final_report
+
+            unmet = [
+                request
+                for request in plan.requirements
+                if not request.met
+            ]
+            feedback = (
+                f"{self._cycle_banner(cycle)} unmet requirements:\n"
+                + "\n".join(req.checklist_line() for req in unmet)
+                + f"\n\nTemper audit:\n{audit_text}"
+            )
+            self._commit_stage_output(
+                ForgeStage.TEMPER,
+                f"{final_report}\n\n{feedback}",
+                status="failed",
+            )
+
+            live_failure = (
+                "No live LLM model is attached" in final_report
+                or "Live model call failed" in final_report
+            )
+            if self.temper_verifier is None and live_failure:
+                self.state.append_thought(
+                    ForgeStage.TEMPER,
+                    f"{self._cycle_banner(cycle)} no live model is reachable; "
+                    "autonomous remediation cannot continue.",
+                )
+                self.state.set_active_stage(None)
+                return final_report
+            if self.cycle_mode == CycleMode.SINGLE_CYCLE:
+                self.state.append_thought(
+                    ForgeStage.ANVIL,
+                    f"{self._cycle_banner(cycle)} Single Cycle policy: halting.",
+                )
+                self.state.set_active_stage(None)
+                return final_report
+            if cycle >= self.max_cycles:
+                self.state.append_thought(
+                    ForgeStage.TEMPER,
+                    f"Cycle ceiling ({self.max_cycles}) reached; requirements remain unmet.",
+                )
+                self.state.set_active_stage(None)
+                return final_report
+
+            self.state.advance_to_next_cycle(feedback)
+
+        self.state.set_active_stage(None)
+        return final_report
 
     async def _run_agent_turn(
         self,
@@ -777,7 +1340,7 @@ class ForgeCycleController:
                 on_thinking=on_thinking,
             )
             reply = (getattr(turn, "response_text", "") or "").strip()
-            tokens = self._turn_tokens(turn)
+            prompt_tokens, completion_tokens, total_tokens = self._turn_usage(turn)
             messages = getattr(turn, "messages", None)
             if messages:
                 self._history[stage] = list(messages)
@@ -787,10 +1350,15 @@ class ForgeCycleController:
                 reply = (
                     reasoning_only_diagnostic(binding)
                     if saw_reasoning() and binding is not None
-                    else "(no response)"
+                    else model_diagnostic("The live model returned no visible content.")
                 )
 
-            self.state.record_tokens(stage, tokens)
+            self.state.record_tokens(
+                stage,
+                total_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
             formatted = format_stage_deliverable(stage, reply)
             self.state.finalize_stream(stage, formatted)
             self.conversation_history[stage].append({"role": "assistant", "content": formatted})
@@ -827,11 +1395,12 @@ class ForgeCycleController:
         self._begin_stage_activity(stage, "streaming live model...")
         self.state.start_stream(stage, self._speaker(stage))
         try:
-            response = await client.complete_or_stream(
+            response = await client.stream_chat(
                 binding,
                 messages,
                 on_token=_on_token,
                 on_thinking=self._thinking_handler(stage),
+                stage=stage.value.lower(),
             )
         except Exception as exc:  # pragma: no cover - network dependent
             reply = model_diagnostic(f"Live model call failed ({binding.spec_string}): {exc}")
@@ -849,8 +1418,13 @@ class ForgeCycleController:
                     binding, truncated=response.reasoning_incomplete
                 )
             else:
-                reply = "(no response)"
-        self.state.record_tokens(stage, response.total_tokens)
+                reply = model_diagnostic("The live model returned no visible content.")
+        self.state.record_tokens(
+            stage,
+            response.total_tokens,
+            prompt_tokens=response.prompt_tokens,
+            completion_tokens=response.completion_tokens,
+        )
         formatted = format_stage_deliverable(stage, reply)
         self.state.finalize_stream(stage, formatted)
         self.conversation_history[stage].append({"role": "assistant", "content": formatted})
@@ -907,23 +1481,52 @@ class ForgeCycleController:
 
     # -- full Anvil -> Hammer -> Temper cycle --------------------------------------------
 
-    async def _run_full_cycle(self, prompt: str) -> str:
-        """Run the full pipeline: the real harness, the injected verifier, or a live cycle."""
-        if self.workflow_runner is not None:
-            return await self._run_real_cycle(prompt)
-        if self.temper_verifier is not None or self._config_binding(ForgeStage.ANVIL) is not None:
-            return await self._run_simulated_cycle(prompt)
-
-        diagnostic = model_diagnostic(
-            "A full Anvil -> Hammer -> Temper cycle needs a configured provider or model harness."
+    def _apply_cycle_mode_from_prompt(self, prompt: str) -> None:
+        """Honour explicit one-cycle or until-fulfilled wording from the user."""
+        lowered = prompt.lower()
+        single_keywords = (
+            "run first cycle and stop",
+            "run 1 cycle and stop",
+            "first cycle and stop",
+            "run first cycle",
+            "run 1 cycle",
+            "single cycle",
+            "stop after first cycle",
+            "stop after 1 cycle",
+            "step by step",
+            "run one cycle",
+            "pause after cycle 1",
+            "1 cycle only",
         )
-        stage = ForgeStage.ANVIL
-        self.state.set_active_stage(stage, reset_tokens=False)
-        self.state.append_chat(stage, "You", prompt)
-        self.state.append_chat(stage, "Forge", diagnostic)
-        self.state.set_stage_output(stage, diagnostic, status="failed")
-        self.state.set_active_stage(None)
-        return diagnostic
+        continuous_keywords = (
+            "run until requirements get fulfilled",
+            "until requirements get fulfilled",
+            "until requirements are fulfilled",
+            "until requirements fulfilled",
+            "run until fulfilled",
+            "run until done",
+            "continuous",
+            "auto mode",
+            "loop until pass",
+            "full cycle loop",
+            "fix until passing",
+            "run all cycles",
+        )
+        if any(keyword in lowered for keyword in single_keywords):
+            self.set_cycle_mode(CycleMode.SINGLE_CYCLE)
+        elif any(keyword in lowered for keyword in continuous_keywords):
+            self.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
+
+    async def _run_full_cycle(self, prompt: str) -> str:
+        """Generate a plan and enter the semantic approval state machine.
+
+        Manufacturing never starts until the user approves the plan or explicitly asks to
+        apply modifications and proceed.
+        """
+        self._apply_cycle_mode_from_prompt(prompt)
+        self.state.append_chat(ForgeStage.ANVIL, "You", prompt)
+        plan = await self._generate_plan(prompt)
+        return self._render_pending_plan(plan)
 
     async def _run_real_cycle(self, prompt: str) -> str:
         """Delegate to the real multi-agent workflow orchestrator and mirror its outcome."""
@@ -981,362 +1584,44 @@ class ForgeCycleController:
         return summary
 
     async def _run_simulated_cycle(self, prompt: str) -> str:
-        """Deterministic in-process cycle (offline / tests), using live agents when attached."""
-        current_request = prompt
-        final_deliverable = ""
-
-        p_lower = prompt.lower()
-        single_keywords = (
-            "run first cycle and stop",
-            "run 1 cycle and stop",
-            "first cycle and stop",
-            "run first cycle",
-            "run 1 cycle",
-            "single cycle",
-            "stop after first cycle",
-            "stop after 1 cycle",
-            "step by step",
-            "run one cycle",
-            "pause after cycle 1",
-            "1 cycle only",
-        )
-        continuous_keywords = (
-            "run until requirements get fulfilled",
-            "until requirements get fulfilled",
-            "until requirements are fulfilled",
-            "until requirements fulfilled",
-            "run until fulfilled",
-            "run until done",
-            "continuous",
-            "auto mode",
-            "loop until pass",
-            "full cycle loop",
-            "fix until passing",
-            "run all cycles",
-        )
-        if any(kw in p_lower for kw in single_keywords):
-            self.set_cycle_mode(CycleMode.SINGLE_CYCLE)
-        elif any(kw in p_lower for kw in continuous_keywords):
-            self.set_cycle_mode(CycleMode.UNTIL_FULFILLED)
-
-        while self.state.cycle_count <= self.max_cycles and not self._cancelled:
-            await self._simulated_anvil(current_request)
-            if self._cancelled:
-                break
-            await self._simulated_hammer(current_request)
-            if self._cancelled:
-                break
-            verdict, deliverable = await self._simulated_temper(prompt)
-
-            if verdict.passed:
-                final_deliverable = verdict.deliverable or deliverable
-                self.state.append_thought(
-                    ForgeStage.TEMPER,
-                    "Gatekeeper Decision: APPROVED. All requirements & security checks passed.",
-                )
-                self._commit_stage_output(ForgeStage.TEMPER, final_deliverable, status="passed")
-                self.state.set_active_stage(None)
-                return final_deliverable
-
-            rejection = verdict.feedback or "Defects identified during adversarial verification."
-            self.state.append_thought(
-                ForgeStage.TEMPER, f"Gatekeeper Decision: REJECTED. Defects: {rejection}"
-            )
-            self._commit_stage_output(
-                ForgeStage.TEMPER,
-                f"Cycle #{self.state.cycle_count} Rejection Report:\n{rejection}",
-                status="failed",
-            )
-
-            if self.cycle_mode == CycleMode.SINGLE_CYCLE:
-                self.state.append_thought(
-                    ForgeStage.ANVIL,
-                    f"Single Cycle mode: halting after Cycle #{self.state.cycle_count}.",
-                )
-                self.state.set_active_stage(None)
-                return f"Single Cycle completed. QA feedback: {rejection}"
-
-            if self.state.cycle_count >= self.max_cycles:
-                self.state.append_thought(
-                    ForgeStage.TEMPER,
-                    f"Cycle ceiling ({self.max_cycles}) reached without approval. Halting.",
-                )
-                self.state.set_active_stage(None)
-                return f"Cycle limit reached. Final QA feedback: {rejection}"
-
-            self.state.advance_to_next_cycle(rejection)
-            current_request = (
-                f"{prompt}\n\n[Temper Rejection Feedback from Cycle "
-                f"#{self.state.cycle_count - 1}]:\n{rejection}"
-            )
-
-        self.state.set_active_stage(None)
-        return final_deliverable
+        """Compatibility entry point for an already-approved in-process cycle."""
+        plan = self.state.pending_plan
+        if plan is None:
+            plan = await self._generate_plan(prompt)
+        return await self._run_autonomous_cycle(plan)
 
     async def _simulated_anvil(self, current_request: str) -> None:
-        stage = ForgeStage.ANVIL
-        self.state.set_active_stage(stage, reset_tokens=False)
-        self._begin_stage_activity(stage, "analyzing goal & repository...")
-        self.state.append_thought(
-            ForgeStage.ANVIL,
-            f"Analyzing goal for Cycle #{self.state.cycle_count}: {current_request[:120]}",
+        """Run Anvil through the live model and commit its plan/remediation output."""
+        plan = self.state.pending_plan or PendingPlan(
+            request=current_request,
+            plan_text=current_request,
+            requirements=extract_plan_requirements(current_request, current_request),
         )
-        specs = self.skill_router.list_all_specs()
-        active_skills = [s.name for s in specs[:3]]
-        if active_skills:
-            self.state.append_thought(
-                ForgeStage.ANVIL,
-                f"AutonomousSkillRouter activated: {', '.join(active_skills)}",
-            )
-
-        plan_summary = (
-            f"Architectural Plan for Cycle #{self.state.cycle_count}:\n"
-            f"1. Deconstruct requirement into dependency-ordered DAG tasks.\n"
-            f"2. Apply AST context slicing to touched code modules.\n"
-            f"3. Direct Hammer to implement atomic changes with regression tests."
-        )
-        agent = self._agent_for(ForgeStage.ANVIL)
-        usage = 0
-        if agent is not None:
-            on_thinking, saw_reasoning = self._tracking_thinking_handler(ForgeStage.ANVIL)
-            try:
-                turn = await self._invoke_agent_chat(
-                    agent,
-                    f"Produce an implementation plan for: {current_request}",
-                    ForgeStage.ANVIL,
-                    allow_edits=False,
-                    on_thinking=on_thinking,
-                )
-                text = (getattr(turn, "response_text", "") or "").strip()
-                if text:
-                    plan_summary = text
-                elif saw_reasoning():
-                    binding = self._config_binding(ForgeStage.ANVIL)
-                    if binding is not None:
-                        plan_summary = reasoning_only_diagnostic(binding)
-                usage = self._turn_tokens(turn)
-                messages = getattr(turn, "messages", None)
-                if messages:
-                    self._history[ForgeStage.ANVIL] = list(messages)
-            except Exception:
-                agent = None
-
-        streamed = False
-        if agent is None:
-            binding = self._config_binding(ForgeStage.ANVIL)
-            if binding is not None:
-                client = self._llm_client()
-                prompt_text = f"Produce an architectural implementation plan for:\n{current_request}"
-
-                def _on_tok(delta: str) -> None:
-                    self.state.append_stream(ForgeStage.ANVIL, delta)
-
-                self.state.start_stream(ForgeStage.ANVIL, "Anvil")
-                streamed = True
-                try:
-                    res = await client.complete_or_stream(
-                        binding,
-                        [{"role": "user", "content": prompt_text}],
-                        on_token=_on_tok,
-                        on_thinking=self._thinking_handler(ForgeStage.ANVIL),
-                        stage="anvil",
-                    )
-                    text = (res.content or "").strip()
-                    if text:
-                        plan_summary = text
-                    elif res.reasoning_content:
-                        plan_summary = reasoning_only_diagnostic(
-                            binding, truncated=res.reasoning_incomplete
-                        )
-                    usage = res.total_tokens
-                except Exception:
-                    pass
-
-        await asyncio.sleep(0)
-        self.state.record_tokens(ForgeStage.ANVIL, usage)
-        formatted = format_stage_deliverable(ForgeStage.ANVIL, plan_summary)
-        if streamed:
-            self.state.finalize_stream(ForgeStage.ANVIL, formatted)
-        else:
-            self.state.append_chat(ForgeStage.ANVIL, self._speaker(stage), formatted)
-        self._commit_stage_output(ForgeStage.ANVIL, plan_summary, status="passed")
+        await self._cycle_anvil(plan)
 
     async def _simulated_hammer(self, current_request: str) -> None:
-        stage = ForgeStage.HAMMER
-        self.state.set_active_stage(stage, reset_tokens=False)
-        self._begin_stage_activity(stage, "applying changes...")
-        self.state.append_thought(
-            ForgeStage.HAMMER, "Beginning code synthesis, AST patching, and tool execution..."
+        """Run Hammer through the live model and commit its implementation report."""
+        plan = self.state.pending_plan or PendingPlan(
+            request=current_request,
+            plan_text=current_request,
+            requirements=extract_plan_requirements(current_request, current_request),
         )
-        exec_summary = (
-            f"Implementation Summary (Cycle #{self.state.cycle_count}):\n"
-            f"• Touchpoints modified and syntax trees validated.\n"
-            f"• Code artifacts prepared for adversarial QA verification."
-        )
-        agent = self._agent_for(ForgeStage.HAMMER)
-        usage = 0
-        if agent is not None:
-            on_thinking, saw_reasoning = self._tracking_thinking_handler(ForgeStage.HAMMER)
-            try:
-                turn = await self._invoke_agent_chat(
-                    agent,
-                    f"Implement the plan for: {current_request}",
-                    ForgeStage.HAMMER,
-                    allow_edits=True,
-                    on_thinking=on_thinking,
-                )
-                text = (getattr(turn, "response_text", "") or "").strip()
-                if text:
-                    exec_summary = text
-                elif saw_reasoning():
-                    binding = self._config_binding(ForgeStage.HAMMER)
-                    if binding is not None:
-                        exec_summary = reasoning_only_diagnostic(binding)
-                usage = self._turn_tokens(turn)
-            except Exception:
-                agent = None
-
-        streamed = False
-        if agent is None:
-            binding = self._config_binding(ForgeStage.HAMMER)
-            if binding is not None:
-                client = self._llm_client()
-                prompt_text = f"Implement the requested changes for:\n{current_request}"
-
-                def _on_tok_h(delta: str) -> None:
-                    self.state.append_stream(ForgeStage.HAMMER, delta)
-
-                self.state.start_stream(ForgeStage.HAMMER, "Hammer")
-                streamed = True
-                try:
-                    res = await client.complete_or_stream(
-                        binding,
-                        [{"role": "user", "content": prompt_text}],
-                        on_token=_on_tok_h,
-                        on_thinking=self._thinking_handler(ForgeStage.HAMMER),
-                        stage="hammer",
-                    )
-                    text = (res.content or "").strip()
-                    if text:
-                        exec_summary = text
-                    elif res.reasoning_content:
-                        exec_summary = reasoning_only_diagnostic(
-                            binding, truncated=res.reasoning_incomplete
-                        )
-                    usage = res.total_tokens
-                except Exception:
-                    pass
-
-        await asyncio.sleep(0)
-        self.state.record_tokens(ForgeStage.HAMMER, usage)
-        formatted = format_stage_deliverable(ForgeStage.HAMMER, exec_summary)
-        if streamed:
-            self.state.finalize_stream(ForgeStage.HAMMER, formatted)
-        else:
-            self.state.append_chat(ForgeStage.HAMMER, self._speaker(stage), formatted)
-        self._commit_stage_output(ForgeStage.HAMMER, exec_summary, status="passed")
+        await self._cycle_hammer(plan)
 
     async def _simulated_temper(self, original_prompt: str) -> tuple[CycleVerdict, str]:
-        stage = ForgeStage.TEMPER
-        self.state.set_active_stage(stage, reset_tokens=False)
-        self._begin_stage_activity(stage, "running test suite & security checks...")
-        self.state.append_thought(
-            ForgeStage.TEMPER,
-            "Adversarial QA Gatekeeper: checking code for security and leaks...",
+        """Run Temper's live requirement audit and return a cycle verdict."""
+        plan = self.state.pending_plan or PendingPlan(
+            request=original_prompt,
+            plan_text=original_prompt,
+            requirements=extract_plan_requirements(original_prompt, original_prompt),
         )
-        secrets_detected = detect_secrets_in_text(original_prompt)
-        self.state.append_thought(
-            ForgeStage.TEMPER,
-            f"Secret Detection & Shannon Entropy: {len(secrets_detected)} leaks found.",
+        report, all_met, audit_text = await self._cycle_temper(
+            plan, self.state.cycle_count
         )
-
-        usage = 0
-        reply = ""
-        streamed = False
-        agent = self._agent_for(ForgeStage.TEMPER)
-        if agent is not None:
-            on_thinking, saw_reasoning = self._tracking_thinking_handler(ForgeStage.TEMPER)
-            try:
-                turn = await self._invoke_agent_chat(
-                    agent,
-                    f"Adversarially verify the implementation for: {original_prompt}",
-                    ForgeStage.TEMPER,
-                    allow_edits=False,
-                    on_thinking=on_thinking,
-                )
-                usage = self._turn_tokens(turn)
-                reply = (getattr(turn, "response_text", "") or "").strip()
-                if not reply and saw_reasoning():
-                    binding = self._config_binding(ForgeStage.TEMPER)
-                    if binding is not None:
-                        reply = reasoning_only_diagnostic(binding)
-            except Exception:
-                agent = None
-
-        if agent is None and not reply:
-            binding = self._config_binding(ForgeStage.TEMPER)
-            if binding is not None:
-                client = self._llm_client()
-                prompt_text = (
-                    f"Adversarially verify the solution for: {original_prompt}\n"
-                    "Check for defects, syntax errors, and test coverage. Conclude with PASS or FAIL."
-                )
-
-                def _on_tok_t(delta: str) -> None:
-                    self.state.append_stream(ForgeStage.TEMPER, delta)
-
-                self.state.start_stream(ForgeStage.TEMPER, "Temper")
-                streamed = True
-                try:
-                    res = await client.complete_or_stream(
-                        binding,
-                        [{"role": "user", "content": prompt_text}],
-                        on_token=_on_tok_t,
-                        on_thinking=self._thinking_handler(ForgeStage.TEMPER),
-                        stage="temper",
-                    )
-                    reply = (res.content or "").strip()
-                    if not reply and res.reasoning_content:
-                        reply = reasoning_only_diagnostic(
-                            binding, truncated=res.reasoning_incomplete
-                        )
-                    usage = res.total_tokens
-                except Exception:
-                    pass
-
-        if reply and self.temper_verifier is None:
-            passed = not re.search(
-                r"\b(fail|failed|reject|rejected|defect|violation|blocker)\b",
-                reply,
-                re.IGNORECASE,
-            )
-            self.state.record_tokens(ForgeStage.TEMPER, usage)
-            self._finish_temper_turn(stage, reply, streamed)
-            self.state.clear_live_activity(stage)
-            return CycleVerdict(passed=passed, feedback=reply, deliverable=reply), reply
-
-        await asyncio.sleep(0)
-        self.state.record_tokens(ForgeStage.TEMPER, usage)
-
-        if self.temper_verifier is not None:
-            verdict = self.temper_verifier(self.state.cycle_count, original_prompt)
-        else:
-            verdict = CycleVerdict(
-                passed=True,
-                feedback="All criteria passed verification.",
-                deliverable=(
-                    f"Final Deliverable for: '{original_prompt}'\n\n"
-                    f"✔ Completed in Cycle #{self.state.cycle_count}.\n"
-                    f"✔ Code modifications verified with zero mutation escapes.\n"
-                    f"✔ Adversarial QA gatekeeper approval: PASSED."
-                ),
-            )
-        deliverable = verdict.deliverable or (
-            f"Verified Deliverable for '{original_prompt}' (Cycle #{self.state.cycle_count})."
+        return (
+            CycleVerdict(passed=all_met, feedback=audit_text, deliverable=report),
+            report,
         )
-        self._finish_temper_turn(stage, reply or deliverable, streamed)
-        self.state.clear_live_activity(stage)
-        return verdict, deliverable
 
     def _finish_temper_turn(self, stage: ForgeStage, text: str, streamed: bool) -> None:
         """Commit Temper's role-pure QA verdict as the permanent (transient-free) viewport turn."""
@@ -1444,11 +1729,6 @@ class ForgeCycleController:
             return await self._handle_resume_command(argument)
         if command == "/restart":
             return await self._handle_restart_command()
-        if command == "/key":
-            return await self._handle_key_command(argument)
-        if command == "/model":
-            text = await self._handle_model_command(argument)
-            return self._emit_command_output(command, text)
         if command == "/config":
             return await self._handle_config_command()
         if command == "/mode":
@@ -1532,44 +1812,11 @@ class ForgeCycleController:
         binding = manager.set_stage_model("all", f"{name.value}/{manager.provider(name).default_model}")
         await self.refresh_models()
         text = (
-            f"✔ All stages now target {binding.provider.value} "
+            f"[OK] All stages now target {binding.provider.value} "
             f"({manager.provider(name).base_url}).\n"
-            f"  anvil | hammer | temper → {binding.spec_string} [{binding.model_tier.value}]"
+            f"  anvil | hammer | temper -> {binding.spec_string} [{binding.model_tier.value}]"
         )
         return self._emit_command_output("/provider", text)
-
-    async def _handle_key_command(self, argument: str) -> str:
-        """``/key`` shows provider auth status; ``/key <provider> <api_key>`` stores a key."""
-        from forge.config.settings import ProviderName
-
-        manager = self._config_manager()
-        tokens = argument.split()
-        if not tokens:
-            return self._emit_command_output("/key", self._key_status_text(manager))
-        if len(tokens) < 2 or not tokens[1].strip():
-            return self._emit_command_output(
-                "/key",
-                "Usage: /key <provider> <api_key>   e.g. /key gemini AIzaSy... "
-                "or /key openrouter sk-or-v1-...",
-                status="failed",
-            )
-
-        try:
-            name = ProviderName(tokens[0].lower())
-        except ValueError:
-            return self._emit_command_output(
-                "/key",
-                f"Unknown provider {tokens[0]!r}. Supported: {', '.join(p.value for p in ProviderName)}.",
-                status="failed",
-            )
-
-        manager.set_api_key(name, tokens[1].strip())
-        refresh = await self.refresh_models()
-        text = (
-            f"✔ {name.value} API key saved ({manager.masked_key(name)}) to {manager.config_path}.\n"
-            f"  Attached default model: {manager.provider(name).default_model}\n\n{refresh}"
-        )
-        return self._emit_command_output("/key", text)
 
     async def _handle_config_command(self) -> str:
         """Render the full (masked) persistent configuration and its file path (``/config``)."""
@@ -1581,13 +1828,7 @@ class ForgeCycleController:
         tokens = argument.split()
         if not tokens:
             if self.model_picker is None:
-                return self._emit_command_output(
-                    "/models",
-                    "The interactive model picker is only available inside the full-screen "
-                    "workspace. Run `forge models config` from your terminal to configure "
-                    "roles, or use `/models <stage> <provider>/<model>` for a non-interactive switch.",
-                    status="failed",
-                )
+                return self._emit_command_output("/models", self._model_matrix_text())
             summary = await self.model_picker(None)
             refresh = await self.refresh_models()
             return self._emit_command_output("/models", f"{summary}\n\n{refresh}")
@@ -1608,12 +1849,10 @@ class ForgeCycleController:
                     summary = await self.model_picker(stage.value)
                     refresh = await self.refresh_models()
                     return self._emit_command_output("/models", f"{summary}\n\n{refresh}")
+                matrix = self._model_matrix_text()
                 return self._emit_command_output(
                     "/models",
-                    "The interactive model picker is only available inside the full-screen "
-                    "workspace. Run `forge models config` from your terminal to configure "
-                    "roles, or use `/models <stage> <provider>/<model>` for a non-interactive switch.",
-                    status="failed",
+                    f"Stage: {stage.value.lower()}\n\n{matrix}",
                 )
             if "/" in tokens[0]:
                 text = await self._apply_model_spec("all", tokens[0])
@@ -1630,33 +1869,62 @@ class ForgeCycleController:
         text = await self._apply_model_spec(target, tokens[1])
         return self._emit_command_output("/models", text)
 
+    def render_usage_report(self) -> str:
+        """Render the required three-part accounting: agents, cycles, session total."""
+        agents = {stage.value.lower(): {"input": 0, "output": 0, "total": 0} for stage in ForgeStage}
+        for cycle_stages in self.state.cycle_usage.values():
+            for stage_name, usage in cycle_stages.items():
+                target = agents.setdefault(
+                    stage_name, {"input": 0, "output": 0, "total": 0}
+                )
+                target["input"] += int(usage.get("input", 0))
+                target["output"] += int(usage.get("output", 0))
+                target["total"] += int(usage.get("total", 0))
+
+        lines = [
+            "Forge Usage Accounting",
+            f"Session: {self.session_id}   Cycle :- {self.state.cycle_count}",
+            "",
+            "Per Agent:",
+        ]
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            usage = agents[stage.value.lower()]
+            lines.append(
+                f"  {stage.value:<7} input {usage['input']:>10,}  "
+                f"output {usage['output']:>10,}  total {usage['total']:>10,}"
+            )
+
+        lines.extend(["", "Per Cycle:"])
+        cycle_items = sorted(self.state.cycle_usage.items())
+        if cycle_items:
+            for cycle, cycle_stages in cycle_items:
+                cycle_input = sum(int(item.get("input", 0)) for item in cycle_stages.values())
+                cycle_output = sum(int(item.get("output", 0)) for item in cycle_stages.values())
+                cycle_total = sum(int(item.get("total", 0)) for item in cycle_stages.values())
+                lines.append(
+                    f"  Cycle :- {cycle:<3} input {cycle_input:>10,}  "
+                    f"output {cycle_output:>10,}  total {cycle_total:>10,}"
+                )
+        else:
+            lines.append("  (no cycles executed in this session)")
+
+        lines.extend(
+            [
+                "",
+                "Session Grand Total:",
+                f"  input {self.state.total_session_input_tokens:>12,}  "
+                f"output {self.state.total_session_output_tokens:>12,}  "
+                f"total {self.state.total_session_tokens:>12,}",
+            ]
+        )
+        return "\n".join(lines)
+
     async def _handle_usage_command(self, argument: str = "") -> str:
-        """Display provider-grade API usage and cost telemetry dashboard (``/usage``)."""
-        arg = argument.strip().lower() or "all"
+        """Display per-agent, per-cycle and session accounting (``/usage``)."""
         if self.usage_viewer is not None and not argument.strip():
             await self.usage_viewer()
             return "Opened API Usage & Telemetry Dashboard."
-
-        from forge.config.usage_tracker import get_usage_tracker
-
-        tracker = get_usage_tracker()
-        openrouter_key = None
-        if self.config_manager:
-            openrouter_key = self.config_manager.api_key_for("openrouter")
-        live_credits = None
-        if openrouter_key:
-            from forge.config.usage_tracker import fetch_openrouter_credits
-
-            credits = await fetch_openrouter_credits(openrouter_key)
-            if credits:
-                live_credits = {"openrouter": credits}
-
-        text = tracker.render_dashboard_text(
-            session_id=self.session_id,
-            time_window=arg,
-            live_credits=live_credits,
-        )
-        return self._emit_command_output("/usage", text)
+        return self._emit_command_output("/usage", self.render_usage_report())
 
     async def _handle_resume_command(self, argument: str = "") -> str:
         """Resume conversation from global ~/.forge/sessions/ store (``/resume``)."""
@@ -1690,7 +1958,15 @@ class ForgeCycleController:
         ok = store.restore_session(arg, self.state)
         if ok:
             self.session_id = arg
-            text = f"✔ Restored session [{arg}] into live Forge workspace."
+            for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+                self.conversation_history[stage] = [
+                    {
+                        "role": "user" if speaker.strip().lower() in {"you", "user"} else "assistant",
+                        "content": message,
+                    }
+                    for speaker, message in self.state.stage_buffers[stage].chat_history
+                ]
+            text = f"[OK] Restored session [{arg}] into live Forge workspace."
             return self._emit_command_output("/resume", text)
         return self._emit_command_output(
             "/resume", f"Session [{arg}] not found in ~/.forge/sessions/.", status="failed"
@@ -1707,6 +1983,9 @@ class ForgeCycleController:
             self.config_manager.save()
 
         self.state.reset_view()
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            self.conversation_history[stage].clear()
+            self._history[stage].clear()
         if "PYTEST_CURRENT_TEST" in os.environ:
             return self._emit_command_output("/restart", "Restarting Forge workspace fresh from scratch.")
 
@@ -1789,45 +2068,22 @@ class ForgeCycleController:
                 lines.append(f"  • {stage.value}: {label} ({exc})")
         return "\n".join(lines)
 
-    async def _handle_model_command(self, argument: str) -> str:
-        """List/choose models: ``/model``, ``/model <prov>/<model>``, ``/model <stage|all> ...``."""
-        arg = argument.strip()
-        if not arg:
-            return self._model_list_text()
-
-        tokens = arg.split()
-        head = tokens[0].lower()
-        if head == "list":
-            provider_token = tokens[1] if len(tokens) > 1 else None
-            return await self._list_live_models(provider_token)
-        if head == "test":
-            return await self._test_stage_models()
-
-        if len(tokens) == 1:
-            # ``/model gemini/gemini-2.5-flash`` -> switch ALL stages at once.
-            return await self._apply_model_spec("all", tokens[0])
-
-        if head == "all":
-            return await self._apply_model_spec("all", tokens[1])
-
-        stage = _STAGE_ALIASES.get(head)
-        if stage is None:
-            return (
-                f"Unknown stage {head!r}. Use one of: anvil | hammer | temper | all "
-                "(aliases: orchestrator | executor | qa)."
-            )
-        return await self._apply_model_spec(stage.value.lower(), tokens[1])
-
     async def _apply_model_spec(self, target: str, spec: str) -> str:
         """Persist a ``provider/model`` binding to a stage (or all) and rebind live adapters."""
         from forge.config.settings import parse_provider_model
+
+        if target != "all" and target not in _STAGE_BY_NAME:
+            return (
+                f"Unknown stage '{target}'. Valid stages: anvil, hammer, temper, all."
+            )
 
         try:
             provider_enum, model = parse_provider_model(spec)
         except ValueError:
             return (
-                "Usage: /model <stage|all> <provider>/<model>   "
-                "e.g. /model anvil gemini/gemini-2.5-pro or /model ollama/qwen2.5-coder:7b"
+                "Usage: /models <stage|all> <provider>/<model>   "
+                "e.g. /models anvil gemini/gemini-2.5-pro or "
+                "/models ollama/qwen2.5-coder:7b"
             )
 
         provider_value = provider_enum.value
@@ -1835,7 +2091,7 @@ class ForgeCycleController:
         if self.config_manager is not None:
             binding = self.config_manager.set_stage_model(target, spec)
             lines.append(
-                f"✔ Persisted {binding.spec_string} [{binding.model_tier.value}] to "
+                f"[OK] Persisted {binding.spec_string} [{binding.model_tier.value}] to "
                 f"{self.config_manager.config_path}"
             )
 
@@ -1849,7 +2105,7 @@ class ForgeCycleController:
         return "\n".join(lines)
 
     async def _list_live_models(self, provider_token: str | None) -> str:
-        """Query and display a provider's live model catalog (``/model list [provider]``)."""
+        """Query and display a provider's live model catalog (``/models list [provider]``)."""
         from forge.config.settings import ProviderName
 
         if provider_token:
@@ -1875,7 +2131,7 @@ class ForgeCycleController:
         return "\n".join(lines)
 
     async def _test_stage_models(self) -> str:
-        """Ping every configured stage model and report live latency (``/model test``)."""
+        """Ping every configured stage model and report live latency (``/models test``)."""
         client = self._llm_client()
         lines = ["Connection tests:"]
         for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
@@ -1884,7 +2140,7 @@ class ForgeCycleController:
                 lines.append(f"  ○ {stage.value:<7}: (no model attached)")
                 continue
             ok, detail = await client.test_connection(binding)
-            mark = "✔" if ok else "✖"
+            mark = "[OK]" if ok else "[X]"
             lines.append(f"  {mark} {stage.value:<7}: {binding.spec_string} — {detail}")
         return "\n".join(lines)
 
@@ -1919,9 +2175,9 @@ class ForgeCycleController:
             adapter = await self.registry.adapter(role, events=events)
             if agent is not None:
                 agent.adapter = adapter
-            return f"✔ {stage.value} now uses {adapter.describe()}"
+            return f"[OK] {stage.value} now uses {adapter.describe()}"
         except Exception:
-            return f"✔ {stage.value} bound to {resolved_provider}/{model} (unified client active)"
+            return f"[OK] {stage.value} bound to {resolved_provider}/{model} (unified client active)"
 
     def current_model_label(self) -> str:
         """Short model id for the currently viewed stage (falls back to any attached stage)."""
@@ -1967,6 +2223,39 @@ class ForgeCycleController:
             )
         return self.llm_client
 
+    def _model_matrix_text(self) -> str:
+        """Aggregate every connected provider's models and show independent stage bindings."""
+        manager = self._config_manager()
+        lines = ["Forge Model Matrix", ""]
+        connected = manager.get_connected_providers()
+        lines.append(
+            "Connected providers: "
+            + (", ".join(provider.value for provider in connected) or "(none)")
+        )
+        aggregated = manager.get_aggregated_models()
+        lines.append("")
+        lines.append("Available models:")
+        if aggregated:
+            for provider, model in aggregated:
+                lines.append(f"  {provider.value}/{model}")
+        else:
+            lines.append("  (connect a provider with /provider to aggregate its models)")
+        lines.append("")
+        lines.append("Stage bindings:")
+        for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            binding = manager.binding_for(stage.value.lower())
+            label = binding.spec_string if binding is not None else "(no model attached)"
+            lines.append(f"  {stage.value:<7}: {label}")
+        lines.extend(
+            [
+                "",
+                "Use `/models <stage> <provider>/<model>` to rebind one stage, or "
+                "`/models all <provider>/<model>` to fan out.",
+                "Run `forge models config` for the terminal picker.",
+            ]
+        )
+        return "\n".join(lines)
+
     def _model_list_text(self) -> str:
         lines = ["Forge Model Bindings:"]
         for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
@@ -1998,10 +2287,10 @@ class ForgeCycleController:
         lines.append(f"Providers: {', '.join(providers)}")
         lines.append("Stages: anvil | hammer | temper | all")
         lines.append("Examples:")
-        lines.append("  /model gemini/gemini-2.5-flash        (all stages)")
-        lines.append("  /model anvil gemini/gemini-2.5-pro    (one stage)")
-        lines.append("  /model hammer ollama/qwen2.5-coder:7b")
-        lines.append("  /model list openrouter   ·   /model test")
+        lines.append("  /models gemini/gemini-2.5-flash        (all stages)")
+        lines.append("  /models anvil gemini/gemini-2.5-pro    (one stage)")
+        lines.append("  /models hammer ollama/qwen2.5-coder:7b")
+        lines.append("  /models list openrouter   ·   /models test")
         return "\n".join(lines)
 
     def _provider_table_text(self) -> str:
@@ -2011,7 +2300,7 @@ class ForgeCycleController:
         manager = self._config_manager()
         width = max(len(name.value) for name in ProviderName)
         lines = [
-            "Forge Providers  (add one with `forge provider`, or `/key <provider> <api_key>`):",
+            "Forge Providers  (connect with `forge provider` or the `/provider` wizard):",
             "",
         ]
         for name in ProviderName:
@@ -2021,45 +2310,23 @@ class ForgeCycleController:
                 f"  {name.value:<{width}}  {status:<12}  {cfg.base_url}  (default: {cfg.default_model})"
             )
         lines.append("")
-        lines.append("Switch: /provider <name> [base_url]   ·   Key: /key <name> <api_key>")
-        return "\n".join(lines)
-
-    def _key_status_text(self, manager: ForgeConfigManager) -> str:
-        """Auth status of all providers, keys masked (``/key``)."""
-        from forge.config.settings import ProviderName
-
-        width = max(len(name.value) for name in ProviderName)
-        lines = ["Provider API keys:", ""]
-        for name in ProviderName:
-            cfg = manager.provider(name)
-            if name is ProviderName.OLLAMA:
-                state = "LOCAL (no key required)"
-            elif cfg.api_key:
-                state = f"CONFIGURED ({cfg.masked_key()})"
-            else:
-                state = "NOT SET"
-            lines.append(f"  {name.value:<{width}}  {state}")
-        lines.append("")
-        lines.append(f"Config file: {manager.config_path}")
-        lines.append("Set a key: /key <provider> <api_key>")
+        lines.append("Connect: /provider   ·   Bind models: /models")
         return "\n".join(lines)
 
     def _help_text(self) -> str:
         rows = [
             ("/help", "Show this command reference"),
-            ("/status", "Provider/model, connection status, cycle & token telemetry"),
             ("/provider", "Connect, configure or disconnect model providers"),
             ("/models [stage]", "Assign connected models to Anvil, Hammer, Temper"),
-            ("/usage [all|today|session]", "Provider API usage & cost telemetry dashboard"),
-            ("/resume [session_id]", "Resume past conversation from global session store"),
-            ("/restart", "Cleanly flush state and restart Forge workspace"),
-            ("/config", "Show the persistent ~/.forge/config.json (keys masked)"),
+            ("/usage [all|today|session]", "Per-agent, per-cycle and session usage accounting"),
+            ("/resume [session_id]", "Resume a conversation from ~/.forge/sessions/"),
+            ("/restart", "Flush state and restart Forge in place"),
             ("/mode [auto|chat|cycle]", "Switch adaptive execution mode"),
-            ("/cycle <task> | /forge <task>", "Force a full Anvil -> Hammer -> Temper cycle"),
-            ("/research <topic>", "Run the STORM deep research pipeline"),
-            ("/clear", "Clear the active stage viewport and its tokens"),
+            ("/cycle <task>", "Plan a task, then run Anvil -> Hammer -> Temper autonomously"),
+            ("/research <topic>", "Run the deep research pipeline"),
+            ("/clear", "Clear the active stage viewport"),
             ("/reset", "Reset the whole session (Cycle #1, all buffers)"),
-            ("/quit | /exit", "Exit the Forge workspace"),
+            ("/exit", "Exit the Forge workspace"),
             ("!<shell command>", "Run a real shell command (e.g. !pytest -q)"),
         ]
         width = max(len(name) for name, _ in rows)
@@ -2121,5 +2388,14 @@ class ForgeCycleController:
             tokens = self.state.stage_buffers[stage].stage_tokens
             lines.append(f"    {stage.value:<7}: {label}{suffix}  [tokens: {tokens:,}]")
         lines.append("")
-        lines.append(f"  Session total tokens: {self.state.total_session_tokens:,}")
+        lines.append(
+            f"  Session tokens: {self.state.total_session_tokens:,} "
+            f"(input {self.state.total_session_input_tokens:,} / "
+            f"output {self.state.total_session_output_tokens:,})"
+        )
+        if self.state.pending_plan is not None:
+            lines.append(
+                f"  Plan: revision {self.state.pending_plan.revision} awaiting approval "
+                f"({len(self.state.pending_plan.requirements)} requirements)"
+            )
         return "\n".join(lines)

@@ -43,6 +43,48 @@ class UserQuestion:
     future: asyncio.Future[str] | None = None
 
 
+@dataclass
+class PlanRequirement:
+    """A single acceptance requirement extracted from an approved plan."""
+
+    req_id: str
+    text: str
+    met: bool = False
+    evidence: str = ""
+
+    def checklist_line(self) -> str:
+        """Render a deterministic, audit-friendly checklist line."""
+        mark = "[✓]" if self.met else "[✗]"
+        suffix = f"  {self.evidence.strip()}" if self.evidence.strip() else ""
+        return f"{mark} {self.req_id}: {self.text}{suffix}"
+
+
+@dataclass
+class PendingPlan:
+    """Structured plan awaiting semantic approval before autonomous execution."""
+
+    request: str
+    plan_text: str
+    requirements: list[PlanRequirement] = field(default_factory=list)
+    revision: int = 1
+
+    @property
+    def all_requirements_met(self) -> bool:
+        """True only when every acceptance requirement has been verified."""
+        return bool(self.requirements) and all(req.met for req in self.requirements)
+
+    def checklist_text(self) -> str:
+        """Render the full requirement checklist in stable REQ order."""
+        return "\n".join(req.checklist_line() for req in self.requirements)
+
+    def render(self) -> str:
+        """Render the plan plus its requirement contract for the viewport."""
+        checklist = self.checklist_text()
+        if checklist:
+            return f"{self.plan_text.strip()}\n\nRequirements:\n{checklist}"
+        return self.plan_text.strip()
+
+
 def format_tokens(count: int) -> str:
     """Format token count into compact human-readable string (e.g. 840, 3.2k, 125.4k, 1.40M)."""
     if count < 0:
@@ -261,6 +303,8 @@ class StageBuffer:
     chat_history: list[tuple[str, str]] = field(default_factory=list)
     final_output: str = ""
     stage_tokens: int = 0
+    stage_input_tokens: int = 0
+    stage_output_tokens: int = 0
     scroll_line: int = 0
     scroll_offset: int = 0
     total_rendered_lines: int = 0
@@ -403,9 +447,15 @@ class ForgeTUIState:
         self.cycle_count: int = 1
         self.cycle_mode: CycleMode = CycleMode.UNTIL_FULFILLED
         self.pending_question: UserQuestion | None = None
+        self.pending_plan: PendingPlan | None = None
+        self.all_requirements_met: bool = False
         self.viewing_history_cycle: int | None = None
         self.active_stage_tokens: int = 0
         self.total_session_tokens: int = 0
+        self.total_session_input_tokens: int = 0
+        self.total_session_output_tokens: int = 0
+        # Real per-cycle usage: ``{cycle_number: {stage: {input, output, total}}}``.
+        self.cycle_usage: dict[int, dict[str, dict[str, int]]] = {}
 
         self.stage_buffers: dict[ForgeStage, StageBuffer] = {
             ForgeStage.ANVIL: StageBuffer(stage=ForgeStage.ANVIL),
@@ -426,8 +476,10 @@ class ForgeTUIState:
         if stage is not None:
             buffer = self.stage_buffers[stage]
             if reset_tokens:
-                # Reset current-cycle stage token counter to 0 for this stage
+                # Reset current-cycle stage token counters for this stage
                 buffer.stage_tokens = 0
+                buffer.stage_input_tokens = 0
+                buffer.stage_output_tokens = 0
             self.active_stage_tokens = buffer.stage_tokens
             buffer.status = "running"
             if self.auto_follow:
@@ -476,6 +528,8 @@ class ForgeTUIState:
         buffer.tool_events.clear()
         buffer.final_output = ""
         buffer.stage_tokens = 0
+        buffer.stage_input_tokens = 0
+        buffer.stage_output_tokens = 0
         buffer.scroll_line = 0
         buffer.scroll_offset = 0
         buffer.total_rendered_lines = 0
@@ -494,6 +548,12 @@ class ForgeTUIState:
         self.selected_view_stage = ForgeStage.ANVIL
         self.auto_follow = True
         self.pending_question = None
+        self.pending_plan = None
+        self.all_requirements_met = False
+        self.total_session_tokens = 0
+        self.total_session_input_tokens = 0
+        self.total_session_output_tokens = 0
+        self.cycle_usage.clear()
         self.stage_buffers = {
             stage: StageBuffer(stage=stage)
             for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER)
@@ -560,14 +620,48 @@ class ForgeTUIState:
         self.stage_buffers[stage].status = status
         self._notify_redraw()
 
-    def record_tokens(self, stage: ForgeStage, delta_tokens: int) -> None:
-        """Record token usage: updates stage buffer, active stage tokens, and session total."""
-        self.stage_buffers[stage].stage_tokens += delta_tokens
+    def record_tokens(
+        self,
+        stage: ForgeStage,
+        delta_tokens: int,
+        *,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
+        """Record real usage across the stage, active cycle, and session totals."""
+        total = max(0, delta_tokens)
+        input_tokens = max(0, prompt_tokens)
+        output_tokens = max(0, completion_tokens)
+        if total == 0:
+            total = input_tokens + output_tokens
+        if input_tokens == 0 and output_tokens == 0:
+            output_tokens = total
+        elif input_tokens + output_tokens != total:
+            output_tokens = max(0, total - input_tokens)
+
+        buffer = self.stage_buffers[stage]
+        buffer.stage_tokens += total
+        buffer.stage_input_tokens += input_tokens
+        buffer.stage_output_tokens += output_tokens
         if self.active_worker_stage == stage or (
             self.active_worker_stage is None and self.selected_view_stage == stage
         ):
-            self.active_stage_tokens = self.stage_buffers[stage].stage_tokens
-        self.total_session_tokens += delta_tokens
+            self.active_stage_tokens = buffer.stage_tokens
+        self.total_session_tokens += total
+        self.total_session_input_tokens += input_tokens
+        self.total_session_output_tokens += output_tokens
+
+        cycle = self.cycle_usage.setdefault(self.cycle_count, {})
+        stage_key = stage.value.lower()
+        usage = cycle.setdefault(stage_key, {"input": 0, "output": 0, "total": 0})
+        usage["input"] += input_tokens
+        usage["output"] += output_tokens
+        usage["total"] += total
+        self._notify_redraw()
+
+    def set_pending_plan(self, plan: PendingPlan | None) -> None:
+        """Attach or clear the structured plan awaiting semantic approval."""
+        self.pending_plan = plan
         self._notify_redraw()
 
     def advance_to_next_cycle(self, temper_feedback: str) -> None:
@@ -576,6 +670,7 @@ class ForgeTUIState:
             s: copy.copy(buf) for s, buf in self.stage_buffers.items()
         }
         self.cycle_count += 1
+        self.all_requirements_met = False
         self.stage_buffers = {
             ForgeStage.ANVIL: StageBuffer(stage=ForgeStage.ANVIL),
             ForgeStage.HAMMER: StageBuffer(stage=ForgeStage.HAMMER),

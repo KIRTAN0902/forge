@@ -115,7 +115,9 @@ async def test_complex_task_triggers_full_forge_cycle() -> None:
 
     assert classify_intent(prompt) == ExecutionMode.FULL_FORGE_CYCLE
 
-    result = await controller.run_cycle_loop(prompt)
+    plan = await controller.run_cycle_loop(prompt)
+    assert "Final Plan" in plan
+    result = await controller.run_cycle_loop("approve")
 
     assert controller.last_mode == ExecutionMode.FULL_FORGE_CYCLE
     assert state.cycle_count == 1

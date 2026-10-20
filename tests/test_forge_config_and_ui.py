@@ -116,21 +116,11 @@ def test_config_persistence_and_key_management(
 
 
 @pytest.mark.asyncio
-async def test_slash_commands_key_provider_model_config(
+async def test_slash_commands_provider_models_and_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
     controller = ForgeCycleController(state=ForgeTUIState(), config_manager=manager)
-
-    # ``/key <provider> <key>`` saves the credential and reports it masked.
-    key_out = await controller.handle_slash_command("/key deepseek sk-deepseek-secret")
-    assert "API key saved" in key_out
-    assert "sk-d...****" in key_out
-    assert manager.api_key_for("deepseek") == "sk-deepseek-secret"
-
-    # ``/key`` with no argument shows status only.
-    status_out = await controller.handle_slash_command("/key")
-    assert "Provider API keys" in status_out
 
     # ``/provider`` (no wizard hook) prints the provider table.
     provider_out = await controller.handle_slash_command("/provider")
@@ -140,14 +130,14 @@ async def test_slash_commands_key_provider_model_config(
     config_out = await controller.handle_slash_command("/config")
     assert "Forge Configuration" in config_out
 
-    # ``/model`` persists a stage-scoped binding to the config engine.
-    await controller.handle_slash_command("/model anvil gemini/gemini-2.5-pro")
+    # ``/models`` persists a stage-scoped binding to the config engine.
+    await controller.handle_slash_command("/models anvil gemini/gemini-2.5-pro")
     anvil = manager.binding_for("anvil")
     assert anvil is not None
     assert anvil.spec_string == "gemini/gemini-2.5-pro"
 
-    # ``/model all`` fans the spec out across every stage.
-    await controller.handle_slash_command("/model all ollama/qwen2.5-coder:7b")
+    # ``/models all`` fans the spec out across every stage.
+    await controller.handle_slash_command("/models all ollama/qwen2.5-coder:7b")
     for stage in ("anvil", "hammer", "temper"):
         assert manager.binding_for(stage).spec_string == "ollama/qwen2.5-coder:7b"  # type: ignore[union-attr]
 

@@ -588,6 +588,10 @@ class UnifiedLLMClient:
         return result
 
 
+# Public compatibility name used by the specification and external integrations.
+ForgeLLMClient = UnifiedLLMClient
+
+
 # -- wire-format conversion --------------------------------------------------------------
 
 

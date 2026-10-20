@@ -30,6 +30,7 @@ from prompt_toolkit.layout.containers import (
     Window,
 )
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.processors import DynamicProcessor, PasswordProcessor
 from prompt_toolkit.widgets import Frame
 
 from forge.config.session_store import SessionSummary, get_session_store
@@ -147,6 +148,13 @@ class ForgeModalManager:
         self.input_control = BufferControl(
             buffer=self.input_buffer,
             key_bindings=self.input_kb,
+            input_processors=[
+                DynamicProcessor(
+                    lambda: PasswordProcessor()
+                    if self.input_mode in {"api_key", "custom_key"}
+                    else None
+                )
+            ],
         )
         self.input_field_window = Window(
             content=self.input_control,
@@ -573,7 +581,7 @@ class ForgeModalManager:
 
             # Persist immediately to config.json
             self.config_manager.set_stage_model(role_target, spec)
-            self.status_message = f"✔ Bound {role_target.upper()} ➔ {spec} (Live Active)"
+            self.status_message = f"[OK] Bound {role_target.upper()} -> {spec} (Live Active)"
 
             # Live activation without restart
             if self.app.controller:
@@ -611,7 +619,7 @@ class ForgeModalManager:
                 spec = f"{prov.value}/{model_name}"
 
                 self.config_manager.set_stage_model(role_target, spec)
-                self.status_message = f"✔ Bound {role_target.upper()} ➔ {spec} (Live Active)"
+                self.status_message = f"[OK] Bound {role_target.upper()} -> {spec} (Live Active)"
 
                 if self.app.controller:
                     self._create_task(self._activate_model_live(role_target, prov.value, model_name))
@@ -626,7 +634,7 @@ class ForgeModalManager:
         if self.input_mode == "api_key" and target_prov is not None:
             if text:
                 self.config_manager.set_api_key(target_prov, text)
-                self.status_message = f"✔ Saved API key for {PROVIDER_DISPLAY_NAMES[target_prov]}."
+                self.status_message = f"[OK] Saved API key for {PROVIDER_DISPLAY_NAMES[target_prov]}."
                 if self.app.controller:
                     self._create_task(self.app.controller.refresh_models())
             self.input_mode = None
@@ -639,14 +647,14 @@ class ForgeModalManager:
                 self.config_manager.set_base_url(target_prov, text)
             # Switch to prompting for custom API key
             self.input_mode = "custom_key"
-            self.input_buffer.text = self.config_manager.api_key_for(target_prov) or ""
+            self.input_buffer.text = ""
             self._focus_input()
             self._invalidate()
 
         elif self.input_mode == "custom_key" and target_prov is not None:
             if text:
                 self.config_manager.set_api_key(target_prov, text)
-            self.status_message = f"✔ Custom provider configured at {self.config_manager.provider(target_prov).base_url}."
+            self.status_message = f"[OK] Custom provider configured at {self.config_manager.provider(target_prov).base_url}."
             if self.app.controller:
                 self._create_task(self.app.controller.refresh_models())
             self.input_mode = None
@@ -657,7 +665,7 @@ class ForgeModalManager:
         elif self.input_mode == "ollama_url" and target_prov is not None:
             if text:
                 self.config_manager.set_base_url(target_prov, text)
-            self.status_message = f"✔ Ollama endpoint updated to {text}."
+            self.status_message = f"[OK] Ollama endpoint updated to {text}."
             if self.app.controller:
                 self._create_task(self.app.controller.refresh_models())
             self.input_mode = None
@@ -682,7 +690,7 @@ class ForgeModalManager:
     def _render_input_prompt(self) -> AnyFormattedText:
         prov_name = PROVIDER_DISPLAY_NAMES.get(self.active_provider_target or ProviderName.GEMINI, "")
         if self.input_mode == "api_key":
-            return [("class:modal_prompt", f" Enter API Key for {prov_name}: ")]
+            return [("class:modal_prompt", f" Enter API Key (masked) for {prov_name}: ")]
         if self.input_mode == "custom_url":
             return [("class:modal_prompt", " Base URI/URL (e.g. http://localhost:8000/v1): ")]
         if self.input_mode == "custom_key":
@@ -690,7 +698,7 @@ class ForgeModalManager:
         if self.input_mode == "ollama_url":
             return [("class:modal_prompt", " Ollama Base URL: ")]
         if self.input_mode == "model_search":
-            return [("class:modal_prompt", " 🔍 Search / Filter models: ")]
+            return [("class:modal_prompt", " [SEARCH] Search / Filter models: ")]
         return [("class:modal_prompt", " Input: ")]
 
     def _render_body(self) -> StyleAndTextTuples:
@@ -788,12 +796,12 @@ class ForgeModalManager:
         filtered_count = len(models)
 
         if self.input_mode == "model_search":
-            search_badge = " [🔍 SEARCHING] "
+            search_badge = " [[SEARCH] SEARCHING] "
             search_text = f"Query: \"{self.model_search_query}\" ({filtered_count}/{total_count} models) - type query below"
             frags.append(("class:modal_tab_active", search_badge))
             frags.append(("class:modal_prompt", f" {search_text}\n"))
         elif self.model_search_query:
-            search_badge = " [🔍 FILTERED] "
+            search_badge = " [[SEARCH] FILTERED] "
             search_text = f"Query: \"{self.model_search_query}\" ({filtered_count}/{total_count} models) - [/] to edit, [c] to clear"
             frags.append(("class:modal_tab_active", search_badge))
             frags.append(("class:modal_prompt", f" {search_text}\n"))
@@ -896,12 +904,17 @@ class ForgeModalManager:
         frags.append(("", "\n"))
         frags.append(("class:border", "─" * 82 + "\n"))
 
-        # Render usage report
-        tracker = get_usage_tracker()
-        session_id = getattr(self.app.controller, "session_id", None)
-        text = tracker.render_dashboard_text(session_id=session_id, time_window=win)
+        # Render the controller's live three-part accounting when available.
+        controller = self.app.controller
+        renderer = getattr(controller, "render_usage_report", None)
+        if callable(renderer):
+            text = str(renderer())
+        else:
+            tracker = get_usage_tracker()
+            session_id = getattr(controller, "session_id", None)
+            text = tracker.render_dashboard_text(session_id=session_id, time_window=win)
 
-        for line in text.splitlines()[:14]:
+        for line in text.splitlines()[:24]:
             frags.append(("class:modal_item", f" {line}\n"))
 
         frags.append(("class:border", "─" * 82 + "\n"))
