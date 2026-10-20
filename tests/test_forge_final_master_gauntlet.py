@@ -17,12 +17,20 @@ from forge.config.session_store import SessionStore
 from forge.config.settings import ForgeConfigManager, ProviderName
 from forge.ui.cycle_controller import (
     ForgeCycleController,
-    PlanIntent,
-    classify_plan_response,
     extract_plan_requirements,
+    parse_plan_evaluation,
 )
 from forge.ui.split_app import SLASH_COMMANDS, ForgeSplitPaneApp
-from forge.ui.state import ForgeStage, ForgeTUIState, PendingPlan, PlanRequirement
+from forge.ui.state import (
+    AnvilPlanEvaluation,
+    ForgeStage,
+    ForgeTUIState,
+    PendingPlan,
+    PendingPlanContract,
+    PlanRequirement,
+    PlanTurnIntent,
+    RequirementItem,
+)
 
 FORBIDDEN_EMOJI = ("🟦", "🟥", "🟩", "👁", "🎯", "💬", "👤", "⚡", "⚠", "🔍", "💾", "✔", "✖")
 
@@ -83,10 +91,20 @@ def _plan_text() -> str:
     )
 
 
+def _evaluation(intent: PlanTurnIntent, **updates: Any) -> str:
+    payload: dict[str, Any] = {
+        "intent": intent.value,
+        "reasoning_summary": "structured test adjudication",
+    }
+    payload.update(updates)
+    return json.dumps(payload)
+
+
 def _multicycle_scripts() -> dict[str, list[str]]:
     return {
         "anvil": [
             _plan_text(),
+            _evaluation(PlanTurnIntent.APPROVE_AS_IS),
             "Cycle 1 plan: implement export endpoint.",
             "Cycle 2 remediation: add the missing empty-export test.",
         ],
@@ -168,18 +186,68 @@ def test_models_aggregates_connected_providers_and_binds_stages_independently(
     assert manager.binding_for("temper").spec_string == "openrouter/anthropic/claude-3.5-sonnet"  # type: ignore[union-attr]
 
 
-def test_semantic_plan_approval_outcomes() -> None:
-    assert classify_plan_response("APPROVE") is PlanIntent.APPROVE_AS_IS
-    assert classify_plan_response("looks good, go ahead") is PlanIntent.APPROVE_AS_IS
-    assert (
-        classify_plan_response("use B instead of A, but anyways proceed")
-        is PlanIntent.MODIFY_AND_PROCEED
+def test_semantic_plan_approval_contract() -> None:
+    for intent in PlanTurnIntent:
+        evaluation = parse_plan_evaluation(_evaluation(intent))
+        assert evaluation.intent is intent
+
+    cancel = parse_plan_evaluation(
+        _evaluation(PlanTurnIntent.CANCEL_PLAN, reasoning_summary="abandoned")
     )
-    assert (
-        classify_plan_response("change the storage layer to SQLite and wait for my approval")
-        is PlanIntent.MODIFY_AND_WAIT
+    assert cancel.intent is PlanTurnIntent.CANCEL_PLAN
+
+    contract = PendingPlanContract(
+        problem_statement="Export profiles",
+        plan_summary_markdown="1. Build the endpoint.",
+        target_files=["src/export.py"],
+        requirements_checklist=[
+            RequirementItem(req_id="REQ-1", description="Export works"),
+        ],
     )
-    assert classify_plan_response("What does REQ-2 actually verify?") is PlanIntent.QUESTION_OR_CHAT
+    plan = PendingPlan.from_contract(contract, revision=2)
+    assert plan.revision == 2
+    assert plan.target_files == ["src/export.py"]
+    assert plan.to_contract().requirements_checklist[0].description == "Export works"
+
+
+@pytest.mark.asyncio
+async def test_pending_plan_routes_anvil_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = ForgeTUIState()
+    controller = ForgeCycleController(state=state)
+    plan = PendingPlan(
+        request="Ship export",
+        plan_text="1. Build it.",
+        requirements=[PlanRequirement("REQ-1", "Export works")],
+    )
+    calls: list[str] = []
+
+    async def fake_evaluate(
+        pending: PendingPlan, response: str
+    ) -> AnvilPlanEvaluation:
+        return AnvilPlanEvaluation(intent=PlanTurnIntent.MODIFY_AND_PROCEED)
+
+    async def fake_revise(pending: PendingPlan, feedback: str) -> PendingPlan:
+        revised = PendingPlan(
+            request=pending.request,
+            plan_text=f"{pending.plan_text}\n{feedback}",
+            requirements=pending.requirements,
+            revision=pending.revision + 1,
+        )
+        calls.append("revise")
+        return revised
+
+    async def fake_run(pending: PendingPlan) -> str:
+        calls.append("run")
+        state.set_pending_plan(None)
+        return "autonomous"
+
+    monkeypatch.setattr(controller, "_evaluate_plan_turn", fake_evaluate)
+    monkeypatch.setattr(controller, "_revise_plan", fake_revise)
+    monkeypatch.setattr(controller, "_run_autonomous_cycle", fake_run)
+    state.set_pending_plan(plan)
+
+    assert await controller.run_cycle_loop("proceed with the change") == "autonomous"
+    assert calls == ["revise", "run"]
 
 
 def test_requirement_extraction_is_stable_and_ordered() -> None:

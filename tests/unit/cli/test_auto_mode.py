@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from rich.console import Console
 
-from forge.agents.orchestrator import EXECUTION_CONFIRM_TRIGGERS
 from forge.cli.chat import (
     ChatSessionState,
     _get_bottom_toolbar,
@@ -97,12 +96,10 @@ async def test_auto_approver_approves_without_prompt() -> None:
     assert "run_command" in output
 
 
-def test_execution_confirm_triggers_includes_begin_and_start() -> None:
-    assert "begin" in EXECUTION_CONFIRM_TRIGGERS
-    assert "orchestrator begin" in EXECUTION_CONFIRM_TRIGGERS
-    assert "start" in EXECUTION_CONFIRM_TRIGGERS
-    assert "let's begin" in EXECUTION_CONFIRM_TRIGGERS
-    assert "build it" in EXECUTION_CONFIRM_TRIGGERS
+def test_orchestrator_has_no_keyword_approval_gate() -> None:
+    import forge.agents.orchestrator as orchestrator_module
+
+    assert not hasattr(orchestrator_module, "EXECUTION_CONFIRM_TRIGGERS")
 
 
 def test_print_auto_mode_completion_renders_cleanly() -> None:

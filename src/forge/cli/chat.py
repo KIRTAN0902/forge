@@ -1471,19 +1471,9 @@ def run_chat_session(path: Path = Path(".")) -> None:
         else:
             turn_content = user_input
 
-        # Check if AUTO mode is active: autonomous Planning ➔ Execution ➔ QA without intermediate pauses
+        # AUTO mode runs the current request autonomously without an approval prompt.
         if session_state.auto_mode:
             req_text = user_input
-            # If user said "begin" or "start" and prior conversation history exists
-            if (
-                lower_input in {"begin", "start", "proceed", "go ahead", "orchestrator begin"}
-                and conversation_history
-            ):
-                recent_user_msgs = [
-                    m.text for m in conversation_history if m.role == "user" and m.text
-                ]
-                if recent_user_msgs:
-                    req_text = f"Execute request: {recent_user_msgs[-1]}"
 
             console.print(
                 Panel(

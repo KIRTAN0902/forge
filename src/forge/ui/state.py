@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.text import Text
 
@@ -43,6 +44,45 @@ class UserQuestion:
     future: asyncio.Future[str] | None = None
 
 
+class PlanTurnIntent(StrEnum):
+    """Semantic meaning of a developer's reply to a pending plan."""
+
+    APPROVE_AS_IS = "APPROVE_AS_IS"
+    MODIFY_AND_PROCEED = "MODIFY_AND_PROCEED"
+    MODIFY_AND_WAIT = "MODIFY_AND_WAIT"
+    QUESTION_OR_CHAT = "QUESTION_OR_CHAT"
+    CANCEL_PLAN = "CANCEL_PLAN"
+
+
+class RequirementItem(BaseModel):
+    """One independently verifiable item in Anvil's acceptance contract."""
+
+    req_id: str
+    description: str
+    completed: bool = False
+    verification_note: str = ""
+
+
+class PendingPlanContract(BaseModel):
+    """Structured plan contract presented to the developer for approval."""
+
+    problem_statement: str
+    plan_summary_markdown: str
+    target_files: list[str] = Field(default_factory=list)
+    requirements_checklist: list[RequirementItem] = Field(default_factory=list)
+
+
+class AnvilPlanEvaluation(BaseModel):
+    """Anvil's semantic adjudication of one reply to a pending plan."""
+
+    intent: PlanTurnIntent
+    reasoning_summary: str = ""
+    updated_plan_markdown: str | None = None
+    updated_target_files: list[str] | None = None
+    updated_requirements: list[RequirementItem] | None = None
+    conversational_reply: str | None = None
+
+
 @dataclass
 class PlanRequirement:
     """A single acceptance requirement extracted from an approved plan."""
@@ -58,6 +98,25 @@ class PlanRequirement:
         suffix = f"  {self.evidence.strip()}" if self.evidence.strip() else ""
         return f"{mark} {self.req_id}: {self.text}{suffix}"
 
+    @classmethod
+    def from_item(cls, item: RequirementItem) -> PlanRequirement:
+        """Adapt a Pydantic checklist item to the internal plan requirement."""
+        return cls(
+            req_id=item.req_id,
+            text=item.description,
+            met=item.completed,
+            evidence=item.verification_note,
+        )
+
+    def to_item(self) -> RequirementItem:
+        """Adapt this requirement to Anvil's structured contract."""
+        return RequirementItem(
+            req_id=self.req_id,
+            description=self.text,
+            completed=self.met,
+            verification_note=self.evidence,
+        )
+
 
 @dataclass
 class PendingPlan:
@@ -67,6 +126,7 @@ class PendingPlan:
     plan_text: str
     requirements: list[PlanRequirement] = field(default_factory=list)
     revision: int = 1
+    target_files: list[str] = field(default_factory=list)
 
     @property
     def all_requirements_met(self) -> bool:
@@ -83,6 +143,34 @@ class PendingPlan:
         if checklist:
             return f"{self.plan_text.strip()}\n\nRequirements:\n{checklist}"
         return self.plan_text.strip()
+
+    def to_contract(self) -> PendingPlanContract:
+        """Expose the plan as the Pydantic contract Anvil adjudicates."""
+        return PendingPlanContract(
+            problem_statement=self.request,
+            plan_summary_markdown=self.plan_text,
+            target_files=list(self.target_files),
+            requirements_checklist=[req.to_item() for req in self.requirements],
+        )
+
+    @classmethod
+    def from_contract(
+        cls,
+        contract: PendingPlanContract,
+        *,
+        revision: int = 1,
+    ) -> PendingPlan:
+        """Build the internal pending plan from Anvil's structured contract."""
+        return cls(
+            request=contract.problem_statement,
+            plan_text=contract.plan_summary_markdown,
+            requirements=[
+                PlanRequirement.from_item(item)
+                for item in contract.requirements_checklist
+            ],
+            revision=revision,
+            target_files=list(contract.target_files),
+        )
 
 
 def format_tokens(count: int) -> str:

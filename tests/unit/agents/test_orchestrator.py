@@ -71,7 +71,7 @@ async def test_orchestrator_handoff_with_tag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_handoff_with_user_confirmation() -> None:
+async def test_orchestrator_does_not_infer_handoff_from_keywords() -> None:
     provider = ScriptedProvider()
     provider.add("I will proceed with the implementation plan.")
     adapter = _make_adapter(provider)
@@ -87,6 +87,4 @@ async def test_orchestrator_handoff_with_user_confirmation() -> None:
         history=history,
     )
 
-    assert turn.handoff_requirements is not None
-    assert "user registration endpoint" in turn.handoff_requirements
-    assert "FastAPI" in turn.handoff_requirements
+    assert turn.handoff_requirements is None

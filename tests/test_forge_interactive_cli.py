@@ -25,7 +25,16 @@ from forge.ui.cycle_controller import (
     ForgeCycleController,
     classify_intent,
 )
-from forge.ui.state import ForgeStage, ForgeTUIState
+from forge.ui.state import (
+    AnvilPlanEvaluation,
+    ForgeStage,
+    ForgeTUIState,
+    PlanTurnIntent,
+)
+
+
+async def _approve_plan_turn(plan: Any, response: str) -> AnvilPlanEvaluation:
+    return AnvilPlanEvaluation(intent=PlanTurnIntent.APPROVE_AS_IS)
 
 
 def _adapter(provider: ScriptedProvider, role: str) -> ModelAdapter:
@@ -111,6 +120,7 @@ async def test_complex_task_triggers_full_forge_cycle() -> None:
         )
 
     controller = ForgeCycleController(state=state, temper_verifier=verifier)
+    controller._evaluate_plan_turn = _approve_plan_turn  # type: ignore[method-assign]
     prompt = "Implement a user authentication service with login and session tokens"
 
     assert classify_intent(prompt) == ExecutionMode.FULL_FORGE_CYCLE

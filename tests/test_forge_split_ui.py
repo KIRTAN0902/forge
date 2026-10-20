@@ -15,7 +15,19 @@ from forge.ui.split_app import (
     ForgeSplitPaneApp,
     render_sidebar_plain_text,
 )
-from forge.ui.state import CycleMode, ForgeStage, ForgeTUIState, UserQuestion, format_tokens
+from forge.ui.state import (
+    AnvilPlanEvaluation,
+    CycleMode,
+    ForgeStage,
+    ForgeTUIState,
+    PlanTurnIntent,
+    UserQuestion,
+    format_tokens,
+)
+
+
+async def _approve_plan_turn(plan: Any, response: str) -> AnvilPlanEvaluation:
+    return AnvilPlanEvaluation(intent=PlanTurnIntent.APPROVE_AS_IS)
 
 
 def _scripted_agent(provider: ScriptedProvider, role: str) -> Any:
@@ -182,6 +194,7 @@ async def test_cycle_loop_halts_on_temper_pass_and_loops_on_reject() -> None:
         temper_verifier=mock_temper_verifier,
         max_cycles=5,
     )
+    controller._evaluate_plan_turn = _approve_plan_turn  # type: ignore[method-assign]
 
     plan = await controller.run_cycle_loop("Implement JWT authentication service")
     assert "Final Plan" in plan
@@ -250,6 +263,7 @@ async def test_dynamic_cycle_mode_single_cycle_stops_after_cycle_1() -> None:
         temper_verifier=mock_temper_reject_verifier,
         max_cycles=5,
     )
+    controller._evaluate_plan_turn = _approve_plan_turn  # type: ignore[method-assign]
 
     await controller.run_cycle_loop("Refactor auth system: run first cycle and stop")
     result = await controller.run_cycle_loop("approve")
@@ -281,6 +295,7 @@ async def test_dynamic_cycle_mode_continuous_until_fulfilled() -> None:
         temper_verifier=mock_temper_verifier,
         max_cycles=5,
     )
+    controller._evaluate_plan_turn = _approve_plan_turn  # type: ignore[method-assign]
 
     await controller.run_cycle_loop(
         "Build payment webhook: run until requirements get fulfilled"
@@ -367,6 +382,7 @@ async def test_unspecified_task_executes_without_unnecessary_question() -> None:
         question_handler=mock_question_handler,
         temper_verifier=verifier,
     )
+    controller._evaluate_plan_turn = _approve_plan_turn  # type: ignore[method-assign]
 
     await controller.run_cycle_loop("Create user profile export feature")
     result = await controller.run_cycle_loop("approve")

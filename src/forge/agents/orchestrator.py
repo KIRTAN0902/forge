@@ -35,32 +35,6 @@ HANDOFF_PATTERN = re.compile(
     r"```(?:forge-handoff|handoff)\s*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE
 )
 
-EXECUTION_CONFIRM_TRIGGERS = (
-    "build it",
-    "let's build it",
-    "lets build it",
-    "implement it",
-    "let's implement",
-    "lets implement",
-    "go ahead",
-    "proceed",
-    "start implementation",
-    "execute the plan",
-    "do it",
-    "yes build it",
-    "yes implement it",
-    "begin",
-    "orchestrator begin",
-    "start",
-    "let's begin",
-    "lets begin",
-    "let's start",
-    "lets start",
-    "begin implementation",
-    "start now",
-    "execute",
-)
-
 
 @dataclass
 class OrchestratorChatTurn(AgentChatTurn):
@@ -163,22 +137,6 @@ class OrchestratorAgent(BaseAgent):
             handoff_requirements = handoff_match.group(1).strip()
             # Remove the handoff block from user-facing text
             clean_text = HANDOFF_PATTERN.sub("", raw_text).strip()
-        else:
-            # Check if user message was an explicit confirmation to build what was brainstormed
-            from forge.models.types import TextPart
-
-            text_msg = (
-                user_message
-                if isinstance(user_message, str)
-                else "".join(p.text for p in user_message if isinstance(p, TextPart))
-            )
-            norm_input = text_msg.strip().lower()
-            if any(
-                norm_input == trig or norm_input.startswith(f"{trig} ")
-                for trig in EXECUTION_CONFIRM_TRIGGERS
-            ):
-                # Synthesize requirements from recent discussion
-                handoff_requirements = self._synthesize_from_history(history, text_msg)
 
         if handoff_requirements:
             await self._emit(

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import re
 import sys
@@ -33,15 +34,39 @@ from forge.models import Message
 from forge.models.profile import ModelProfile
 from forge.skills import AutonomousSkillRouter
 from forge.ui.state import (
+    AnvilPlanEvaluation,
     CycleMode,
     ForgeStage,
     ForgeTUIState,
     PendingPlan,
+    PendingPlanContract,
     PlanRequirement,
+    PlanTurnIntent,
+    RequirementItem,
     UserQuestion,
     format_stage_deliverable,
     format_transient_action,
 )
+
+PlanIntent = PlanTurnIntent
+
+__all__ = [
+    "AnvilPlanEvaluation",
+    "CycleVerdict",
+    "ExecutionMode",
+    "ForgeCycleController",
+    "PendingPlanContract",
+    "PlanIntent",
+    "PlanTurnIntent",
+    "RequirementItem",
+    "apply_requirement_audit",
+    "classify_intent",
+    "classify_plan_response",
+    "extract_plan_requirements",
+    "extract_target_files",
+    "is_conversational_turn",
+    "parse_plan_evaluation",
+]
 
 if TYPE_CHECKING:  # pragma: no cover
     from forge.config.settings import ForgeConfigManager, StageModelBinding
@@ -55,15 +80,6 @@ class ExecutionMode(StrEnum):
     DIRECT_TOOL = "direct_tool"
     FULL_FORGE_CYCLE = "full_forge_cycle"
     DEEP_RESEARCH = "deep_research"
-
-
-class PlanIntent(StrEnum):
-    """Semantic meaning of a user's reply to a pending implementation plan."""
-
-    APPROVE_AS_IS = "APPROVE_AS_IS"
-    MODIFY_AND_PROCEED = "MODIFY_AND_PROCEED"
-    MODIFY_AND_WAIT = "MODIFY_AND_WAIT"
-    QUESTION_OR_CHAT = "QUESTION_OR_CHAT"
 
 
 # Stage <-> role aliases used by `/models` to route a binding to the right agent.
@@ -380,63 +396,55 @@ def reasoning_only_diagnostic(binding: StageModelBinding, *, truncated: bool = F
     )
 
 
-_MODIFICATION_RE = re.compile(
-    r"\b(instead|change|replace|swap|use|add|remove|drop|update|modify|revise|adjust|"
-    r"also|except|without|rather than|don't|do not|keep|but)\b",
-    re.IGNORECASE,
-)
-_WAIT_RE = re.compile(
-    r"\b(wait|hold|pause|not yet|don'?t start|do not start|let me review|review first|"
-    r"before you start|stop|on hold)\b",
-    re.IGNORECASE,
-)
-_PROCEED_RE = re.compile(
-    r"\b(proceed|go ahead|continue|start|launch|execute|implement|run it|do it|ship it|"
-    r"approve|approved|lgtm|looks good|sounds good|yes|yeah|yep|ok|okay|anyways|anyway)\b",
-    re.IGNORECASE,
-)
-_QUESTION_RE = re.compile(
-    r"^\s*(what|why|how|when|where|who|which|can|could|would|should|does|do|is|are|"
-    r"explain|clarify|tell me)\b",
-    re.IGNORECASE,
-)
 _REQ_LINE_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:REQ[-_ ]?(\d+)|(\d+)[.)])\s*[:\-]?\s*(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+_TARGET_FILES_RE = re.compile(
+    r"^\s*TARGET[_ ]FILES\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE
+)
 
 
+def extract_target_files(plan_text: str) -> list[str]:
+    """Extract Anvil's declared target-file list from the plan summary."""
+    match = _TARGET_FILES_RE.search(plan_text)
+    if match is None:
+        return []
+    raw = match.group(1).strip().strip("`")
+    if not raw or raw.upper() in {"NONE", "N/A", "UNKNOWN"}:
+        return []
+    files: list[str] = []
+    for candidate in re.split(r"[,;]", raw):
+        path = candidate.strip().strip("`'\"")
+        if path and path not in files:
+            files.append(path)
+    return files
 
-def classify_plan_response(response: str) -> PlanIntent:
-    """Classify an approval reply into the four required semantic outcomes.
 
-    The rules are deliberately semantic rather than exact-phrase matching so natural
-    phrasing such as "use B instead of A, but anyways proceed" launches immediately,
-    while "change A to B and wait" pauses for another approval round.
-    """
-    text = response.strip()
-    if not text:
-        return PlanIntent.QUESTION_OR_CHAT
+def parse_plan_evaluation(raw_text: str) -> AnvilPlanEvaluation:
+    """Parse Anvil's structured JSON adjudication without keyword heuristics."""
+    from forge.providers.client import strip_thinking_tags
 
-    has_modification = _MODIFICATION_RE.search(text) is not None
-    has_wait = _WAIT_RE.search(text) is not None
-    has_proceed = _PROCEED_RE.search(text) is not None
-    is_question = "?" in text or _QUESTION_RE.search(text) is not None
+    text = strip_thinking_tags(raw_text or "")[0].strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("Anvil returned no JSON plan evaluation")
+    payload = json.loads(text[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("Anvil plan evaluation must be a JSON object")
+    return AnvilPlanEvaluation.model_validate(payload)
 
-    if has_modification:
-        if has_wait and not re.search(r"\b(anyways|anyway)\b", text, re.IGNORECASE):
-            return PlanIntent.MODIFY_AND_WAIT
-        if has_proceed:
-            return PlanIntent.MODIFY_AND_PROCEED
-        return PlanIntent.MODIFY_AND_WAIT
 
-    if is_question and not has_proceed:
-        return PlanIntent.QUESTION_OR_CHAT
-    if has_wait and not has_proceed:
-        return PlanIntent.QUESTION_OR_CHAT
-    if has_proceed:
-        return PlanIntent.APPROVE_AS_IS
-    return PlanIntent.QUESTION_OR_CHAT
+def classify_plan_response(response: str) -> PlanTurnIntent:
+    """Deprecated synchronous shim; plan replies require live Anvil adjudication."""
+    raise RuntimeError(
+        "classify_plan_response() cannot decide approval keywords; use the controller's "
+        "AnvilPlanEvaluation flow instead."
+    )
 
 
 def extract_plan_requirements(plan_text: str, request: str) -> list[PlanRequirement]:
@@ -901,12 +909,139 @@ class ForgeCycleController:
             "",
             plan.plan_text.strip(),
             "",
-            "Acceptance Requirements:",
-            plan.checklist_text(),
-            "",
-            "Reply APPROVE to launch, describe modifications to revise, or ask a question.",
         ]
+        if plan.target_files:
+            lines.extend(
+                ["Target Files:", ", ".join(plan.target_files), ""]
+            )
+        lines.extend(
+            [
+                "Acceptance Requirements:",
+                plan.checklist_text(),
+                "",
+                "Reply APPROVE to launch, describe modifications to revise, or ask a question.",
+            ]
+        )
         return "\n".join(lines).strip()
+
+    async def _evaluate_plan_turn(
+        self, plan: PendingPlan, response: str
+    ) -> AnvilPlanEvaluation:
+        """Ask Anvil to semantically adjudicate the developer's reply to the plan."""
+        contract = plan.to_contract().model_dump_json(indent=2)
+        instruction = (
+            "You are Anvil, adjudicating a developer's reply to a pending implementation "
+            "plan. Decide what the developer authorizes NOW, not which words they used. "
+            "Return ONLY a JSON object, with no markdown fence or commentary, matching this "
+            "schema:\n"
+            "{\n"
+            '  "intent": "APPROVE_AS_IS" | "MODIFY_AND_PROCEED" | '
+            '"MODIFY_AND_WAIT" | "QUESTION_OR_CHAT" | "CANCEL_PLAN",\n'
+            '  "reasoning_summary": "short explanation",\n'
+            '  "updated_plan_markdown": null or "complete revised plan",\n'
+            '  "updated_target_files": null or ["path"],\n'
+            '  "updated_requirements": null or [\n'
+            '    {"req_id": "REQ-1", "description": "...", "completed": false, '
+            '"verification_note": ""}\n'
+            "  ],\n"
+            '  "conversational_reply": null or "answer for QUESTION_OR_CHAT"\n'
+            "}\n\n"
+            "Decision rules:\n"
+            "- APPROVE_AS_IS: the developer authorizes executing the current plan unchanged. "
+            "Dismissive hypotheses, jokes, or statements about what they would have preferred "
+            "do not modify the plan when the developer then authorizes the current plan.\n"
+            "- MODIFY_AND_PROCEED: the developer requests a concrete change AND authorizes "
+            "immediate execution of the revised plan. Return the revised plan and full "
+            "checklist.\n"
+            "- MODIFY_AND_WAIT: the developer requests a concrete change but does not authorize "
+            "immediate execution. Return the revised plan and full checklist, then wait.\n"
+            "- QUESTION_OR_CHAT: the developer asks a question, discusses tradeoffs, or is "
+            "ambiguous. Answer in conversational_reply and keep the plan pending.\n"
+            "- CANCEL_PLAN: the developer abandons the plan without authorizing execution.\n"
+            "- Merely mentioning an alternative is not authorization. Authorization must be "
+            "semantically present in this reply.\n\n"
+            "REFERENCE CASES:\n"
+            '1. "proceed, but instead of A use B" -> MODIFY_AND_PROCEED with revised plan.\n'
+            '2. "instead of A use B" -> MODIFY_AND_WAIT with revised plan.\n'
+            '3. "you should use B instead of A, but anyways proceed" -> APPROVE_AS_IS with no '
+            "plan changes, because the developer explicitly authorizes the current plan.\n"
+            '4. "I would have used B, but whatever, go ahead" -> APPROVE_AS_IS with no changes.\n'
+            '5. "What does REQ-2 verify?" -> QUESTION_OR_CHAT with an answer.\n\n'
+            f"CURRENT PLAN CONTRACT:\n{contract}\n\n"
+            f"DEVELOPER REPLY:\n{response}"
+        )
+        raw, _usage = await self._stage_instruction(
+            ForgeStage.ANVIL, instruction, allow_edits=False
+        )
+        try:
+            evaluation = parse_plan_evaluation(raw)
+        except (ValueError, json.JSONDecodeError) as first_error:
+            repair = (
+                f"{instruction}\n\n"
+                "Your previous reply could not be parsed: "
+                f"{first_error}. Return ONLY the JSON object now."
+            )
+            raw, _usage = await self._stage_instruction(
+                ForgeStage.ANVIL, repair, allow_edits=False
+            )
+            try:
+                evaluation = parse_plan_evaluation(raw)
+            except (ValueError, json.JSONDecodeError):
+                evaluation = AnvilPlanEvaluation(
+                    intent=PlanTurnIntent.QUESTION_OR_CHAT,
+                    reasoning_summary=(
+                        "Anvil could not produce a valid structured plan adjudication; the "
+                        "plan remains pending for safety."
+                    ),
+                    conversational_reply=(
+                        "I could not safely resolve that reply against the pending plan. "
+                        "The plan is still awaiting your approval; please restate whether to "
+                        "approve, revise, or cancel it."
+                    ),
+                )
+        self.state.append_thought(
+            ForgeStage.ANVIL,
+            f"Anvil semantic plan adjudication: {evaluation.intent.value}.",
+        )
+        return evaluation
+
+    def _apply_plan_evaluation(
+        self, plan: PendingPlan, evaluation: AnvilPlanEvaluation
+    ) -> PendingPlan | None:
+        """Apply Anvil's revised plan contract, or return None when it supplied no plan."""
+        revised_text = (evaluation.updated_plan_markdown or "").strip()
+        if not revised_text:
+            return None
+
+        if evaluation.updated_requirements is not None:
+            requirements = [
+                PlanRequirement.from_item(item)
+                for item in evaluation.updated_requirements
+            ]
+        else:
+            requirements = extract_plan_requirements(revised_text, plan.request)
+
+        target_files = (
+            list(evaluation.updated_target_files)
+            if evaluation.updated_target_files is not None
+            else list(plan.target_files)
+        )
+        revised = PendingPlan(
+            request=plan.request,
+            plan_text=revised_text,
+            requirements=requirements,
+            revision=plan.revision + 1,
+            target_files=target_files,
+        )
+        self.state.set_pending_plan(revised)
+        rendered = self._render_pending_plan(revised)
+        self.state.set_stage_output(ForgeStage.ANVIL, rendered, status="passed")
+        self.state.finalize_stream(ForgeStage.ANVIL, rendered)
+        self.state.append_thought(
+            ForgeStage.ANVIL,
+            f"Plan revised to revision {revised.revision} from Anvil's semantic contract.",
+        )
+        return revised
 
     async def _handle_pending_plan_response(self, response: str) -> str:
         """Resolve a natural-language reply against the pending plan contract."""
@@ -914,15 +1049,24 @@ class ForgeCycleController:
         if plan is None:
             return ""
         self.last_mode = ExecutionMode.FULL_FORGE_CYCLE
-        intent = classify_plan_response(response)
-        self.state.append_thought(
-            ForgeStage.ANVIL, f"Plan intent resolved: {intent.value}"
-        )
+        evaluation = await self._evaluate_plan_turn(plan, response)
+        intent = evaluation.intent
 
-        if intent is PlanIntent.QUESTION_OR_CHAT:
-            answer = await self._run_agent_turn(
-                response, ForgeStage.ANVIL, allow_edits=False
-            )
+        if intent is PlanTurnIntent.CANCEL_PLAN:
+            self.state.set_pending_plan(None)
+            self.state.all_requirements_met = False
+            notice = "Plan cancelled. No implementation was started."
+            self.state.append_thought(ForgeStage.ANVIL, notice)
+            self.state.set_stage_output(ForgeStage.ANVIL, notice, status="idle")
+            self.auto_save_session()
+            return notice
+
+        if intent is PlanTurnIntent.QUESTION_OR_CHAT:
+            answer = (evaluation.conversational_reply or "").strip()
+            if not answer:
+                answer = await self._run_agent_turn(
+                    response, ForgeStage.ANVIL, allow_edits=False
+                )
             self.state.append_thought(
                 ForgeStage.ANVIL,
                 "Plan remains pending approval after the user's question.",
@@ -932,9 +1076,14 @@ class ForgeCycleController:
             )
             return answer
 
-        if intent in {PlanIntent.MODIFY_AND_PROCEED, PlanIntent.MODIFY_AND_WAIT}:
-            revised = await self._revise_plan(plan, response)
-            if intent is PlanIntent.MODIFY_AND_WAIT:
+        if intent in {
+            PlanTurnIntent.MODIFY_AND_PROCEED,
+            PlanTurnIntent.MODIFY_AND_WAIT,
+        }:
+            revised = self._apply_plan_evaluation(plan, evaluation)
+            if revised is None:
+                revised = await self._revise_plan(plan, response)
+            if intent is PlanTurnIntent.MODIFY_AND_WAIT:
                 return self._render_pending_plan(revised)
             return await self._run_autonomous_cycle(revised)
 
@@ -947,7 +1096,8 @@ class ForgeCycleController:
             "below. Do not write implementation code. End with a requirements contract in "
             "this exact shape, one requirement per line:\n"
             "REQ-1: <independently verifiable requirement>\n"
-            "REQ-2: <independently verifiable requirement>\n\n"
+            "REQ-2: <independently verifiable requirement>\n"
+            "TARGET_FILES: <comma-separated repository paths, or NONE>\n\n"
             f"TASK:\n{prompt}"
         )
         text, _usage = await self._stage_instruction(
@@ -957,6 +1107,7 @@ class ForgeCycleController:
             request=prompt,
             plan_text=text,
             requirements=extract_plan_requirements(text, prompt),
+            target_files=extract_target_files(text),
         )
         self.state.all_requirements_met = False
         self.state.set_pending_plan(plan)
@@ -974,7 +1125,8 @@ class ForgeCycleController:
         instruction = (
             "Revise the implementation plan using the user's feedback. Preserve all "
             "requirements that still apply and return a complete revised plan followed by "
-            "the full requirements contract (REQ-1, REQ-2, ...).\n\n"
+            "the full requirements contract (REQ-1, REQ-2, ...) and a "
+            "TARGET_FILES: <comma-separated paths, or NONE> line.\n\n"
             f"ORIGINAL REQUEST:\n{plan.request}\n\n"
             f"CURRENT PLAN:\n{plan.plan_text}\n\n"
             f"USER FEEDBACK:\n{feedback}"
@@ -987,6 +1139,7 @@ class ForgeCycleController:
             plan_text=text,
             requirements=extract_plan_requirements(text, plan.request),
             revision=plan.revision + 1,
+            target_files=extract_target_files(text),
         )
         self.state.set_pending_plan(revised)
         rendered = self._render_pending_plan(revised)

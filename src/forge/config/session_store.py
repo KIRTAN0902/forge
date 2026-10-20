@@ -157,6 +157,7 @@ class SessionStore:
                 "request": state.pending_plan.request,
                 "plan_text": state.pending_plan.plan_text,
                 "revision": state.pending_plan.revision,
+                "target_files": list(state.pending_plan.target_files),
                 "requirements": [
                     {
                         "req_id": req.req_id,
@@ -290,6 +291,11 @@ class SessionStore:
                 plan_text=str(raw_plan.get("plan_text", "")),
                 requirements=requirements,
                 revision=int(raw_plan.get("revision", 1)),
+                target_files=[
+                    str(item)
+                    for item in raw_plan.get("target_files", [])
+                    if isinstance(item, str)
+                ],
             )
         else:
             state.pending_plan = None
