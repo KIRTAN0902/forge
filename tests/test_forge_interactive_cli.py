@@ -29,6 +29,8 @@ from forge.ui.state import (
     AnvilPlanEvaluation,
     ForgeStage,
     ForgeTUIState,
+    PendingPlan,
+    PlanRequirement,
     PlanTurnIntent,
 )
 
@@ -150,6 +152,57 @@ async def test_creation_request_renders_pending_plan_not_code() -> None:
     assert "src/App.tsx" in result
     assert "function App" not in result
     assert providers[ForgeStage.HAMMER].requests == []
+
+
+async def test_hammer_builds_entire_project_then_temper_runs_tests() -> None:
+    state = ForgeTUIState()
+    controller = ForgeCycleController(state=state)
+    calls: list[tuple[ForgeStage, str, bool, int | None]] = []
+    plan = PendingPlan(
+        request="Build a portfolio site",
+        plan_text="Create every source and config file.",
+        requirements=[PlanRequirement("REQ-1", "The production build and tests pass.")],
+        target_files=["package.json", "src/App.tsx", "src/index.css"],
+    )
+
+    async def fake_stage(
+        stage: ForgeStage,
+        instruction: str,
+        *,
+        allow_edits: bool,
+        system_prompt: str | None = None,
+        max_tool_steps: int | None = None,
+    ) -> tuple[str, tuple[int, int, int]]:
+        calls.append((stage, instruction, allow_edits, max_tool_steps))
+        if stage is ForgeStage.HAMMER:
+            return "Created package.json, src/App.tsx, and src/index.css.", (10, 5, 15)
+        return "REQ-1: PASS - npm test and npm run build both succeeded.\nALL_REQUIREMENTS_MET: TRUE", (
+            10,
+            5,
+            15,
+        )
+
+    controller._stage_instruction = fake_stage  # type: ignore[method-assign]
+
+    await controller._cycle_hammer(plan)
+    _report, all_met, _audit = await controller._cycle_temper(plan, 1)
+
+    hammer_stage, hammer_prompt, hammer_edits, hammer_steps = calls[0]
+    assert hammer_stage is ForgeStage.HAMMER
+    assert hammer_edits is True
+    assert hammer_steps is not None and hammer_steps >= 40
+    assert "ENTIRE approved plan" in hammer_prompt
+    assert "write_file" in hammer_prompt
+    assert "not a skeleton" in hammer_prompt
+    assert "src/App.tsx" in hammer_prompt
+
+    temper_stage, temper_prompt, temper_edits, temper_steps = calls[1]
+    assert temper_stage is ForgeStage.TEMPER
+    assert temper_edits is False
+    assert temper_steps is not None and temper_steps >= 20
+    assert "run_tests" in temper_prompt
+    assert "build/typecheck" in temper_prompt
+    assert all_met is True
 
 
 async def test_complex_task_triggers_full_forge_cycle() -> None:

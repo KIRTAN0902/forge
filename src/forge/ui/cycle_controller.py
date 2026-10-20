@@ -50,6 +50,11 @@ from forge.ui.state import (
 
 PlanIntent = PlanTurnIntent
 
+# A complete project implementation needs more than a handful of ReAct steps: scaffolding,
+# writing each file, installing dependencies, and fixing build failures all consume calls.
+_CYCLE_HAMMER_TOOL_STEPS = 50
+_CYCLE_TEMPER_TOOL_STEPS = 24
+
 __all__ = [
     "AnvilPlanEvaluation",
     "CycleVerdict",
@@ -796,6 +801,7 @@ class ForgeCycleController:
         on_token: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
         system_prompt: str | None = None,
+        max_tool_steps: int | None = None,
     ) -> Any:
         """Call an agent's ``chat`` with only the kwargs it actually supports."""
         kwargs: dict[str, Any] = {}
@@ -816,7 +822,9 @@ class ForgeCycleController:
         if accepts("project_context"):
             kwargs["project_context"] = self.project_context
         if accepts("max_tool_steps"):
-            kwargs["max_tool_steps"] = self.max_tool_steps
+            kwargs["max_tool_steps"] = (
+                max_tool_steps if max_tool_steps is not None else self.max_tool_steps
+            )
         if accepts("allowed_tools"):
             kwargs["allowed_tools"] = self._toolset_for(stage, allow_edits)
         if accepts("on_tool_result"):
@@ -1185,6 +1193,7 @@ class ForgeCycleController:
         *,
         allow_edits: bool,
         system_prompt: str | None = None,
+        max_tool_steps: int | None = None,
     ) -> tuple[str, tuple[int, int, int]]:
         """Execute one real stage call through its agent or the live streaming client.
 
@@ -1214,6 +1223,7 @@ class ForgeCycleController:
                     on_token=_on_token,
                     on_thinking=on_thinking,
                     system_prompt=system_prompt,
+                    max_tool_steps=max_tool_steps,
                 )
                 reply = (getattr(turn, "response_text", "") or "").strip()
                 usage = self._turn_usage(turn)
@@ -1316,18 +1326,30 @@ class ForgeCycleController:
         return rendered
 
     async def _cycle_hammer(self, plan: PendingPlan, feedback: str = "") -> str:
-        """Ask the live Hammer model to implement the plan in the current cycle."""
+        """Ask the live Hammer model to implement the complete plan in the repository."""
+        target_files = ", ".join(plan.target_files) or "Infer every file required by the plan."
         instruction = (
-            f"{self._cycle_banner()} implementation. Execute the approved plan using the "
-            "available repository tools, make the required edits, and report concrete "
-            "changes and test commands. Do not ask the user questions.\n\n"
+            f"{self._cycle_banner()} implementation. Implement the ENTIRE approved plan "
+            "in the repository now. You are the only agent allowed to write code. Use the "
+            "write_file and edit_file tools to create or update every file required for a "
+            "complete, runnable project, not a skeleton and not a code snippet in chat. "
+            "Do not stop after one file. Continue working through the plan until every "
+            "task is implemented. Run the project's install/build/test commands with the "
+            "available tools and fix failures caused by your changes. Do not ask the user "
+            "questions and do not merely describe what you would do.\n\n"
             f"APPROVED PLAN:\n{plan.plan_text}\n\n"
-            f"ACCEPTANCE REQUIREMENTS:\n{plan.checklist_text()}"
+            f"ACCEPTANCE REQUIREMENTS:\n{plan.checklist_text()}\n\n"
+            f"TARGET FILES:\n{target_files}\n\n"
+            "When finished, report the files created or modified, the exact commands run, "
+            "the test/build result, and any remaining blockers."
         )
         if feedback:
             instruction += f"\n\nUNRESOLVED DEFECTS FROM LAST CYCLE:\n{feedback}"
         text, _usage = await self._stage_instruction(
-            ForgeStage.HAMMER, instruction, allow_edits=True
+            ForgeStage.HAMMER,
+            instruction,
+            allow_edits=True,
+            max_tool_steps=_CYCLE_HAMMER_TOOL_STEPS,
         )
         rendered = f"{self._cycle_banner()} Implementation Report\n\n{text}"
         self.state.set_stage_output(ForgeStage.HAMMER, rendered, status="passed")
@@ -1339,17 +1361,26 @@ class ForgeCycleController:
     ) -> tuple[str, bool, str]:
         """Audit every requirement and return ``(report, all_met, audit_text)``."""
         instruction = (
-            f"{self._cycle_banner(cycle)} adversarial audit. Verify each requirement "
-            "against the actual repository state. Reply with exactly one line per "
-            "requirement in this form:\n"
-            "REQ-1: [✓] evidence   (or [✗] missing evidence)\n"
-            "REQ-2: [✓] evidence\n"
-            "Then finish with: ALL_REQUIREMENTS_MET: TRUE or FALSE.\n\n"
+            f"{self._cycle_banner(cycle)} adversarial audit. Independently verify every "
+            "requirement against the actual repository state. Do not trust Hammer's report "
+            "as evidence. You must run the project's real test suite and build/typecheck "
+            "commands with run_tests or run_command, inspect the relevant files, and base "
+            "each verdict on command output or direct file evidence. If tests/build cannot "
+            "run, report the exact error and treat the requirement as unmet.\n\n"
+            "Reply with exactly one line per requirement in this form:\n"
+            "REQ-1: PASS - evidence   (or FAIL - missing evidence)\n"
+            "REQ-2: PASS - evidence\n"
+            "Then finish with: ALL_REQUIREMENTS_MET: TRUE or FALSE.\n"
+            "Set ALL_REQUIREMENTS_MET to FALSE if any requirement is unmet, any test/build "
+            "command fails, or you could not verify the result.\n\n"
             f"APPROVED PLAN:\n{plan.plan_text}\n\n"
             f"REQUIREMENTS:\n{plan.checklist_text()}"
         )
         text, _usage = await self._stage_instruction(
-            ForgeStage.TEMPER, instruction, allow_edits=False
+            ForgeStage.TEMPER,
+            instruction,
+            allow_edits=False,
+            max_tool_steps=_CYCLE_TEMPER_TOOL_STEPS,
         )
 
         audit_text = text
