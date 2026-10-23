@@ -86,6 +86,57 @@ def _clip(line: str) -> str:
     return f"{line[:MAX_LINE_CHARS]}... [{len(line) - MAX_LINE_CHARS} chars clipped]"
 
 
+# -- create_directory ---------------------------------------------------------------------
+
+
+class CreateDirectoryInput(ToolInput):
+    path: str = Field(description="Directory path relative to the workspace root.")
+    parents: bool = Field(default=True, description="Create missing parent directories.")
+    exist_ok: bool = Field(default=True, description="Succeed when the directory already exists.")
+
+
+class CreateDirectoryOutput(ToolOutput):
+    path: str
+    created: bool
+
+    def render(self) -> str:
+        verb = "Created" if self.created else "Already exists"
+        return f"{verb} directory {self.path}."
+
+    def changed_paths(self) -> list[str]:
+        return [self.path] if self.created else []
+
+
+class CreateDirectory(Tool[CreateDirectoryInput, CreateDirectoryOutput]):
+    name = "create_directory"
+    description = "Create a directory, including missing parents by default."
+    input_model = CreateDirectoryInput
+    output_model = CreateDirectoryOutput
+    risk = RiskLevel.MEDIUM
+    permissions = WRITE
+
+    def assess(self, args: CreateDirectoryInput, env: ToolEnvironment) -> ToolAssessment:
+        return ToolAssessment(RiskLevel.MEDIUM, WRITE, paths=[env.workspace.relative(args.path)])
+
+    async def run(self, args: CreateDirectoryInput, env: ToolEnvironment) -> CreateDirectoryOutput:
+        target = env.workspace.resolve(args.path)
+        rel = env.workspace.relative(target)
+        if target.exists() and not target.is_dir():
+            raise ToolError(f"{rel} already exists and is not a directory")
+        if target.is_dir() and not args.exist_ok:
+            raise ToolError(f"{rel} already exists; set exist_ok=true to accept it")
+        created = not target.exists()
+        try:
+            await asyncio.to_thread(target.mkdir, parents=args.parents, exist_ok=args.exist_ok)
+        except FileNotFoundError:
+            raise ToolError(
+                f"parent directory does not exist for {rel}; set parents=true"
+            ) from None
+        except OSError as exc:
+            raise ToolError(f"could not create {rel}: {exc}") from exc
+        return CreateDirectoryOutput(path=rel, created=created)
+
+
 # -- write_file ---------------------------------------------------------------------------
 
 

@@ -307,6 +307,7 @@ class UnifiedLLMClient:
         on_token: TokenHandler | None = None,
         on_thinking: ThinkingHandler | None = None,
         stage: str = "anvil",
+        session_id: str | None = None,
     ) -> LLMResponse:
         """Run one real completion, streaming visible deltas to ``on_token``.
 
@@ -340,6 +341,7 @@ class UnifiedLLMClient:
                 prompt_tokens=resp.prompt_tokens,
                 completion_tokens=resp.completion_tokens,
                 latency_ms=latency_ms,
+                session_id=session_id or "default",
             )
         except Exception:
             pass
@@ -354,6 +356,7 @@ class UnifiedLLMClient:
         on_token: TokenHandler | None = None,
         on_thinking: ThinkingHandler | None = None,
         stage: str = "anvil",
+        session_id: str | None = None,
     ) -> LLMResponse:
         return await self.complete_or_stream(
             binding,
@@ -362,6 +365,7 @@ class UnifiedLLMClient:
             on_token=on_token,
             on_thinking=on_thinking,
             stage=stage,
+            session_id=session_id,
         )
 
     async def list_live_models(self, provider: ProviderName) -> list[str]:

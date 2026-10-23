@@ -51,16 +51,6 @@ _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # invalidations during token-by-token LLM output.
 _REDRAW_MIN_INTERVAL = 0.05
 
-# Bold ASCII block-art FORGE banner rendered in the top header when there is room.
-_FORGE_ART: tuple[str, ...] = (
-    " ███████╗ ██████╗ ██████╗  ██████╗ ███████╗",
-    " ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝",
-    " █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ",
-    " ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ",
-    " ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗",
-    " ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
-)
-
 # Slash command catalogue used for both the popup completion menu and `/help`.
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show the command reference",
@@ -160,8 +150,7 @@ def render_sidebar_formatted_text(
     fragments: StyleAndTextTuples = []
 
     # Title
-    fragments.append(("class:sidebar_header", " FORGE // WORKSPACE\n"))
-    fragments.append(("class:border", "────────────────────────\n\n"))
+    fragments.append(("class:sidebar_header", " FORGE // WORKSPACE\n\n"))
 
     # Stages: Anvil, Hammer, Temper
     stages = [ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER]
@@ -175,25 +164,21 @@ def render_sidebar_formatted_text(
         marker = "●" if (is_active_worker or is_viewed) else "○"
 
         if is_active_worker or is_viewed:
-            fragments.append(("class:active_box", "╭──────────────╮\n"))
-            fragments.append(("class:active_box", "│ "))
+            fragments.append(("class:active_box", " │ "))
             fragments.append((style_name, f"{marker} {stage_name:<9}"))
-            fragments.append(("class:active_box", "│"))
             if is_viewed and not state.auto_follow:
-                fragments.append(("class:viewing_badge", " [VIEW]"))
+                fragments.append(("class:viewing_badge", "[VIEW] "))
             elif is_active_worker and spinner_frame:
-                fragments.append(("class:spinner", f" {spinner_frame}"))
-            fragments.append(("", " <--\n"))
-            fragments.append(("class:active_box", "╰──────────────╯\n"))
+                fragments.append(("class:spinner", f"{spinner_frame} "))
+            fragments.append(("", "<--\n"))
         else:
-            fragments.append(("", f"  {marker} "))
+            fragments.append(("", f"   {marker} "))
             fragments.append((style_name, f"{stage_name:<8}"))
             fragments.append(("", "\n"))
 
         fragments.append(("", "\n"))
 
     # Cycle Counter & Dynamic Mode
-    fragments.append(("class:border", "────────────────────────────\n"))
     fragments.append(("class:cycle_counter", f"Cycle :- {state.cycle_count}\n"))
     fragments.append(("class:cycle_mode", f"Mode  :- {state.cycle_mode.value}\n\n"))
 
@@ -228,8 +213,7 @@ def render_sidebar_formatted_text(
     )
 
     # Shortcuts Legend
-    fragments.append(("class:border", "────────────────────────────\n"))
-    fragments.append(("class:hint_title", "Shortcuts:\n"))
+    fragments.append(("class:hint_title", "Shortcuts\n"))
     fragments.append(("class:hint", " [Alt+1/F1] Anvil (Orch)\n"))
     fragments.append(("class:hint", " [Alt+2/F2] Hammer (Exec)\n"))
     fragments.append(("class:hint", " [Alt+3/F3] Temper (QA)\n"))
@@ -602,7 +586,7 @@ class ForgeSplitPaneApp:
         return _SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)]
 
     def _header_height(self) -> int:
-        return 2 if _is_compact_terminal() else len(_FORGE_ART)
+        return 2
 
     def _model_label(self) -> str:
         getter = getattr(self.controller, "current_model_label", None)
@@ -630,7 +614,7 @@ class ForgeSplitPaneApp:
         ]
 
     def _render_header(self) -> AnyFormattedText:
-        """Render the top header: ASCII FORGE art + live telemetry (or a compact fallback)."""
+        """Render a compact title line and live execution telemetry."""
         worker_str = (
             self.state.active_worker_stage.value.lower()
             if self.state.active_worker_stage
@@ -642,29 +626,19 @@ class ForgeSplitPaneApp:
         if self.state.viewing_history_cycle is not None:
             cycle_str += f" [hist:{self.state.viewing_history_cycle}]"
 
-        row_harness = "FORGE // AUTONOMOUS ENGINEERING HARNESS"
-        row_status = f"cycle: {cycle_str}  │  worker: {worker_str}  │  view: {viewport_str} [{follow_str}]"
-        row_tokens = (
-            f"stage_tokens: {self.state.active_stage_tokens}  │  "
-            f"session_tokens: {self.state.total_session_tokens}  │  "
-            f"model: {self._model_label()}"
+        row_status = (
+            f"cycle {cycle_str}  ·  worker {worker_str}  ·  "
+            f"view {viewport_str} [{follow_str}]"
         )
-
-        if _is_compact_terminal():
-            return [
-                ("class:header_art", " FORGE // AUTONOMOUS ENGINEERING HARNESS\n"),
-                ("class:header_telemetry", f" {row_status}"),
-            ]
-
-        telemetry_by_row = {0: row_harness, 2: row_status, 3: row_tokens}
-        fragments: StyleAndTextTuples = []
-        for index, art_line in enumerate(_FORGE_ART):
-            fragments.append(("class:header_art", art_line))
-            overlay = telemetry_by_row.get(index)
-            if overlay:
-                fragments.append(("class:header_telemetry", f"   {overlay}"))
-            fragments.append(("", "\n" if index < len(_FORGE_ART) - 1 else ""))
-        return fragments
+        row_tokens = (
+            f"stage_tokens {self.state.active_stage_tokens}  ·  "
+            f"session_tokens {self.state.total_session_tokens}  ·  "
+            f"model {self._model_label()}"
+        )
+        return [
+            ("class:header_art", " FORGE // AUTONOMOUS ENGINEERING HARNESS\n"),
+            ("class:header_telemetry", f" {row_status}  ·  {row_tokens}"),
+        ]
 
     def _render_viewport(self) -> AnyFormattedText:
         """Render the exclusive stage viewport buffer using ANSI conversion with height-aware scrolling."""
@@ -936,12 +910,3 @@ class ForgeSplitPaneApp:
     def run(self) -> None:
         """Run the full-screen TUI application synchronously."""
         self.application.run()
-
-
-def _is_compact_terminal() -> bool:
-    """True when the terminal is too short for the multi-line ASCII banner."""
-    try:
-        lines = shutil.get_terminal_size((100, 30)).lines
-    except Exception:  # pragma: no cover - defensive
-        return False
-    return lines < 24

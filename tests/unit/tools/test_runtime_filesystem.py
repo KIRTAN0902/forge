@@ -285,7 +285,8 @@ class TestFilesystemTools:
     ) -> None:
         runtime = make_runtime(sample_repo)
         definitions = {d.name: d for d in runtime.definitions()}
-        assert len(definitions) == 27
+        assert len(definitions) == 28
+        assert "create_directory" in definitions
         assert "web_search" in definitions
         assert "fetch_web_page" in definitions
         assert "ask_user_question" in definitions

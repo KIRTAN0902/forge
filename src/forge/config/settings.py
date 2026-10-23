@@ -27,6 +27,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from forge.core.atomic import atomic_write_text
+
 STAGES: tuple[str, str, str] = ("anvil", "hammer", "temper")
 StageTarget = Literal["anvil", "hammer", "temper", "all"]
 
@@ -427,7 +429,7 @@ class ForgeConfigManager:
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(data, indent=2, sort_keys=True)
-        self.config_path.write_text(payload, encoding="utf-8")
+        atomic_write_text(self.config_path, payload, private=True)
         self._restrict_permissions()
         self._overrides = overrides
         return self.config_path

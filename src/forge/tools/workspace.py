@@ -6,8 +6,11 @@ policy decision; it is impossible through this API.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 import subprocess
+import tempfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
@@ -107,17 +110,50 @@ class Workspace:
         return decode_text(data)
 
     def write_text(self, path: str | Path, text: str, *, create_dirs: bool = True) -> bool:
-        """Write ``text`` exactly (no newline translation). Returns True if created."""
+        """Atomically write ``text`` exactly (no newline translation).
+
+        The content is written and verified in a sibling temporary file before replacing
+        the destination, so a failed or partial write cannot truncate an existing file.
+        Returns True when the destination did not exist before.
+        """
         resolved = self.resolve(path)
+        rel = self.relative(resolved)
         if resolved.is_dir():
-            raise WorkspaceError(f"{self.relative(resolved)} is a directory")
+            raise WorkspaceError(f"{rel} is a directory")
         created = not resolved.exists()
         if create_dirs:
             resolved.parent.mkdir(parents=True, exist_ok=True)
         elif not resolved.parent.exists():
             raise WorkspaceError(f"directory does not exist: {self.relative(resolved.parent)}")
-        with open(resolved, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
+
+        data = text.encode("utf-8")
+        existing_mode: int | None = None
+        if not created:
+            with contextlib.suppress(OSError):
+                existing_mode = stat.S_IMODE(resolved.stat().st_mode)
+
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{resolved.name}.", suffix=".tmp", dir=resolved.parent
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if temp_path.read_bytes() != data:
+                raise WorkspaceError(f"write verification failed for {rel}")
+            if existing_mode is not None:
+                os.chmod(temp_path, existing_mode)
+            os.replace(temp_path, resolved)
+        except WorkspaceError:
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+            raise
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+            raise WorkspaceError(f"could not write {rel}: {exc}") from exc
         return created
 
     # -- listing ---------------------------------------------------------------------

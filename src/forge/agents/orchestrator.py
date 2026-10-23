@@ -108,6 +108,7 @@ class OrchestratorAgent(BaseAgent):
 
         usage = Usage()
         tool_names: list[str] = []
+        limit_reached = False
 
         # 4. Run interactive tool loop (read-only tools available for inspecting repo)
         if self.runtime is not None:
@@ -126,6 +127,7 @@ class OrchestratorAgent(BaseAgent):
             updated_messages = outcome.messages
             usage = outcome.usage
             tool_names = outcome.tool_names
+            limit_reached = outcome.limit_reached
         else:
             resp = await self._generate(conversation, (), on_token, on_thinking=on_thinking)
             raw_text = resp.text
@@ -156,6 +158,7 @@ class OrchestratorAgent(BaseAgent):
             messages=updated_messages,
             usage=usage,
             tool_names=tool_names,
+            limit_reached=limit_reached,
         )
 
     def _synthesize_from_history(self, history: Sequence[Message] | None, user_trigger: str) -> str:

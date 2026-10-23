@@ -904,11 +904,17 @@ class ForgeModalManager:
         frags.append(("", "\n"))
         frags.append(("class:border", "─" * 82 + "\n"))
 
-        # Render the controller's live three-part accounting when available.
+        # Render the controller's live three-part accounting when available, plus the
+        # persistent provider ledger filtered by the selected time window.
         controller = self.app.controller
         renderer = getattr(controller, "render_usage_report", None)
         if callable(renderer):
             text = str(renderer())
+            tracker = get_usage_tracker()
+            session_id = getattr(controller, "session_id", None)
+            text += "\n\n" + tracker.render_dashboard_text(
+                session_id=session_id, time_window=win
+            )
         else:
             tracker = get_usage_tracker()
             session_id = getattr(controller, "session_id", None)

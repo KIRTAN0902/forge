@@ -17,6 +17,7 @@ from forge.tools.analysis_tools import (
 from forge.tools.base import Tool
 from forge.tools.environment import ToolEnvironment
 from forge.tools.filesystem import (
+    CreateDirectory,
     DeleteFile,
     EditFile,
     FindFiles,
@@ -53,6 +54,7 @@ def default_tools() -> list[Tool[Any, Any]]:
     return [
         # filesystem
         ReadFile(),
+        CreateDirectory(),
         WriteFile(),
         EditFile(),
         DeleteFile(),

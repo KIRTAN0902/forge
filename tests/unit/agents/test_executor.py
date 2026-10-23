@@ -132,3 +132,4 @@ class TestExecutorAgent:
 
         assert result.status == ExecutionStatus.PARTIAL
         assert result.iterations == 2
+        assert "2-step tool limit" in result.summary

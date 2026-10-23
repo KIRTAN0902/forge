@@ -9,20 +9,30 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from forge.config.settings import default_config_dir
+from forge.core.atomic import atomic_write_text
 
 if TYPE_CHECKING:
     from forge.ui.state import ForgeTUIState
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}")
+
+
 def default_sessions_dir() -> Path:
     """Return persistent global sessions directory (~/.forge/sessions)."""
     return default_config_dir() / "sessions"
+
+
+def is_valid_session_id(session_id: str) -> bool:
+    """Return True for a safe, single-component session identifier."""
+    return bool(_SESSION_ID_RE.fullmatch(session_id))
 
 
 @dataclass
@@ -64,6 +74,11 @@ class SessionStore:
         self._index: dict[str, SessionSummary] = {}
         self._load_index()
 
+    def _session_path(self, session_id: str) -> Path:
+        if not is_valid_session_id(session_id):
+            raise ValueError(f"invalid session id {session_id!r}")
+        return self.sessions_dir / f"{session_id}.json"
+
     def _load_index(self) -> None:
         if not self.index_path.is_file():
             self._index = {}
@@ -94,7 +109,7 @@ class SessionStore:
                 reverse=True,
             )
             payload = json.dumps([s.to_dict() for s in summaries], indent=2)
-            self.index_path.write_text(payload, encoding="utf-8")
+            atomic_write_text(self.index_path, payload)
         except Exception:
             pass
 
@@ -107,7 +122,7 @@ class SessionStore:
     ) -> Path:
         """Persist entire state to ~/.forge/sessions/{session_id}.json."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        session_file = self.sessions_dir / f"{session_id}.json"
+        session_file = self._session_path(session_id)
         now = datetime.now(UTC).isoformat()
 
         # Derive title if missing
@@ -189,8 +204,7 @@ class SessionStore:
             "stage_buffers": stage_buffers_data,
         }
 
-        with contextlib.suppress(Exception):
-            session_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        atomic_write_text(session_file, json.dumps(data, indent=2))
 
         # Update index
         summary = SessionSummary(
@@ -214,21 +228,27 @@ class SessionStore:
             reverse=True,
         )
 
+    def resolve_session_id(self, session_id: str) -> str | None:
+        """Resolve an exact session id or an unambiguous prefix to its stored id."""
+        if not is_valid_session_id(session_id):
+            return None
+        exact = self._session_path(session_id)
+        if exact.is_file():
+            return session_id
+        matches = [
+            path.stem
+            for path in self.sessions_dir.glob(f"{session_id}*.json")
+            if path.stem != "index" and is_valid_session_id(path.stem)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def load_session(self, session_id: str) -> dict[str, Any] | None:
         """Load session data from disk."""
-        session_file = self.sessions_dir / f"{session_id}.json"
-        if not session_file.is_file():
-            # Check prefix match
-            for p in self.sessions_dir.glob("*.json"):
-                if p.stem == "index":
-                    continue
-                if p.stem.startswith(session_id):
-                    session_file = p
-                    break
-        if not session_file.is_file():
+        resolved_id = self.resolve_session_id(session_id)
+        if resolved_id is None:
             return None
         try:
-            data = json.loads(session_file.read_text(encoding="utf-8"))
+            data = json.loads(self._session_path(resolved_id).read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else None
         except Exception:
             return None
@@ -300,13 +320,29 @@ class SessionStore:
         else:
             state.pending_plan = None
 
-        # Restore stage buffers
+        # Restore stage buffers. Clear every buffer first so restoring into a live state
+        # cannot leave stale turns for stages absent from the saved session.
         stage_buffers_data = data.get("stage_buffers") or {}
         for stg in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+            buf = state.stage_buffers[stg]
+            buf.thoughts.clear()
+            buf.tool_events.clear()
+            buf.chat_history.clear()
+            buf.final_output = ""
+            buf.stage_tokens = 0
+            buf.stage_input_tokens = 0
+            buf.stage_output_tokens = 0
+            buf.scroll_line = 0
+            buf.scroll_offset = 0
+            buf.total_rendered_lines = 0
+            buf.status = "idle"
+            buf.is_working = False
+            buf.live_headline = "Thinking..."
+            buf.live_subline = ""
+
             s_data = stage_buffers_data.get(stg.value)
             if not isinstance(s_data, dict):
                 continue
-            buf = state.stage_buffers[stg]
             buf.thoughts = list(s_data.get("thoughts", []))
             buf.tool_events = list(s_data.get("tool_events", []))
             buf.chat_history = [

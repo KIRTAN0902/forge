@@ -936,6 +936,11 @@ class ForgeCycleController:
             suffix = f" ({count} files)" if count is not None else ""
             return f"[FILE] Deleted {path}{suffix}"
 
+        if tool == "create_directory":
+            path = str(data.get("path") or "directory")
+            verb = "Created" if data.get("created") else "Already exists"
+            return f"[DIR] {verb} {path}"
+
         if tool in {"run_tests", "run_command"}:
             command = str(data.get("command") or tool)
             exit_code = data.get("exit_code")
@@ -1390,6 +1395,11 @@ class ForgeCycleController:
             else:
                 client = self._llm_client()
                 messages = [{"role": "user", "content": instruction}]
+                session_kwargs = (
+                    {"session_id": self.session_id}
+                    if "session_id" in inspect.signature(client.stream_chat).parameters
+                    else {}
+                )
                 try:
                     response = await client.stream_chat(
                         binding,
@@ -1397,6 +1407,7 @@ class ForgeCycleController:
                         on_token=_on_token,
                         on_thinking=on_thinking,
                         stage=stage.value.lower(),
+                        **session_kwargs,
                     )
                     reply = (response.content or "").strip()
                     usage = (
@@ -1761,6 +1772,11 @@ class ForgeCycleController:
 
         self._begin_stage_activity(stage, "streaming live model...")
         self.state.start_stream(stage, self._speaker(stage))
+        session_kwargs = (
+            {"session_id": self.session_id}
+            if "session_id" in inspect.signature(client.stream_chat).parameters
+            else {}
+        )
         try:
             response = await client.stream_chat(
                 binding,
@@ -1768,6 +1784,7 @@ class ForgeCycleController:
                 on_token=_on_token,
                 on_thinking=self._thinking_handler(stage),
                 stage=stage.value.lower(),
+                **session_kwargs,
             )
         except Exception as exc:  # pragma: no cover - network dependent
             reply = model_diagnostic(f"Live model call failed ({binding.spec_string}): {exc}")
@@ -2291,7 +2308,21 @@ class ForgeCycleController:
         if self.usage_viewer is not None and not argument.strip():
             await self.usage_viewer()
             return "Opened API Usage & Telemetry Dashboard."
-        return self._emit_command_output("/usage", self.render_usage_report())
+        window = argument.strip().lower() or "session"
+        if window not in {"all", "today", "session"}:
+            return self._emit_command_output(
+                "/usage",
+                "Usage window must be one of: all, today, session.",
+                status="failed",
+            )
+        from forge.config.usage_tracker import get_usage_tracker
+
+        ledger = get_usage_tracker().render_dashboard_text(
+            session_id=self.session_id, time_window=window
+        )
+        return self._emit_command_output(
+            "/usage", f"{self.render_usage_report()}\n\n{ledger}"
+        )
 
     async def _handle_resume_command(self, argument: str = "") -> str:
         """Resume conversation from global ~/.forge/sessions/ store (``/resume``)."""
@@ -2324,16 +2355,24 @@ class ForgeCycleController:
 
         ok = store.restore_session(arg, self.state)
         if ok:
-            self.session_id = arg
+            resolved_id = store.resolve_session_id(arg) or arg
+            self.session_id = resolved_id
             for stage in (ForgeStage.ANVIL, ForgeStage.HAMMER, ForgeStage.TEMPER):
+                transcript = self.state.stage_buffers[stage].chat_history
                 self.conversation_history[stage] = [
                     {
                         "role": "user" if speaker.strip().lower() in {"you", "user"} else "assistant",
                         "content": message,
                     }
-                    for speaker, message in self.state.stage_buffers[stage].chat_history
+                    for speaker, message in transcript
                 ]
-            text = f"[OK] Restored session [{arg}] into live Forge workspace."
+                self._history[stage] = [
+                    Message.user(message)
+                    if speaker.strip().lower() in {"you", "user"}
+                    else Message.assistant(message)
+                    for speaker, message in transcript
+                ]
+            text = f"[OK] Restored session [{resolved_id}] into live Forge workspace."
             return self._emit_command_output("/resume", text)
         return self._emit_command_output(
             "/resume", f"Session [{arg}] not found in ~/.forge/sessions/.", status="failed"

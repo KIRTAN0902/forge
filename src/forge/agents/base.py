@@ -41,6 +41,7 @@ class AgentLoopOutcome:
     messages: list[Message] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     tool_names: list[str] = field(default_factory=list)
+    limit_reached: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -56,6 +57,7 @@ class AgentChatTurn:
     messages: list[Message] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     tool_names: list[str] = field(default_factory=list)
+    limit_reached: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -189,7 +191,11 @@ class BaseAgent:
             conversation.extend(ToolRuntime.to_messages(response.tool_calls, results))
             outcome.messages = conversation
         else:
-            outcome.final_text = conversation[-1].text or "Reached maximum step limit."
+            outcome.limit_reached = True
+            outcome.final_text = (
+                f"Stopped at the {max_steps}-step tool limit before the agent concluded. "
+                "Review the tool evidence above and continue with a narrower instruction."
+            )
 
         return outcome
 
@@ -234,6 +240,7 @@ class BaseAgent:
         conversation.append(Message.user(user_message))
 
         allowed = allowed_tools if allowed_tools is not None else ROLE_TOOLSETS.get(self.role, ())
+        limit_reached = False
         if self.runtime is not None and allowed:
             active_allowed = [t for t in allowed if t in self.runtime.tools]
             outcome = await self._run_tool_loop(
@@ -249,6 +256,7 @@ class BaseAgent:
             updated_messages = outcome.messages
             usage = outcome.usage
             tool_names = outcome.tool_names
+            limit_reached = outcome.limit_reached
         else:
             resp = await self._generate(conversation, (), on_token, on_thinking)
             raw_text = resp.text
@@ -261,6 +269,7 @@ class BaseAgent:
             messages=updated_messages,
             usage=usage,
             tool_names=tool_names,
+            limit_reached=limit_reached,
         )
 
 

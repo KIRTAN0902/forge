@@ -562,3 +562,19 @@ def test_bottom_divider_scroll_indicator() -> None:
     divider_up = "".join(t for _, t in frags)
     assert "SCROLLED UP (+12 lines)" in divider_up
     assert any(style == "class:scroll_indicator_up" for style, _ in frags)
+
+def test_header_and_sidebar_use_flat_professional_layout() -> None:
+    state = ForgeTUIState()
+    state.set_active_stage(ForgeStage.TEMPER)
+    app = ForgeSplitPaneApp(state=state)
+
+    header = "".join(text for _, text, *_ in app._render_header())
+    sidebar = render_sidebar_plain_text(state)
+
+    assert header.count("\n") == 1
+    assert "FORGE // AUTONOMOUS ENGINEERING HARNESS" in header
+    assert "worker temper" in header
+    assert "████" not in header
+    assert "┏" not in sidebar and "┗" not in sidebar
+    assert "│ ● Temper" in sidebar
+    assert "<--" in sidebar

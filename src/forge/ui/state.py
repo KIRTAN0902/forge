@@ -227,6 +227,7 @@ _SEARCH_TOOLS = frozenset(
 _WRITE_TOOLS = frozenset(
     {"write_file", "edit_file", "quick_edit", "apply_patch", "patch", "write", "edit"}
 )
+_MKDIR_TOOLS = frozenset({"create_directory", "mkdir", "make_directory"})
 _SHELL_TOOLS = frozenset(
     {"run_shell", "run_command", "run_tests", "shell", "bash", "execute", "cmd"}
 )
@@ -322,6 +323,8 @@ def format_transient_action(tool_name: str, args_or_thought: object = "") -> str
         return f"searching codebase for '{arg or 'symbols'}'..."
     if low in _WRITE_TOOLS:
         return f"applying changes to {arg or 'file'}..."
+    if low in _MKDIR_TOOLS:
+        return f"creating directory {arg or '.'}..."
     if low in _SHELL_TOOLS:
         return f"running command `{arg or name or 'command'}`..."
     if low in _AST_TOOLS:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from forge.config.settings import default_config_dir
+from forge.core.atomic import atomic_write_text
 
 # Pricing in USD per 1,000,000 tokens: (input_price_per_million, output_price_per_million)
 PRICING_TABLE: dict[str, tuple[float, float]] = {
@@ -166,7 +167,7 @@ class UsageTracker:
         try:
             self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps([e.to_dict() for e in self._entries], indent=2)
-            self.ledger_path.write_text(payload, encoding="utf-8")
+            atomic_write_text(self.ledger_path, payload)
         except Exception:
             pass
 
@@ -212,16 +213,17 @@ class UsageTracker:
         session_id: str | None = None,
         time_window: str = "all",
     ) -> list[UsageEntry]:
-        """Filter entries by session or time window (all | today | session)."""
+        """Filter entries by session and optional time window (all | today | session)."""
         filtered = list(self._entries)
-        if session_id and time_window == "session":
+        if session_id:
             filtered = [e for e in filtered if e.session_id == session_id]
-        elif time_window == "today":
+        if time_window == "today":
             today_str = datetime.now(UTC).strftime("%Y-%m-%d")
             filtered = [e for e in filtered if e.timestamp.startswith(today_str)]
-        elif session_id and not filtered and time_window == "all":
-            # Return all entries
-            pass
+        elif time_window not in {"all", "session"}:
+            raise ValueError(
+                f"unknown usage time window {time_window!r}; use 'all', 'today', or 'session'"
+            )
         return filtered
 
     def aggregate_by_model(

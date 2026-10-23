@@ -40,6 +40,10 @@ def test_transient_thinking_and_tool_line_overwrites_and_disappears() -> None:
         format_transient_action("symbol_search", {"query": "ForgeTUIState"})
         == "searching codebase for 'ForgeTUIState'..."
     )
+    assert (
+        format_transient_action("create_directory", {"path": "src/generated"})
+        == "creating directory src/generated..."
+    )
 
     state.set_live_activity(
         ForgeStage.ANVIL, "Thinking...", format_transient_action("read_file", {"path": "a.py"})
