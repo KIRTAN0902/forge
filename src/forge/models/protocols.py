@@ -2,7 +2,9 @@
 
 * **Tool calling**: tools are described in the system prompt and the model emits
   ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` blocks. This is the Hermes
-  format many open models (Qwen, Hermes, some Llama fine-tunes) were trained on.
+  format many open models (Qwen, Hermes, some Llama fine-tunes) were trained on. Qwen and
+  Nemotron templates that use ``<function=...><parameter=...>`` XML inside the same
+  ``<tool_call>`` wrapper are accepted too.
 * **Structured output**: the JSON schema goes in the prompt; the reply is extracted
   leniently (code fences, surrounding prose) and validated, with repair round-trips.
 * **Inline reasoning**: ``<think>...</think>`` blocks some models emit in the content are
@@ -34,6 +36,16 @@ def split_reasoning(text: str) -> tuple[str, str | None]:
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+_FUNCTION_XML_RE = re.compile(
+    r"<function\s*(?:=\s*|\bname\s*=\s*)[\"']?([A-Za-z0-9_.-]+)[\"']?\s*>"
+    r"(.*?)(?:</function>|$)",
+    re.DOTALL,
+)
+_PARAMETER_XML_RE = re.compile(
+    r"<parameter\s*(?:=\s*|\bname\s*=\s*)[\"']?([A-Za-z0-9_.-]+)[\"']?\s*>"
+    r"(.*?)(?:</parameter>|(?=<parameter\s)|$)",
+    re.DOTALL,
+)
 
 
 def render_tool_instructions(tools: list[ToolDefinition], tool_choice: str | None) -> str:
@@ -75,9 +87,14 @@ def parse_text_tool_calls(
     loop can tell the model, instead of silently dropping its intent.
     """
     known = {t.name for t in tools}
+    schemas = {t.name: t for t in tools}
     calls: list[ToolCall] = []
     for index, match in enumerate(_TOOL_CALL_RE.finditer(text)):
-        calls.append(_build_call(match.group(1), known, f"{id_prefix}_{index}"))
+        calls.append(
+            _build_call(
+                match.group(1), known, f"{id_prefix}_{index}", schemas=schemas
+            )
+        )
     remaining = _TOOL_CALL_RE.sub("", text).strip()
 
     if not calls:
@@ -87,7 +104,11 @@ def parse_text_tool_calls(
         # ordinary JSON in an answer is never mistaken for a call.
         spans = _known_call_objects(text, known)
         for index, (start, end) in enumerate(spans):
-            calls.append(_build_call(text[start:end], known, f"{id_prefix}_{index}"))
+            calls.append(
+                _build_call(
+                    text[start:end], known, f"{id_prefix}_{index}", schemas=schemas
+                )
+            )
         if spans:
             pieces, cursor = [], 0
             for start, end in spans:
@@ -117,8 +138,19 @@ def _known_call_objects(text: str, known: set[str]) -> list[tuple[int, int]]:
     return spans
 
 
-def _build_call(body: str, known: set[str], call_id: str) -> ToolCall:
-    body = _strip_fence(body.strip())
+def _build_call(
+    body: str,
+    known: set[str],
+    call_id: str,
+    *,
+    schemas: dict[str, ToolDefinition] | None = None,
+) -> ToolCall:
+    deindented = body.strip()
+    if deindented.startswith("<function"):
+        xml_call = _parse_xml_call(deindented, known, call_id, schemas or {})
+        if xml_call is not None:
+            return xml_call
+    body = _strip_fence(deindented)
     try:
         obj = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -144,6 +176,50 @@ def _build_call(body: str, known: set[str], call_id: str) -> ToolCall:
         raw_arguments=json.dumps(arguments),
         parse_error=error,
     )
+
+
+def _parse_xml_call(
+    body: str,
+    known: set[str],
+    call_id: str,
+    schemas: dict[str, ToolDefinition],
+) -> ToolCall | None:
+    """Parse the Qwen/Nemotron XML form:
+
+    ``<function=write_file><parameter=path>...</parameter></function>``.
+    """
+    match = _FUNCTION_XML_RE.search(body)
+    if match is None:
+        return None
+    name = match.group(1)
+    schema = schemas.get(name)
+    properties = schema.parameters.get("properties", {}) if schema is not None else {}
+    arguments: dict[str, Any] = {}
+    for parameter in _PARAMETER_XML_RE.finditer(match.group(2)):
+        key = parameter.group(1)
+        field_schema = properties.get(key) if isinstance(properties, dict) else None
+        arguments[key] = _decode_xml_value(parameter.group(2), field_schema)
+    error = None if name in known else f"unknown tool {name!r}"
+    return ToolCall(
+        id=call_id,
+        name=name,
+        arguments=arguments,
+        raw_arguments=json.dumps(arguments),
+        parse_error=error,
+    )
+
+
+def _decode_xml_value(raw: str, schema: Any) -> Any:
+    """Decode one XML parameter using the tool schema, preserving string content."""
+    if raw.startswith("\r\n"):
+        raw = raw[2:]
+    elif raw.startswith("\n"):
+        raw = raw[1:]
+    kind = schema.get("type") if isinstance(schema, dict) else None
+    if kind in {"object", "array", "integer", "number", "boolean"}:
+        with contextlib.suppress(json.JSONDecodeError):
+            return json.loads(raw.strip())
+    return raw
 
 
 def render_tool_call(call: ToolCall) -> str:

@@ -18,6 +18,18 @@ READ = ToolDefinition(
     parameters={"type": "object", "properties": {"path": {"type": "string"}}},
 )
 TOOLS = [READ, ToolDefinition(name="list_dir", description="List a directory")]
+WRITE = ToolDefinition(
+    name="write_file",
+    description="Write a file",
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "create_parents": {"type": "boolean"},
+        },
+    },
+)
 
 
 class TestSplitReasoning:
@@ -83,6 +95,51 @@ class TestTextToolCalls:
             TOOLS,
         )
         assert calls[0].arguments == {"path": "x"}
+
+    def test_qwen_nemotron_xml_tool_call(self) -> None:
+        text = (
+            "Writing the app now.\n"
+            "<tool_call>\n"
+            "<function=write_file>\n"
+            "<parameter=path>src/App.tsx</parameter>\n"
+            "<parameter=content>\n"
+            "export default function App() {\n"
+            "  return <h1>KIRTAN SHAH</h1>;\n"
+            "}\n"
+            "</parameter>\n"
+            "<parameter=create_parents>true</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        remaining, calls = parse_text_tool_calls(text, [*TOOLS, WRITE])
+
+        assert remaining == "Writing the app now."
+        assert len(calls) == 1
+        assert calls[0].name == "write_file"
+        assert calls[0].parse_error is None
+        assert calls[0].arguments["path"] == "src/App.tsx"
+        assert calls[0].arguments["create_parents"] is True
+        assert "export default function App()" in calls[0].arguments["content"]
+        assert "<h1>KIRTAN SHAH</h1>" in calls[0].arguments["content"]
+
+    def test_xml_tool_call_unknown_tool_is_reported(self) -> None:
+        _, calls = parse_text_tool_calls(
+            "<tool_call><function=rm_rf><parameter=path>/</parameter></function></tool_call>",
+            TOOLS,
+        )
+        assert calls[0].name == "rm_rf"
+        assert calls[0].arguments == {"path": "/"}
+        assert calls[0].parse_error is not None
+        assert "unknown tool" in calls[0].parse_error
+
+    def test_xml_tool_call_with_unclosed_tags(self) -> None:
+        _, calls = parse_text_tool_calls(
+            "<tool_call><function=read_file><parameter=path>a.py</parameter>",
+            TOOLS,
+        )
+        assert calls[0].name == "read_file"
+        assert calls[0].arguments == {"path": "a.py"}
+        assert calls[0].parse_error is None
 
     def test_bare_json_fallback_only_for_known_tools(self) -> None:
         _, calls = parse_text_tool_calls(

@@ -31,6 +31,14 @@ TOOL = ToolDefinition(
     description="Read a file",
     parameters={"type": "object", "properties": {"path": {"type": "string"}}},
 )
+WRITE_TOOL = ToolDefinition(
+    name="write_file",
+    description="Write a file",
+    parameters={
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+    },
+)
 
 
 class Verdict(BaseModel):
@@ -132,6 +140,28 @@ class TestToolCalling:
         response = await adapter(provider, caps=NATIVE).generate([Message.user("x")], tools=[TOOL])
         assert response.tool_calls[0].arguments == {"path": "z"}
         assert response.text == ""
+
+    async def test_native_salvages_xml_tool_calls(self) -> None:
+        provider = ScriptedProvider(
+            [
+                "<tool_call>\n"
+                "<function=write_file>\n"
+                "<parameter=path>src/App.tsx</parameter>\n"
+                "<parameter=content>export default function App() {}</parameter>\n"
+                "</function>\n"
+                "</tool_call>"
+            ]
+        )
+        response = await adapter(provider, caps=NATIVE).generate(
+            [Message.user("write it")], tools=[WRITE_TOOL]
+        )
+        assert response.text == ""
+        assert response.finish_reason == FinishReason.TOOL_CALLS
+        assert response.tool_calls[0].name == "write_file"
+        assert response.tool_calls[0].arguments == {
+            "path": "src/App.tsx",
+            "content": "export default function App() {}",
+        }
 
     async def test_tool_choice_none_sends_no_tools(self) -> None:
         provider = ScriptedProvider(["answer"])

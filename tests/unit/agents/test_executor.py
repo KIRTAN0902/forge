@@ -112,6 +112,32 @@ class TestExecutorAgent:
         assert EventType.TASK_STARTED in event_types
         assert EventType.TASK_FAILED in event_types
 
+    async def test_executes_qwen_xml_tool_call(
+        self, sample_repo: Path, make_runtime: RuntimeFactory
+    ) -> None:
+        runtime = make_runtime(sample_repo)
+        provider = ScriptedProvider(
+            [
+                "<tool_call>\n"
+                "<function=write_file>\n"
+                "<parameter=path>notes/hello.txt</parameter>\n"
+                "<parameter=content>hello from XML\n</parameter>\n"
+                "</function>\n"
+                "</tool_call>",
+                "Created notes/hello.txt.",
+            ]
+        )
+        executor = ExecutorAgent(adapter=_make_adapter(provider), runtime=runtime)
+
+        result = await executor.execute(
+            Task(id="TASK-XML", description="Create a file using the XML tool protocol")
+        )
+
+        assert result.status == ExecutionStatus.COMPLETED
+        assert (sample_repo / "notes" / "hello.txt").read_text(encoding="utf-8") == (
+            "hello from XML\n"
+        )
+
     async def test_partial_when_exceeding_max_steps(
         self, sample_repo: Path, make_runtime: RuntimeFactory
     ) -> None:
