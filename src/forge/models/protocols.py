@@ -130,11 +130,18 @@ def _known_call_objects(text: str, known: set[str]) -> list[tuple[int, int]]:
             obj = json.loads(text[start : end + 1])
         except json.JSONDecodeError:
             obj = None
-        if isinstance(obj, dict) and obj.get("name") in known and "arguments" in obj:
-            spans.append((start, end + 1))
-            start = text.find("{", end + 1)
-        else:
-            start = text.find("{", start + 1)
+        if isinstance(obj, dict):
+            name = obj.get("name") or obj.get("tool")
+            has_call = name in known and (
+                "arguments" in obj
+                or "parameters" in obj
+                or any(k not in {"name", "tool", "type", "id"} for k in obj)
+            )
+            if has_call:
+                spans.append((start, end + 1))
+                start = text.find("{", end + 1)
+                continue
+        start = text.find("{", start + 1)
     return spans
 
 
@@ -160,7 +167,9 @@ def _build_call(
     if not isinstance(obj, dict):
         return ToolCall(id=call_id, name="", raw_arguments=body, parse_error="expected an object")
     name = str(obj.get("name") or obj.get("tool") or "")
-    arguments = obj.get("arguments", obj.get("parameters", {}))
+    arguments = obj.get("arguments", obj.get("parameters"))
+    if arguments is None and isinstance(obj, dict):
+        arguments = {k: v for k, v in obj.items() if k not in {"name", "tool", "type", "id"}}
     if isinstance(arguments, str):
         with contextlib.suppress(json.JSONDecodeError):
             arguments = json.loads(arguments)

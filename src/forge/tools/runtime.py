@@ -83,6 +83,16 @@ class ToolRuntime:
         allowed_set = set(allowed) if allowed is not None else None
 
         tool = self.tools.get(call.name)
+        if tool is None:
+            if call.name == "list_files" and "find_files" in self.tools:
+                tool = self.tools["find_files"]
+                args_copy = dict(call.arguments)
+                if "pattern" not in args_copy:
+                    args_copy["pattern"] = "*"
+                call = ToolCall(id=call.id, name="find_files", arguments=args_copy)
+            elif call.name == "search_files" and "search" in self.tools:
+                tool = self.tools["search"]
+                call = ToolCall(id=call.id, name="search", arguments=call.arguments)
         if tool is None or (allowed_set is not None and call.name not in allowed_set):
             available = sorted(allowed_set if allowed_set is not None else self.tools)
             return self._fail(

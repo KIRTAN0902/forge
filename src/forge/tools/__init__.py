@@ -14,6 +14,7 @@ from forge.tools.defaults import (
     default_tools,
 )
 from forge.tools.environment import ToolEnvironment
+from forge.tools.filesystem import ListFiles, SearchFiles
 from forge.tools.git import CheckpointInfo, CheckpointManager, GitRepo, GitStatus
 from forge.tools.human_question import AskUserQuestion
 from forge.tools.runtime import ToolRuntime
@@ -30,6 +31,8 @@ __all__ = [
     "FetchWebPage",
     "GitRepo",
     "GitStatus",
+    "ListFiles",
+    "SearchFiles",
     "ShellRunner",
     "ShellSpec",
     "Tool",

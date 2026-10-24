@@ -18,6 +18,7 @@ from forge.models.capabilities import ModelCapabilities
 from forge.models.profile import BUILTIN_PROVIDERS, ModelProfile, ProviderConfig, RoleBinding
 from forge.models.provider import ModelProvider, ProviderError
 from forge.models.providers.openai_compat import OpenAICompatibleProvider
+from forge.models.providers.unified import UnifiedModelProvider
 from forge.models.usage import UsageTracker
 
 log = get_logger("models.registry")
@@ -27,6 +28,10 @@ ProviderFactory = Callable[[str, ProviderConfig, str | None], ModelProvider]
 
 def _openai_compatible(name: str, config: ProviderConfig, api_key: str | None) -> ModelProvider:
     return OpenAICompatibleProvider(config, name=name, api_key=api_key)
+
+
+def _unified(name: str, config: ProviderConfig, api_key: str | None) -> ModelProvider:
+    return UnifiedModelProvider(name=name, config=config, api_key=api_key)
 
 
 class ModelRegistry:
@@ -51,7 +56,10 @@ class ModelRegistry:
         self.tracker = tracker or UsageTracker()
         self._custom_env = env is not None
         self._env = os.environ if env is None else env
-        self._factories: dict[str, ProviderFactory] = {"openai_compatible": _openai_compatible}
+        self._factories: dict[str, ProviderFactory] = {
+            "openai_compatible": _openai_compatible,
+            "unified": _unified,
+        }
         self._providers: dict[str, ModelProvider] = {}
         self._capabilities: dict[str, ModelCapabilities] = {}
 
@@ -106,10 +114,13 @@ class ModelRegistry:
             return self._providers[name]
         config = self.provider_configs.get(name)
         if config is None:
-            raise ConfigError(f"unknown provider {name!r}")
-        factory = self._factories.get(config.type)
-        if factory is None:
-            raise ConfigError(f"no provider implementation for type {config.type!r}")
+            # Check if name is in BUILTIN_PROVIDERS or matches a provider type
+            if name.lower() in BUILTIN_PROVIDERS:
+                config = BUILTIN_PROVIDERS[name.lower()]
+            else:
+                config = ProviderConfig(type="unified")
+            self.provider_configs[name] = config
+        factory = self._factories.get(config.type, _unified)
         api_key = config.api_key
         if not api_key and config.api_key_env:
             api_key = self._env.get(config.api_key_env)
@@ -117,7 +128,7 @@ class ModelRegistry:
             try:
                 from forge.config.settings import ForgeConfigManager, ProviderName
 
-                pname = ProviderName(name)
+                pname = ProviderName(name.lower())
                 api_key = ForgeConfigManager().api_key_for(pname)
             except Exception:
                 pass
@@ -126,7 +137,7 @@ class ModelRegistry:
             if clean.startswith("vapi-"):
                 clean = "n" + clean
             api_key = clean
-        if not api_key and config.api_key_env:
+        if not api_key and config.api_key_env and name.lower() not in {"ollama", "custom"}:
             raise ConfigError(f"provider {name!r} needs an API key in ${config.api_key_env}")
         provider = factory(name, config, api_key)
         self._providers[name] = provider

@@ -909,4 +909,11 @@ class ForgeSplitPaneApp:
 
     def run(self) -> None:
         """Run the full-screen TUI application synchronously."""
-        self.application.run()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            self.application.run()
+            return
+        asyncio.run(self.run_async())

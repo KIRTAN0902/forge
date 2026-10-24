@@ -189,6 +189,8 @@ class WriteFile(Tool[WriteFileInput, WriteFileOutput]):
             if detect_newline(existing) == "\r\n" and "\r\n" not in content:
                 content = content.replace("\n", "\r\n")
         created = await asyncio.to_thread(env.workspace.write_text, args.path, content)
+        if not target.exists():
+            raise ToolError(f"write verification failed: {rel} does not exist on disk after writing")
         return WriteFileOutput(
             path=rel,
             created=created,
@@ -260,6 +262,9 @@ class EditFile(Tool[EditFileInput, EditFileOutput]):
             )
         updated = original.replace(old, new) if args.replace_all else original.replace(old, new, 1)
         await asyncio.to_thread(env.workspace.write_text, args.path, updated, create_dirs=False)
+        verified_text = await asyncio.to_thread(env.workspace.read_text, args.path)
+        if new not in verified_text:
+            raise ToolError(f"edit verification failed for {rel}: expected replacement not found on disk")
         return EditFileOutput(
             path=rel,
             replacements=count if args.replace_all else 1,
@@ -347,6 +352,8 @@ class DeleteFile(Tool[DeleteFileInput, DeleteFileOutput]):
         else:
             count = 1
             await asyncio.to_thread(target.unlink)
+        if target.exists():
+            raise ToolError(f"delete verification failed: {rel} still exists on disk")
         return DeleteFileOutput(path=rel, deleted_files=count)
 
 
@@ -601,3 +608,95 @@ class FindFiles(Tool[FindFilesInput, FindFilesOutput]):
             files=found[: args.max_results],
             truncated=len(found) > args.max_results,
         )
+
+
+# -- list_files ---------------------------------------------------------------------------
+
+
+class ListFilesInput(ToolInput):
+    path: str = Field(default=".", description="Directory path relative to the workspace root.")
+    pattern: str | None = Field(
+        default=None, description="Optional glob filter (e.g. '*.py' or 'src/**')."
+    )
+    recursive: bool = Field(default=True, description="List files recursively.")
+    max_results: int = Field(default=500, ge=1, le=5000, description="Maximum files to return.")
+
+
+class ListFilesOutput(ToolOutput):
+    path: str
+    files: list[str]
+    total_files: int
+    truncated: bool = False
+
+    def render(self) -> str:
+        if not self.files:
+            return f"No files found in {self.path}."
+        header = f"Files in {self.path} ({len(self.files)} of {self.total_files}):"
+        listing = "\n".join(f"  {f}" for f in self.files)
+        more = "\n... [listing truncated]" if self.truncated else ""
+        return f"{header}\n{listing}{more}"
+
+
+class ListFiles(Tool[ListFilesInput, ListFilesOutput]):
+    name = "list_files"
+    description = (
+        "Explore repository contents. Returns file paths relative to the workspace root, "
+        "respecting ignore rules (.gitignore, .git, node_modules, etc.)."
+    )
+    input_model = ListFilesInput
+    output_model = ListFilesOutput
+
+    def assess(self, args: ListFilesInput, env: ToolEnvironment) -> ToolAssessment:
+        return ToolAssessment(RiskLevel.LOW, READ, paths=[env.workspace.relative(args.path)])
+
+    async def run(self, args: ListFilesInput, env: ToolEnvironment) -> ListFilesOutput:
+        base = env.workspace.resolve(args.path)
+        if not base.is_dir():
+            raise ToolError(f"{env.workspace.relative(base)} is not a directory")
+        rel_base = env.workspace.relative(base)
+        all_files = await asyncio.to_thread(env.workspace.files, rel_base)
+        prefix = "" if rel_base == "." else rel_base + "/"
+
+        filtered = all_files
+        if not args.recursive:
+            filtered = [
+                f for f in filtered
+                if "/" not in (f[len(prefix):] if prefix else f)
+            ]
+        if args.pattern:
+            matcher = PathMatcher([args.pattern])
+            filtered = [
+                f for f in filtered
+                if matcher.matches(f[len(prefix):] if prefix else f) or matcher.matches(f)
+            ]
+
+        truncated = len(filtered) > args.max_results
+        selected = filtered[: args.max_results]
+        return ListFilesOutput(
+            path=rel_base,
+            files=selected,
+            total_files=len(filtered),
+            truncated=truncated,
+        )
+
+
+# -- search_files -------------------------------------------------------------------------
+
+
+class SearchFiles(Tool[SearchInput, SearchOutput]):
+    name = "search_files"
+    description = (
+        "Search source code and text files for symbols, strings, and patterns. "
+        "Respects .gitignore rules. Output format is path:line:text."
+    )
+    input_model = SearchInput
+    output_model = SearchOutput
+    timeout_s = 120.0
+
+    def assess(self, args: SearchInput, env: ToolEnvironment) -> ToolAssessment:
+        return ToolAssessment(RiskLevel.LOW, READ)
+
+    async def run(self, args: SearchInput, env: ToolEnvironment) -> SearchOutput:
+        search_tool = Search()
+        return await search_tool.run(args, env)
+

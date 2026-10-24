@@ -278,7 +278,8 @@ class ModelAdapter:
         if not tools or response.tool_calls:
             return response
         text = response.text
-        if "tool_call>" not in text and '"arguments"' not in text:
+        known = {t.name for t in tools}
+        if not ("tool_call" in text or "arguments" in text or any(name in text for name in known)):
             return response
         remaining, calls = parse_text_tool_calls(text, list(tools))
         if not calls:

@@ -110,3 +110,41 @@ async def test_delete_file_requires_recursive_for_directories(
     assert deleted.data is not None
     assert deleted.data["deleted_files"] == 2
     assert not folder.exists()
+
+
+@pytest.mark.asyncio
+async def test_list_files_and_search_files(tmp_path: Path, make_runtime: Any) -> None:
+    runtime = make_runtime(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "alpha.py").write_text("def find_me():\n    return 42\n", encoding="utf-8")
+    (tmp_path / "src" / "beta.txt").write_text("plain text file\n", encoding="utf-8")
+
+    list_res = await runtime.execute(call("list_files", path="src"))
+    assert list_res.ok is True
+    assert list_res.data is not None
+    assert "src/alpha.py" in list_res.data["files"]
+    assert "src/beta.txt" in list_res.data["files"]
+
+    list_glob = await runtime.execute(call("list_files", path="src", pattern="*.py"))
+    assert list_glob.ok is True
+    assert list_glob.data is not None
+    assert list_glob.data["files"] == ["src/alpha.py"]
+
+    search_res = await runtime.execute(call("search_files", pattern="find_me"))
+    assert search_res.ok is True
+    assert search_res.data is not None
+    assert any(m["path"] == "src/alpha.py" for m in search_res.data["matches"])
+
+
+@pytest.mark.asyncio
+async def test_edit_file_verifies_replacement(tmp_path: Path, make_runtime: Any) -> None:
+    runtime = make_runtime(tmp_path)
+    file_path = tmp_path / "hello.py"
+    file_path.write_text("msg = 'hello world'\n", encoding="utf-8")
+
+    res = await runtime.execute(
+        call("edit_file", path="hello.py", old_string="hello world", new_string="hello forge")
+    )
+    assert res.ok is True
+    assert file_path.read_text(encoding="utf-8") == "msg = 'hello forge'\n"
+

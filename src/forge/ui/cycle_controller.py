@@ -39,6 +39,7 @@ from forge.ui.state import (
     CycleMode,
     ForgeStage,
     ForgeTUIState,
+    IntentCategory,
     PendingPlan,
     PendingPlanContract,
     PlanRequirement,
@@ -91,6 +92,7 @@ __all__ = [
     "CycleVerdict",
     "ExecutionMode",
     "ForgeCycleController",
+    "IntentCategory",
     "PendingPlanContract",
     "PlanIntent",
     "PlanTurnIntent",
@@ -800,6 +802,88 @@ class ForgeCycleController:
 
     # -- conversational / direct tool (real agent ReAct loop) ---------------------------
 
+    def _ensure_runtime(self) -> Any:
+        if self.runtime is not None:
+            return self.runtime
+        try:
+            from forge.config import load_config
+            from forge.config.schema import ForgeConfig
+            from forge.tools.defaults import create_tool_runtime
+
+            root = self.root or Path.cwd()
+            try:
+                cfg = load_config(root)
+            except Exception:
+                cfg = ForgeConfig(root=root)
+            self.runtime = create_tool_runtime(cfg, root=root)
+        except Exception as exc:
+            log.warning("Could not auto-create ToolRuntime: %s", exc)
+        return self.runtime
+
+    async def _adapter_for_binding(
+        self, stage: ForgeStage, binding: Any
+    ) -> Any | None:
+        if self.registry is None:
+            from forge.models.registry import ModelRegistry
+
+            self.registry = ModelRegistry()
+
+        role = _STAGE_ROLES.get(stage, "default")
+        provider_name = binding.provider.value if hasattr(binding.provider, "value") else str(binding.provider)
+        model_name = binding.model
+        profile_name = f"{provider_name}/{model_name}"
+
+        if profile_name not in self.registry.profiles:
+            self.registry.add_profile(
+                profile_name,
+                ModelProfile(
+                    provider=provider_name,
+                    model=model_name,
+                    detect_capabilities=False,
+                ),
+            )
+        self.registry.bind_role(role, profile_name)
+        try:
+            return await self.registry.adapter(role)
+        except Exception as exc:
+            log.warning("Could not build adapter for %s: %s", profile_name, exc)
+            return None
+
+    async def _ensure_agent_for(self, stage: ForgeStage) -> Any | None:
+        existing = self.agents.get(stage)
+        if existing is not None:
+            return existing
+
+        binding = self._config_binding(stage)
+        if binding is None:
+            return None
+
+        runtime = self._ensure_runtime()
+        if runtime is None:
+            return None
+
+        adapter = await self._adapter_for_binding(stage, binding)
+        if adapter is None:
+            return None
+
+        if stage == ForgeStage.HAMMER:
+            from forge.agents.executor import ExecutorAgent
+
+            agent = ExecutorAgent(adapter, runtime=runtime)
+        elif stage == ForgeStage.ANVIL:
+            from forge.agents.orchestrator import OrchestratorAgent
+
+            agent = OrchestratorAgent(adapter, runtime=runtime)
+        elif stage == ForgeStage.TEMPER:
+            from forge.agents.qa import QAAgent
+
+            agent = QAAgent(adapter, runtime=runtime)
+        else:
+            return None
+
+        self.agents[stage] = agent
+        return agent
+
     def _default_direct_stage(self) -> ForgeStage:
         if ForgeStage.HAMMER in self.agents:
             return ForgeStage.HAMMER
@@ -1226,7 +1310,22 @@ class ForgeCycleController:
             self.auto_save_session()
             return notice
 
-        if intent is PlanTurnIntent.QUESTION_OR_CHAT:
+        if intent is PlanTurnIntent.REJECTION:
+            self.state.append_thought(
+                ForgeStage.ANVIL,
+                f"Execution not authorized: {evaluation.explanation or 'User declined to proceed.'}",
+            )
+            notice = f"Implementation not authorized: {evaluation.explanation or 'Declined by user.'} The plan remains pending."
+            self.state.set_stage_output(
+                ForgeStage.ANVIL, self._render_pending_plan(plan), status="passed"
+            )
+            return notice
+
+        if intent in {
+            PlanTurnIntent.QUESTION_OR_CHAT,
+            PlanTurnIntent.CLARIFICATION,
+            PlanTurnIntent.INFORMATIONAL,
+        }:
             answer = (evaluation.conversational_reply or "").strip()
             if not answer:
                 answer = await self._run_agent_turn(
@@ -1248,9 +1347,25 @@ class ForgeCycleController:
             revised = self._apply_plan_evaluation(plan, evaluation)
             if revised is None:
                 revised = await self._revise_plan(plan, response)
-            if intent is PlanTurnIntent.MODIFY_AND_WAIT:
+            if evaluation.scope_restrictions:
+                restriction_note = "\n\n[Scope Restrictions]: " + ", ".join(evaluation.scope_restrictions)
+                if restriction_note not in revised.plan_text:
+                    revised.plan_text += restriction_note
+            if intent is PlanTurnIntent.MODIFY_AND_WAIT or not evaluation.execution_authorized:
                 return self._render_pending_plan(revised)
             return await self._run_autonomous_cycle(revised)
+
+        if evaluation.scope_restrictions:
+            restriction_note = "\n\n[Scope Restrictions]: " + ", ".join(evaluation.scope_restrictions)
+            if restriction_note not in plan.plan_text:
+                plan.plan_text += restriction_note
+
+        if not evaluation.execution_authorized:
+            notice = f"Execution awaiting explicit authorization. {evaluation.explanation}".strip()
+            self.state.set_stage_output(
+                ForgeStage.ANVIL, self._render_pending_plan(plan), status="passed"
+            )
+            return notice
 
         return await self._run_autonomous_cycle(plan)
 
@@ -2467,6 +2582,20 @@ class ForgeCycleController:
                 adapter = await self.registry.adapter(role, events=events)
                 if agent is not None:
                     agent.adapter = adapter
+                else:
+                    runtime = self._ensure_runtime()
+                    if stage == ForgeStage.HAMMER:
+                        from forge.agents.executor import ExecutorAgent
+
+                        self.agents[stage] = ExecutorAgent(adapter, runtime=runtime)
+                    elif stage == ForgeStage.ANVIL:
+                        from forge.agents.orchestrator import OrchestratorAgent
+
+                        self.agents[stage] = OrchestratorAgent(adapter, runtime=runtime)
+                    elif stage == ForgeStage.TEMPER:
+                        from forge.agents.qa import QAAgent
+
+                        self.agents[stage] = QAAgent(adapter, runtime=runtime)
                 lines.append(f"  • {stage.value}: {adapter.describe()}")
             except Exception as exc:
                 stage_binding = self._config_binding(stage)
@@ -2581,6 +2710,20 @@ class ForgeCycleController:
             adapter = await self.registry.adapter(role, events=events)
             if agent is not None:
                 agent.adapter = adapter
+            else:
+                runtime = self._ensure_runtime()
+                if stage == ForgeStage.HAMMER:
+                    from forge.agents.executor import ExecutorAgent
+
+                    self.agents[stage] = ExecutorAgent(adapter, runtime=runtime)
+                elif stage == ForgeStage.ANVIL:
+                    from forge.agents.orchestrator import OrchestratorAgent
+
+                    self.agents[stage] = OrchestratorAgent(adapter, runtime=runtime)
+                elif stage == ForgeStage.TEMPER:
+                    from forge.agents.qa import QAAgent
+
+                    self.agents[stage] = QAAgent(adapter, runtime=runtime)
             return f"[OK] {stage.value} now uses {adapter.describe()}"
         except Exception:
             return f"[OK] {stage.value} bound to {resolved_provider}/{model} (unified client active)"

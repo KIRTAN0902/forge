@@ -44,6 +44,17 @@ class UserQuestion:
     future: asyncio.Future[str] | None = None
 
 
+class IntentCategory(StrEnum):
+    """Broad categories for intent-aware decision making."""
+
+    APPROVAL = "approval"
+    REVISION = "revision"
+    CLARIFICATION = "clarification"
+    REJECTION = "rejection"
+    CANCELLATION = "cancellation"
+    INFORMATIONAL = "informational"
+
+
 class PlanTurnIntent(StrEnum):
     """Semantic meaning of a developer's reply to a pending plan."""
 
@@ -52,6 +63,9 @@ class PlanTurnIntent(StrEnum):
     MODIFY_AND_WAIT = "MODIFY_AND_WAIT"
     QUESTION_OR_CHAT = "QUESTION_OR_CHAT"
     CANCEL_PLAN = "CANCEL_PLAN"
+    REJECTION = "REJECTION"
+    CLARIFICATION = "CLARIFICATION"
+    INFORMATIONAL = "INFORMATIONAL"
 
 
 class RequirementItem(BaseModel):
@@ -76,11 +90,61 @@ class AnvilPlanEvaluation(BaseModel):
     """Anvil's semantic adjudication of one reply to a pending plan."""
 
     intent: PlanTurnIntent
+    category: IntentCategory = IntentCategory.APPROVAL
+    approval_granted: bool = False
+    plan_must_change: bool = False
+    requested_modifications: list[str] = Field(default_factory=list)
+    scope_restrictions: list[str] = Field(default_factory=list)
+    outstanding_questions: list[str] = Field(default_factory=list)
+    execution_authorized: bool = False
+    clarification_necessary: bool = False
+    confidence: float = 1.0
+    explanation: str = ""
     reasoning_summary: str = ""
     updated_plan_markdown: str | None = None
     updated_target_files: list[str] | None = None
     updated_requirements: list[RequirementItem] | None = None
     conversational_reply: str | None = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.explanation and self.reasoning_summary:
+            self.explanation = self.reasoning_summary
+        elif not self.reasoning_summary and self.explanation:
+            self.reasoning_summary = self.explanation
+
+        # Infer defaults based on intent if not explicitly set
+        if self.intent in {PlanTurnIntent.APPROVE_AS_IS}:
+            self.category = IntentCategory.APPROVAL
+            self.approval_granted = True
+            self.execution_authorized = True
+        elif self.intent in {PlanTurnIntent.MODIFY_AND_PROCEED}:
+            self.category = IntentCategory.REVISION
+            self.approval_granted = True
+            self.plan_must_change = True
+            self.execution_authorized = True
+        elif self.intent in {PlanTurnIntent.MODIFY_AND_WAIT}:
+            self.category = IntentCategory.REVISION
+            self.approval_granted = False
+            self.plan_must_change = True
+            self.execution_authorized = False
+        elif self.intent in {PlanTurnIntent.CANCEL_PLAN}:
+            self.category = IntentCategory.CANCELLATION
+            self.approval_granted = False
+            self.execution_authorized = False
+        elif self.intent in {PlanTurnIntent.REJECTION}:
+            self.category = IntentCategory.REJECTION
+            self.approval_granted = False
+            self.execution_authorized = False
+        elif self.intent in {PlanTurnIntent.CLARIFICATION, PlanTurnIntent.QUESTION_OR_CHAT}:
+            self.category = IntentCategory.CLARIFICATION
+            self.approval_granted = False
+            self.execution_authorized = False
+            self.clarification_necessary = True
+        elif self.intent in {PlanTurnIntent.INFORMATIONAL}:
+            self.category = IntentCategory.INFORMATIONAL
+            self.approval_granted = False
+            self.execution_authorized = False
+
 
 
 @dataclass

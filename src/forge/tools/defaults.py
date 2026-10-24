@@ -22,8 +22,10 @@ from forge.tools.filesystem import (
     EditFile,
     FindFiles,
     ListDirectory,
+    ListFiles,
     ReadFile,
     Search,
+    SearchFiles,
     WriteFile,
 )
 from forge.tools.git_tools import (
